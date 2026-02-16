@@ -18,7 +18,7 @@ cd /d "%~dp0"
 
 :: Настройка адреса сервера
 :: Замените 127.0.0.1 на IP вашего VPS
-if "%OMEGA_SERVER%"=="" set OMEGA_SERVER=127.0.0.1:51820
+if "%OMEGA_SERVER%"=="" set OMEGA_SERVER=72.56.88.224:443
 
 echo [INFO] Запуск Omega VPN Клиента...
 echo [INFO] Сервер: %OMEGA_SERVER%

@@ -10,7 +10,7 @@ User=root
 WorkingDirectory=/opt/omega
 ExecStart=/opt/omega/omega-server
 Environment=RUST_LOG=info
-# Environment=OMEGA_BIND=0.0.0.0:51820
+Environment=OMEGA_BIND=0.0.0.0:443
 Restart=always
 RestartSec=3
 LimitNOFILE=65536

@@ -60,9 +60,14 @@
 4.  Запустите скрипт `start_client.bat` (он сам скачает драйвер, если его нет).
     *   **Важно**: Отредактируйте `start_client.bat` и замените `127.0.0.1:51820` на реальный IP вашего сервера!
 
-### Развертывание на VPS
-
-Подробная инструкция по установке на сервер находится в файле [DEPLOY.md](DEPLOY.md).
+## Deployment (Quick Start)
+ 
+ 1. **Deploy Server**:
+    Follow [DEPLOY.md](DEPLOY.md) or use this one-liner on Ubuntu:
+    ```bash
+    curl -sSL https://raw.githubusercontent.com/your-repo/omega-vpn/main/deploy/setup_nat.sh | sudo bash
+    ```
+    *(Note: You still need to build/run the binary first)*
 
 ## Статус разработки
 

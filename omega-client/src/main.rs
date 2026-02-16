@@ -81,9 +81,52 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
     
     tracing::info!("Configuring Windows routing tables...");
 
-    // 1. Get current default gateway (Lowest Metric)
+    // 1. Find Wintun Interface Info (Index AND Alias)
+    let mut if_index = String::new();
+    let mut if_alias = String::new();
+    
+    for _ in 0..15 { // Retry loop
+        // Get Index
+        let output_idx = Command::new("powershell")
+            .args(&["-Command", "Get-NetIPAddress -IPAddress '10.7.0.2' | Select-Object -ExpandProperty InterfaceIndex"])
+            .output();
+        // Get Alias (Name) - needed for netsh
+        let output_alias = Command::new("powershell")
+            .args(&["-Command", "Get-NetIPAddress -IPAddress '10.7.0.2' | Select-Object -ExpandProperty InterfaceAlias"])
+            .output();
+
+        if let (Ok(o_idx), Ok(o_alias)) = (output_idx, output_alias) {
+             let idx_str = String::from_utf8_lossy(&o_idx.stdout).trim().to_string();
+             let alias_str = String::from_utf8_lossy(&o_alias.stdout).trim().to_string();
+             
+             if !idx_str.is_empty() && !alias_str.is_empty() {
+                 if_index = idx_str;
+                 if_alias = alias_str;
+                 break;
+             }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if if_index.is_empty() {
+        tracing::error!("Could not find Wintun interface. Routing failed.");
+        return;
+    }
+    tracing::info!("Found Wintun: Index={}, Alias='{}'", if_index, if_alias);
+    
+    // 2. Force MTU 1280 using Interface Alias (Name)
+    // Setting MTU might reset the interface, so we do this BEFORE adding routes.
+    tracing::info!("Setting MTU 1280 for Gaming/UDP optimization...");
+    let _ = Command::new("netsh")
+        .args(&["interface", "ipv4", "set", "subinterface", &if_alias, "mtu=1280", "store=active"])
+        .status();
+
+    // 3. Get Physical Gateway (Exclude Wintun to prevent loops)
+    // We filter routes where InterfaceIndex != WintunIndex
+    let ps_cmd = format!("(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object {{ $_.InterfaceIndex -ne {} }} | Sort-Object RouteMetric | Select-Object -First 1).NextHop", if_index);
+    
     let output = Command::new("powershell")
-        .args(&["-Command", "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
+        .args(&["-Command", &ps_cmd])
         .output();
 
     if let Ok(o) = output {
@@ -91,41 +134,16 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
         if let Some(gateway) = stdout.lines().next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             tracing::info!("Detected physical gateway: {}", gateway);
             
-            // 2. Add route to VPN Server via physical gateway
-            let status = Command::new("route")
+            // 4. Add specific route to VPN Server via physical gateway
+            let _ = Command::new("route")
                 .args(&["add", &server_ip.to_string(), "mask", "255.255.255.255", gateway, "metric", "1"])
                 .status();
-             if let Ok(s) = status {
-                 if !s.success() { tracing::warn!("Failed to add route to server via gateway"); }
-             }
         } else {
-            tracing::warn!("Could not determine physical gateway");
+            tracing::warn!("Could not determine physical gateway (or already on VPN?)");
         }
     }
 
-    // 3. Find Wintun Interface Index by IP (More robust than name)
-    let mut if_index = String::new();
-    for _ in 0..15 { // Retry up to 15 times (approx 7-10 sec)
-        let output = Command::new("powershell")
-            .args(&["-Command", "Get-NetIPAddress -IPAddress '10.7.0.2' | Select-Object -ExpandProperty InterfaceIndex"])
-            .output();
-        if let Ok(o) = output {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            if let Some(idx) = stdout.lines().next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                if_index = idx.to_string();
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    if if_index.is_empty() {
-        tracing::error!("Could not find Wintun interface index. Routing might fail.");
-        return;
-    }
-    tracing::info!("Found Wintun interface index: {}", if_index);
-
-    // 4. Override default gateway via TUN Interface
+    // 5. Override default gateway via TUN Interface
     let _ = Command::new("route")
         .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
         .status();
@@ -133,7 +151,7 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
         .args(&["add", "128.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
         .status();
         
-    tracing::info!("Routing configured (IF {}).", if_index);
+    tracing::info!("Routing and MTU configured successfully.");
 }
 
 #[cfg(target_os = "windows")]
