@@ -74,6 +74,61 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
+    use std::process::Command;
+    
+    tracing::info!("Configuring Windows routing tables...");
+
+    // 1. Get current default gateway (Lowest Metric)
+    let output = Command::new("powershell")
+        .args(&["-Command", "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).NextHop"])
+        .output();
+
+    if let Ok(o) = output {
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        if let Some(gateway) = stdout.lines().next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            tracing::info!("Detected physical gateway: {}", gateway);
+            
+            // 2. Add route to VPN Server via physical gateway
+            let status = Command::new("route")
+                .args(&["add", &server_ip.to_string(), "mask", "255.255.255.255", gateway, "metric", "1"])
+                .status();
+             if let Ok(s) = status {
+                 if !s.success() { tracing::warn!("Failed to add route to server via gateway"); }
+             }
+        } else {
+            tracing::warn!("Could not determine physical gateway");
+        }
+    }
+
+    // 3. Override default gateway via TUN
+    let _ = Command::new("route")
+        .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "10.7.0.1", "metric", "1"])
+        .status();
+    let _ = Command::new("route")
+        .args(&["add", "128.0.0.0", "mask", "128.0.0.0", "10.7.0.1", "metric", "1"])
+        .status();
+        
+    tracing::info!("Routing configured.");
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr) {
+    use std::process::Command;
+    tracing::info!("Cleaning up routing tables...");
+    
+    let _ = Command::new("route").args(&["delete", &server_ip.to_string()]).status();
+    let _ = Command::new("route").args(&["delete", "0.0.0.0", "mask", "128.0.0.0"]).status();
+    let _ = Command::new("route").args(&["delete", "128.0.0.0", "mask", "128.0.0.0"]).status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_windows_routing(_: std::net::Ipv4Addr) {}
+#[cfg(not(target_os = "windows"))]
+fn cleanup_windows_routing(_: std::net::Ipv4Addr) {}
+
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -100,6 +155,13 @@ async fn main() -> anyhow::Result<()> {
     // Bind UDP socket (any port)
     let udp = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     tracing::info!("UDP socket bound to {}", udp.local_addr()?);
+
+    #[cfg(target_os = "windows")]
+    {
+        if let std::net::SocketAddr::V4(v4) = server_addr {
+             configure_windows_routing(*v4.ip());
+        }
+    }
 
     // ── Perform ML-KEM-768 handshake ───────────────────────────────
     let mut rng = rand::thread_rng();
@@ -432,6 +494,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("data path running, press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");
+
+    #[cfg(target_os = "windows")]
+    {
+        if let std::net::SocketAddr::V4(v4) = server_addr {
+             cleanup_windows_routing(*v4.ip());
+        }
+    }
 
     Ok(())
 }

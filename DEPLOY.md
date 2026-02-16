@@ -80,7 +80,35 @@ systemctl status omega-server
 OMEGA_SERVER=203.0.113.1:51820 cargo run --release -p omega-client
 ```
 
-## Устранение неполадок
+## 5. Обновление сервера
+ 
+ При выходе новых версий или исправлений безопасности (как сейчас), выполните следующие шаги:
+ 
+ 1. **Получите свежий код**:
+    ```bash
+    cd ~/omega-vpn
+    git pull
+    ```
+ 
+ 2. **Пересооберите сервер**:
+    ```bash
+    cargo build --release -p omega-server
+    ```
+ 
+ 3. **Обновите бинарный файл**:
+    ```bash
+    systemctl stop omega-server
+    cp target/release/omega-server /opt/omega/
+    chmod +x /opt/omega/omega-server
+    ```
+ 
+ 4. **Перезапустите службу**:
+    ```bash
+    systemctl start omega-server
+    systemctl status omega-server
+    ```
+ 
+ ## Устранение неполадок
 
 Просмотр логов:
 ```bash
