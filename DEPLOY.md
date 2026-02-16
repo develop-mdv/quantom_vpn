@@ -22,9 +22,27 @@ echo "net.ipv4.ip_forward=1" >> /etc/sysctl.d/99-omega.conf
 Настройте фаервол (UFW), чтобы разрешить SSH и VPN трафик.
 
 ```bash
-ufw allow OpenSSH
-ufw allow 51820/udp
-ufw enable
+sudo ufw allow OpenSSH
+sudo ufw allow 51820/udp
+
+# Настройка NAT (Masquerading), чтобы сервер выпускал трафик в интернет
+# 1. Откройте файл конфигурации UFW
+# nano /etc/ufw/before.rules
+
+# 2. Добавьте ЭТОТ блок в САМОЕ НАЧАЛО файла (перед *filter):
+#
+# *nat
+# :POSTROUTING ACCEPT [0:0]
+# -A POSTROUTING -s 10.7.0.0/24 -o eth0 -j MASQUERADE
+# COMMIT
+#
+# (Замените eth0 на имя вашего интерфейса, проверьте командой `ip addr`)
+
+# 3. Разрешите маршрутизацию в UFW
+# sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+
+sudo ufw disable
+sudo ufw enable
 ```
 
 ## 2. Установка (Сборка из исходного кода)

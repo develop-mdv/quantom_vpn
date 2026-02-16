@@ -77,6 +77,7 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
 #[cfg(target_os = "windows")]
 fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
     use std::process::Command;
+    use std::time::Duration;
     
     tracing::info!("Configuring Windows routing tables...");
 
@@ -102,15 +103,37 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
         }
     }
 
-    // 3. Override default gateway via TUN
+    // 3. Find Wintun Interface Index by IP (More robust than name)
+    let mut if_index = String::new();
+    for _ in 0..15 { // Retry up to 15 times (approx 7-10 sec)
+        let output = Command::new("powershell")
+            .args(&["-Command", "Get-NetIPAddress -IPAddress '10.7.0.2' | Select-Object -ExpandProperty InterfaceIndex"])
+            .output();
+        if let Ok(o) = output {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if let Some(idx) = stdout.lines().next().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if_index = idx.to_string();
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if if_index.is_empty() {
+        tracing::error!("Could not find Wintun interface index. Routing might fail.");
+        return;
+    }
+    tracing::info!("Found Wintun interface index: {}", if_index);
+
+    // 4. Override default gateway via TUN Interface
     let _ = Command::new("route")
-        .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "10.7.0.1", "metric", "1"])
+        .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
         .status();
     let _ = Command::new("route")
-        .args(&["add", "128.0.0.0", "mask", "128.0.0.0", "10.7.0.1", "metric", "1"])
+        .args(&["add", "128.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
         .status();
         
-    tracing::info!("Routing configured.");
+    tracing::info!("Routing configured (IF {}).", if_index);
 }
 
 #[cfg(target_os = "windows")]
