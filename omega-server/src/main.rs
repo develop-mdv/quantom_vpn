@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 24;
-const DEFAULT_MTU: u16 = 1280;
+const DEFAULT_MTU: u16 = 1200;
 const DEFAULT_METRICS_PORT: u16 = 9090;
 
 #[tokio::main]

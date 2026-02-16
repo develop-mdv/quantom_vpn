@@ -20,7 +20,7 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.2";
 const DEFAULT_TUN_PREFIX: u8 = 24;
-const DEFAULT_MTU: u16 = 1280;
+const DEFAULT_MTU: u16 = 1200; // Lower MTU for gaming
 
 struct ClientState {
     retransmit_queue: RetransmitQueue,
@@ -114,12 +114,15 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
     }
     tracing::info!("Found Wintun: Index={}, Alias='{}'", if_index, if_alias);
     
-    // 2. Force MTU 1280 using Interface Alias (Name)
-    // Setting MTU might reset the interface, so we do this BEFORE adding routes.
-    tracing::info!("Setting MTU 1280 for Gaming/UDP optimization...");
-    let _ = Command::new("netsh")
-        .args(&["interface", "ipv4", "set", "subinterface", &if_alias, "mtu=1280", "store=active"])
-        .status();
+    // 2. Force MTU using Interface Alias (Name)
+    tracing::info!("Setting MTU {} for Gaming/UDP optimization...", DEFAULT_MTU);
+    let out = Command::new("netsh")
+        .args(&["interface", "ipv4", "set", "subinterface", &if_alias, &format!("mtu={}", DEFAULT_MTU), "store=active"])
+        .output();
+    match out {
+        Ok(o) => tracing::info!("Netsh MTU: status={} stdout='{}' stderr='{}'", o.status, String::from_utf8_lossy(&o.stdout).trim(), String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => tracing::error!("Netsh MTU failed: {}", e),
+    }
 
     // 3. Get Physical Gateway (Exclude Wintun to prevent loops)
     // We filter routes where InterfaceIndex != WintunIndex
@@ -135,21 +138,34 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
             tracing::info!("Detected physical gateway: {}", gateway);
             
             // 4. Add specific route to VPN Server via physical gateway
-            let _ = Command::new("route")
+            let out = Command::new("route")
                 .args(&["add", &server_ip.to_string(), "mask", "255.255.255.255", gateway, "metric", "1"])
-                .status();
+                .output();
+            match out {
+                Ok(o) => tracing::info!("Route Add Server: status={} stdout='{}' stderr='{}'", o.status, String::from_utf8_lossy(&o.stdout).trim(), String::from_utf8_lossy(&o.stderr).trim()),
+                Err(e) => tracing::error!("Route Add Server failed: {}", e),
+            }
         } else {
             tracing::warn!("Could not determine physical gateway (or already on VPN?)");
         }
     }
 
     // 5. Override default gateway via TUN Interface
-    let _ = Command::new("route")
+    let out1 = Command::new("route")
         .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
-        .status();
-    let _ = Command::new("route")
+        .output();
+    match out1 {
+        Ok(o) => tracing::info!("Route Add 0.0.0.0: status={} stdout='{}' stderr='{}'", o.status, String::from_utf8_lossy(&o.stdout).trim(), String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => tracing::error!("Route Add 0.0.0.0 failed: {}", e),
+    }
+
+    let out2 = Command::new("route")
         .args(&["add", "128.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
-        .status();
+        .output();
+    match out2 {
+         Ok(o) => tracing::info!("Route Add 128.0.0.0: status={} stdout='{}' stderr='{}'", o.status, String::from_utf8_lossy(&o.stdout).trim(), String::from_utf8_lossy(&o.stderr).trim()),
+         Err(e) => tracing::error!("Route Add 128.0.0.0 failed: {}", e),
+    }
         
     tracing::info!("Routing and MTU configured successfully.");
 }
@@ -188,13 +204,27 @@ async fn main() -> anyhow::Result<()> {
     let tun: Arc<tun_rs::AsyncDevice> = Arc::new(
         tun_rs::DeviceBuilder::new()
             .ipv4(DEFAULT_TUN_IP, DEFAULT_TUN_PREFIX, None)
-            .mtu(DEFAULT_MTU)
+            //.mtu(DEFAULT_MTU) // Disable auto-MTU to avoid IPv6 errors on Windows
             .build_async()?,
     );
     tracing::info!("TUN device created at {}", DEFAULT_TUN_IP);
 
-    // Bind UDP socket (any port)
-    let udp = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
+    // Bind UDP socket & Optimize Buffers via socket2
+    use socket2::{Socket, Domain, Type, Protocol};
+    
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    // Set socket options BEFORE bind (best practice)
+    socket.set_nonblocking(true)?;
+    
+    // Attempt to set 1MB buffers. Silently ignore if OS refuses (returns Err).
+    let _ = socket.set_recv_buffer_size(1024 * 1024);
+    let _ = socket.set_send_buffer_size(1024 * 1024);
+    
+    let addr: SocketAddr = "0.0.0.0:0".parse()?;
+    socket.bind(&addr.into())?;
+    
+    let std_socket: std::net::UdpSocket = socket.into();
+    let udp = Arc::new(UdpSocket::from_std(std_socket)?);
     tracing::info!("UDP socket bound to {}", udp.local_addr()?);
 
     #[cfg(target_os = "windows")]
@@ -545,3 +575,4 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+

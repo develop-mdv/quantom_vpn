@@ -21,6 +21,7 @@ tokio = { workspace = true }
 tun-rs = { workspace = true }
 bytes = { workspace = true }
 byteorder = { workspace = true }
+socket2 = "0.5"
 
 # Observability
 tracing = { workspace = true }
