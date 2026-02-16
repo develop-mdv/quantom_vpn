@@ -115,7 +115,14 @@ pub fn process_client_handshake(
     // 6. Negotiate MTU and FEC, create session
     let negotiated_mtu = server_mtu.min(client_hello.client_mtu);
     let fec_enabled = client_hello.fec_support;
-    let tunnel_ip = session_manager.allocate_tunnel_ip();
+    
+    // FORCE STATIC IP for single-user stability (matches Client's hardcoded 10.7.0.2)
+    let tunnel_ip = std::net::Ipv4Addr::new(10, 7, 0, 2);
+    
+    // Cleanup any zombie session holding this IP
+    session_manager.remove_by_tunnel_ip(tunnel_ip);
+
+    // let tunnel_ip = session_manager.allocate_tunnel_ip(); // Disabled for now
 
     let session = SessionState::new(
         session_keys,

@@ -235,6 +235,12 @@ const MAX_SESSIONS: usize = 10000;
         self.sessions.remove(flow_id);
     }
 
+    /// Remove any session that uses the given tunnel IP.
+    /// Used to enforce static IP for single-client scenarios.
+    pub fn remove_by_tunnel_ip(&self, ip: std::net::Ipv4Addr) {
+        self.sessions.retain(|_fid, session| session.tunnel_ip != ip);
+    }
+
     /// Active session count.
     pub fn count(&self) -> usize {
         self.sessions.len()

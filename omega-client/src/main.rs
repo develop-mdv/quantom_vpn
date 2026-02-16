@@ -151,6 +151,8 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr) {
     }
 
     // 5. Override default gateway via TUN Interface
+    // Reverting to 0.0.0.0 (On-Link) as 10.7.0.1 caused connectivity loss.
+    // Windows Wintun works best with on-link for Layer 3 tunnels.
     let out1 = Command::new("route")
         .args(&["add", "0.0.0.0", "mask", "128.0.0.0", "0.0.0.0", "IF", &if_index, "metric", "1"])
         .output();
@@ -314,6 +316,10 @@ async fn main() -> anyhow::Result<()> {
     // Channel for sending NACK requests from recv loop to send loop
     let (nack_tx, mut nack_rx) = tokio::sync::mpsc::channel::<NackMessage>(100);
 
+    // KeepAlive interval
+    let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     // TUN → UDP (client → server)
     tokio::spawn(async move {
         let mut keys_send = match SessionKeys::from_shared_secret(&ss_for_send, false) {
@@ -327,6 +333,41 @@ async fn main() -> anyhow::Result<()> {
 
         loop {
             tokio::select! {
+                // KeepAlive / Heartbeat loop (every 15s)
+                _ = keepalive_interval.tick() => {
+                     let (seq, rtp_s, rtp_ts, ssrc) = {
+                        let mut s = state_send.lock().unwrap();
+                        let seq = s.send_seq;
+                        s.send_seq = s.send_seq.wrapping_add(1);
+                        s.rtp_seq = s.rtp_seq.wrapping_add(1);
+                        (seq, s.rtp_seq, s.rtp_timestamp, s.ssrc)
+                    };
+
+                    let ka_omega = OmegaHeader {
+                        flow_id: flow_id_copy,
+                        seq,
+                        packet_type: PacketType::KeepAlive,
+                    };
+                    let rtp = RtpHeader::opus(rtp_s, rtp_ts, ssrc);
+
+                    let mut out = BytesMut::with_capacity(TOTAL_HEADER_LEN + AEAD_TAG_LEN);
+                    out.resize(TOTAL_HEADER_LEN, 0);
+                    rtp.write_to(&mut out[..RTP_HEADER_LEN]);
+                    ka_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
+
+                    let aad = out[..TOTAL_HEADER_LEN].to_vec();
+                    let mut payload = Vec::new(); // Empty payload for KeepAlive
+                    
+                    if let Ok(_) = keys_send.encrypt_in_place(&mut payload, &aad) {
+                        out.extend_from_slice(&payload);
+                        if let Err(e) = udp_r.send_to(&out, server_addr).await {
+                             tracing::warn!("UDP KeepAlive send failed: {}", e);
+                        } else {
+                             tracing::info!("Sent KeepAlive seq={}", seq);
+                        }
+                    }
+                }
+
                 // Handle NACK requests from receive loop
                 Some(nack) = nack_rx.recv() => {
                     let (nack_seq, rtp_s, rtp_ts, ssrc) = {
@@ -368,6 +409,8 @@ async fn main() -> anyhow::Result<()> {
                     let n = match res {
                         Ok(n) => n,
                         Err(e) => {
+                            // If PANIC or serious error, we might exit? 
+                            // For now just log and continue
                             tracing::error!("TUN read: {}", e);
                             continue;
                         }
@@ -442,6 +485,8 @@ async fn main() -> anyhow::Result<()> {
                         tracing::error!("UDP send: {}", e);
                     }
                 }
+
+                // (Old KeepAlive removed, moved to interval)
             }
         }
     });
