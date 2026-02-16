@@ -1,0 +1,29 @@
+[package]
+name = "omega-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core primitives for Omega VPN: ChaosPrng, ReplayFilter, protocol, crypto"
+
+[features]
+default = []
+std = []
+fec = ["dep:raptorq"]
+
+[dependencies]
+ring = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+byteorder = { workspace = true }
+raptorq = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "chaos_bench"
+harness = false
+
+[[bench]]
+name = "crypto_bench"
+harness = false

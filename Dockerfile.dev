@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1
+# Omega VPN — Development Environment
+# Targets: build + test all crates including eBPF on Linux
+
+FROM ubuntu:22.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    curl \
+    git \
+    ca-certificates \
+    linux-headers-generic \
+    clang \
+    llvm \
+    libelf-dev \
+    iproute2 \
+    iptables \
+    iputils-ping \
+    iperf3 \
+    net-tools \
+    tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust stable + nightly (nightly for eBPF)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --profile minimal
+RUN rustup toolchain install nightly --profile minimal
+RUN rustup component add rust-src --toolchain nightly
+
+# Install bpf-linker for eBPF compilation
+RUN cargo install bpf-linker
+
+WORKDIR /workspace
+
+# Cache dependencies — copy manifests first
+COPY Cargo.toml Cargo.lock* ./
+COPY omega-core/Cargo.toml omega-core/Cargo.toml
+COPY omega-server/Cargo.toml omega-server/Cargo.toml
+COPY omega-client/Cargo.toml omega-client/Cargo.toml
+
+# Create stub src files for dependency caching
+RUN mkdir -p omega-core/src omega-server/src omega-client/src \
+    && echo "// stub" > omega-core/src/lib.rs \
+    && echo "fn main(){}" > omega-server/src/main.rs \
+    && echo "fn main(){}" > omega-client/src/main.rs
+
+# Pre-build dependencies (cache layer)
+RUN cargo build --workspace 2>/dev/null || true
+RUN cargo build --workspace --release 2>/dev/null || true
+
+# Now copy actual source
+COPY . .
+
+# Rebuild with real sources
+RUN cargo build --workspace
+
+CMD ["bash"]

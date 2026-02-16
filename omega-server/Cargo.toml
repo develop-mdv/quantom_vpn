@@ -1,0 +1,37 @@
+[package]
+name = "omega-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Omega VPN server — async multi-client with eBPF fallback"
+
+[features]
+default = ["fec"]
+fec = []
+
+[dependencies]
+omega-core = { path = "../omega-core", features = ["std", "fec"] }
+
+# Crypto
+ring = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+ml-kem = { workspace = true }
+kem = "0.3.0-pre.0"
+rand = "0.8"
+
+# Networking
+tokio = { workspace = true }
+tun-rs = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+
+# Concurrency
+dashmap = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+anyhow = "1"

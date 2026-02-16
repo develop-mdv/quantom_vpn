@@ -1,0 +1,21 @@
+[Unit]
+Description=Omega VPN Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Adjust path as necessary
+WorkingDirectory=/opt/omega
+ExecStart=/opt/omega/omega-server
+Environment=RUST_LOG=info
+# Environment=OMEGA_BIND=0.0.0.0:51820
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

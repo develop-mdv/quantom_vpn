@@ -1,0 +1,42 @@
+[workspace]
+members = [
+    "omega-core",
+    "omega-server",
+    "omega-client",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Crypto
+ring = "0.17"
+hkdf = "0.12"
+sha2 = "0.10"
+ml-kem = "0.2"
+
+# Networking
+tokio = { version = "1", features = ["full"] }
+tun-rs = { version = "2.8", features = ["async"] }
+bytes = "1"
+
+# Concurrency
+dashmap = "6"
+
+# FEC (feature-gated)
+raptorq = "2.0"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Serialization
+byteorder = "1"

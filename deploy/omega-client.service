@@ -1,0 +1,21 @@
+[Unit]
+Description=Omega VPN Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# Adjust path as necessary
+WorkingDirectory=/opt/omega
+ExecStart=/opt/omega/omega-client
+Environment=RUST_LOG=info
+# Environment=OMEGA_SERVER=127.0.0.1:51820
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
