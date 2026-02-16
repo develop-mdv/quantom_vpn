@@ -32,6 +32,12 @@ else
 COMMIT
 # END OMEGA VPN NAT
 
+# START OMEGA VPN MSS CLAMPING
+*filter
+:FORWARD ACCEPT [0:0]
+-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+COMMIT
+# END OMEGA VPN MSS CLAMPING
 EOF
     cat /etc/ufw/before.rules >> /tmp/ufw_nat.tmp
     mv /tmp/ufw_nat.tmp /etc/ufw/before.rules

@@ -64,7 +64,7 @@ pub async fn tun_to_udp_loop(
             match found {
                 Some(fid) => fid,
                 None => {
-                    tracing::trace!("no session for dst IP {}", dst_ip);
+                    tracing::warn!("no session for dst IP {}", dst_ip);
                     continue;
                 }
             }
@@ -238,6 +238,12 @@ pub async fn udp_to_tun_loop(
                         // 3. Update Replay Filter (Commit)
                         session.replay_filter.update(omega.seq as u64);
                         session.touch();
+                        
+                        // ROAMING: Update client address if changed
+                        if session.client_addr != src_addr {
+                            tracing::info!("client roamed from {} to {}", session.client_addr, src_addr);
+                            session.client_addr = src_addr;
+                        }
 
                         // 4. Handle Packet Type
                         match omega.packet_type {
