@@ -7,3 +7,9 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Binaries
+*.dll
+*.exe
+*.zip
+wintun_temp/

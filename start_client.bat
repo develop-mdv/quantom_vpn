@@ -1,10 +1,23 @@
 @echo off
 setlocal enabledelayedexpansion
-:: Установка кодировки UTF-8 для корректного отображения кириллицы
+:: Установка кодировки UTF-8
 chcp 65001 >nul
 
+:: ==========================================
+:: 0. Проверка прав Администратора (Auto-Elevate)
+:: ==========================================
+net session >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [INFO] Запрашиваю права администратора для работы с Wintun...
+    powershell -Command "Start-Process '%~f0' -Verb RunAs"
+    exit /b
+)
+cd /d "%~dp0"
+
 :: Настройка адреса сервера
-:: Замените 127.0.0.1 на IP вашего VPS (например, 72.56.88.224)
+
+:: Настройка адреса сервера
+:: Замените 127.0.0.1 на IP вашего VPS
 if "%OMEGA_SERVER%"=="" set OMEGA_SERVER=127.0.0.1:51820
 
 echo [INFO] Запуск Omega VPN Клиента...
