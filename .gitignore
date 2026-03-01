@@ -9,7 +9,7 @@
 .vscode/
 
 # Binaries
-*.dll
+#*.dll
 *.exe
 *.zip
 wintun_temp/
