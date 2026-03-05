@@ -1,0 +1,96 @@
+name: Deploy Omega Server
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "omega-server/**"
+      - "omega-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/update_server.sh"
+      - ".github/workflows/deploy-server.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: omega-server-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build omega-server
+        run: cargo build --release -p omega-server
+
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p dist
+          cp target/release/omega-server dist/omega-server
+          cp deploy/update_server.sh dist/update_server.sh
+          chmod +x dist/omega-server dist/update_server.sh
+
+      - name: Setup SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf "%s" "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Add known hosts
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          touch ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+
+      - name: Upload bundle
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
+          ssh -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$REMOTE_DIR'"
+          scp -P "$PORT" dist/omega-server dist/update_server.sh "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_DIR/"
+
+      - name: Deploy on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
+          DEPLOY_INSTALL_DIR: ${{ secrets.DEPLOY_INSTALL_DIR }}
+          DEPLOY_KEEP_RELEASES: ${{ secrets.DEPLOY_KEEP_RELEASES }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          PORT="${DEPLOY_PORT:-22}"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
+
+          ssh -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
+             OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
+             OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
+             OMEGA_KEEP_RELEASES='${DEPLOY_KEEP_RELEASES:-5}' \
+             OMEGA_RELEASE_ID='$GITHUB_SHA' \
+             sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server'"

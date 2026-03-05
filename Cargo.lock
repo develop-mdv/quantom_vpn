@@ -1191,6 +1191,8 @@ dependencies = [
  "omega-core",
  "rand 0.8.5",
  "ring",
+ "serde",
+ "serde_json",
  "sha2",
  "tokio",
  "tracing",

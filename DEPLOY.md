@@ -125,3 +125,86 @@ journalctl -u omega-server -f
 ```
 
 Если пакеты теряются, проверьте настройки MTU или правила фаервола.
+## Подготовка нескольких пользователей и устройств после деплоя
+
+После запуска сервера создайте пользователей и устройства через админ CLI:
+
+```bash
+# Создать пользователя
+/opt/omega/omega-server admin create_user --max-devices 5 --max-sessions 3
+
+# Зарегистрировать устройство (сохраните device_id и token из вывода)
+/opt/omega/omega-server admin register_device \
+  --user-id <user_uuid> \
+  --device-name "laptop" \
+  --platform linux
+```
+
+Клиент должен передавать учетные данные устройства:
+
+```bash
+OMEGA_SERVER=<server_ip>:51820 \
+OMEGA_DEVICE_ID=<device_uuid> \
+OMEGA_DEVICE_TOKEN=<token_hex> \
+OMEGA_DEVICE_NAME="laptop" \
+./omega-client
+```
+
+Дополнительные переменные окружения для путей состояния сервера:
+
+- `OMEGA_IDENTITY_DB` (по умолчанию `omega-server/state/identity.json`)
+- `OMEGA_SESSION_SNAPSHOT` (по умолчанию `omega-server/state/sessions.json`)
+- `OMEGA_ADMIN_COMMANDS` (по умолчанию `omega-server/state/admin_commands.ndjson`)
+## Встроенная веб-админка
+
+Сервер может поднимать встроенную web admin панель для управления пользователями/устройствами.
+
+Переменные окружения:
+- `OMEGA_ADMIN_WEB_BIND` (по умолчанию `127.0.0.1:8081`)
+- `OMEGA_ADMIN_WEB_DISABLE=1` для полного отключения
+
+Пример запуска:
+
+```bash
+OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 /opt/omega/omega-server
+```
+
+Рекомендуется держать bind только на localhost и публиковать доступ через защищенный reverse proxy (mTLS/VPN/SSH tunnel).
+## Автодеплой при push (GitHub Actions)
+
+В репозитории добавлен workflow: `.github/workflows/deploy-server.yml`.
+Он автоматически срабатывает при push в ветку `main` (по изменениям server/core) и делает:
+1. Сборку `omega-server` в release режиме.
+2. Копирование бинарника на VPS по SSH.
+3. Безопасное обновление через `deploy/update_server.sh`.
+4. Рестарт `omega-server` и проверку `systemctl is-active`.
+5. Авто-rollback на предыдущий бинарник при неуспешном старте.
+
+### Что настроить в GitHub Secrets
+
+Обязательные:
+- `DEPLOY_HOST` — IP или домен VPS.
+- `DEPLOY_USER` — пользователь для SSH (например `deploy`).
+- `DEPLOY_SSH_KEY` — приватный SSH ключ (ed25519/rsa) для доступа к VPS.
+- `DEPLOY_KNOWN_HOSTS` — результат `ssh-keyscan -H <host>`.
+
+Опциональные:
+- `DEPLOY_PORT` — SSH порт (по умолчанию `22`).
+- `DEPLOY_PATH` — временная директория на сервере (по умолчанию `/tmp/omega-deploy`).
+- `DEPLOY_SERVICE_NAME` — systemd unit (по умолчанию `omega-server`).
+- `DEPLOY_INSTALL_DIR` — директория установки бинарников (по умолчанию `/opt/omega`).
+- `DEPLOY_KEEP_RELEASES` — сколько релизов хранить (по умолчанию `5`).
+
+### Подготовка VPS
+
+1. Убедитесь, что systemd unit уже настроен (`omega-server.service`).
+2. У пользователя `DEPLOY_USER` должны быть права на перезапуск сервиса через `sudo` без пароля.
+   Пример правила в `/etc/sudoers.d/omega-deploy`:
+
+```bash
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart omega-server, /usr/bin/systemctl is-active omega-server, /usr/bin/systemctl --no-pager --full status omega-server
+```
+
+3. Убедитесь, что существует директория `/opt/omega` и сервис стартует командой `ExecStart=/opt/omega/omega-server`.
+
+После этого достаточно делать `git push` в `main` — сервер будет обновляться автоматически.

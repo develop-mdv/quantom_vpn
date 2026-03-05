@@ -14,7 +14,6 @@
 /// - Poly1305 tag is appended by AEAD.
 ///
 /// Handshake packets use STUN Binding Request/Response framing.
-
 use byteorder::{BigEndian, ByteOrder};
 
 // ── Constants ──────────────────────────────────────────────────────
@@ -154,7 +153,7 @@ impl RtpHeader {
         debug_assert!(buf.len() >= RTP_HEADER_LEN);
         // Byte 0: V=2 (bits 6-7), P=0, X=0, CC=0
         buf[0] = 0x80; // Version 2
-        // Byte 1: Marker (bit 7) | PT (bits 0-6)
+                       // Byte 1: Marker (bit 7) | PT (bits 0-6)
         buf[1] = (if self.marker { 0x80 } else { 0 }) | (self.payload_type & 0x7F);
         BigEndian::write_u16(&mut buf[2..4], self.sequence);
         BigEndian::write_u32(&mut buf[4..8], self.timestamp);
@@ -284,25 +283,77 @@ impl StunWrapper {
 /// ```text
 /// [Version: 1B][ClientMTU: 2B][FecSupport: 1B][EncapsKey: 1184B]
 /// ```
-pub const HANDSHAKE_VERSION: u8 = 1;
+pub const HANDSHAKE_VERSION: u8 = 2;
 pub const MLKEM768_EK_LEN: usize = 1184;
 pub const MLKEM768_CT_LEN: usize = 1088;
+pub const DEVICE_TOKEN_LEN: usize = 32;
+pub const DEVICE_NAME_MAX_LEN: usize = 255;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePlatform {
+    Windows = 1,
+    Linux = 2,
+    Macos = 3,
+    Android = 4,
+    Ios = 5,
+    Other = 255,
+}
+
+impl DevicePlatform {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Windows),
+            2 => Some(Self::Linux),
+            3 => Some(Self::Macos),
+            4 => Some(Self::Android),
+            5 => Some(Self::Ios),
+            255 => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientAuth {
+    pub device_id: [u8; 16],
+    pub device_token: [u8; DEVICE_TOKEN_LEN],
+    pub platform: DevicePlatform,
+    pub device_name: String,
+}
 
 pub struct ClientHello {
     pub version: u8,
     pub client_mtu: u16,
     pub fec_support: bool,
     pub encaps_key: Vec<u8>,
+    pub auth: Option<ClientAuth>,
 }
 
 impl ClientHello {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(4 + self.encaps_key.len());
+        let auth_len = self
+            .auth
+            .as_ref()
+            .map(|a| 16 + DEVICE_TOKEN_LEN + 2 + a.device_name.len().min(DEVICE_NAME_MAX_LEN))
+            .unwrap_or(0);
+        let mut buf = Vec::with_capacity(4 + self.encaps_key.len() + auth_len);
         buf.push(self.version);
         buf.push((self.client_mtu >> 8) as u8);
         buf.push(self.client_mtu as u8);
         buf.push(if self.fec_support { 1 } else { 0 });
         buf.extend_from_slice(&self.encaps_key);
+
+        if let Some(auth) = &self.auth {
+            let name = auth.device_name.as_bytes();
+            let name_len = name.len().min(DEVICE_NAME_MAX_LEN);
+            buf.extend_from_slice(&auth.device_id);
+            buf.extend_from_slice(&auth.device_token);
+            buf.push(auth.platform as u8);
+            buf.push(name_len as u8);
+            buf.extend_from_slice(&name[..name_len]);
+        }
+
         buf
     }
 
@@ -310,36 +361,71 @@ impl ClientHello {
         if buf.len() < 4 + MLKEM768_EK_LEN {
             return None;
         }
+
+        let version = buf[0];
+        let mut auth = None;
+
+        if version >= 2 {
+            let auth_base = 4 + MLKEM768_EK_LEN;
+            if buf.len() < auth_base + 16 + DEVICE_TOKEN_LEN + 2 {
+                return None;
+            }
+
+            let mut device_id = [0u8; 16];
+            device_id.copy_from_slice(&buf[auth_base..auth_base + 16]);
+
+            let mut device_token = [0u8; DEVICE_TOKEN_LEN];
+            let token_start = auth_base + 16;
+            let token_end = token_start + DEVICE_TOKEN_LEN;
+            device_token.copy_from_slice(&buf[token_start..token_end]);
+
+            let platform = DevicePlatform::from_u8(buf[token_end])?;
+            let name_len = buf[token_end + 1] as usize;
+            let name_start = token_end + 2;
+            let name_end = name_start + name_len;
+            if buf.len() < name_end {
+                return None;
+            }
+
+            let device_name = std::str::from_utf8(&buf[name_start..name_end])
+                .ok()?
+                .to_string();
+            auth = Some(ClientAuth {
+                device_id,
+                device_token,
+                platform,
+                device_name,
+            });
+        }
+
         Some(Self {
-            version: buf[0],
+            version,
             client_mtu: ((buf[1] as u16) << 8) | (buf[2] as u16),
             fec_support: buf[3] != 0,
             encaps_key: buf[4..4 + MLKEM768_EK_LEN].to_vec(),
+            auth,
         })
     }
 }
 
-/// Server → Client: ML-KEM-768 ciphertext + server config + FlowID.
-///
-/// ```text
-/// [Version: 1B][ServerMTU: 2B][FecEnabled: 1B][FlowID: 16B][Ciphertext: 1088B]
-/// ```
 pub struct ServerHello {
     pub version: u8,
     pub server_mtu: u16,
     pub fec_enabled: bool,
     pub flow_id: FlowId,
+    pub tunnel_ip: std::net::Ipv4Addr,
     pub ciphertext: Vec<u8>,
 }
 
 impl ServerHello {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(20 + self.ciphertext.len());
+        let mut buf = Vec::with_capacity(24 + self.ciphertext.len());
         buf.push(self.version);
         buf.push((self.server_mtu >> 8) as u8);
         buf.push(self.server_mtu as u8);
         buf.push(if self.fec_enabled { 1 } else { 0 });
         buf.extend_from_slice(&self.flow_id.0);
+        buf.extend_from_slice(&self.tunnel_ip.octets());
         buf.extend_from_slice(&self.ciphertext);
         buf
     }
@@ -348,18 +434,79 @@ impl ServerHello {
         if buf.len() < 20 + MLKEM768_CT_LEN {
             return None;
         }
+
         let flow_id = FlowId::from_bytes(&buf[4..20])?;
+        let has_ip = buf.len() >= 24 + MLKEM768_CT_LEN;
+        let tunnel_ip = if has_ip {
+            std::net::Ipv4Addr::new(buf[20], buf[21], buf[22], buf[23])
+        } else {
+            std::net::Ipv4Addr::new(10, 7, 0, 2)
+        };
+        let ct_offset = if has_ip { 24 } else { 20 };
+
         Some(Self {
             version: buf[0],
             server_mtu: ((buf[1] as u16) << 8) | (buf[2] as u16),
             fec_enabled: buf[3] != 0,
             flow_id,
-            ciphertext: buf[20..20 + MLKEM768_CT_LEN].to_vec(),
+            tunnel_ip,
+            ciphertext: buf[ct_offset..ct_offset + MLKEM768_CT_LEN].to_vec(),
         })
     }
 }
 
-// ── ARQ NACK Format ────────────────────────────────────────────────
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeRejectReason {
+    AuthFailed = 1,
+    DeviceRevoked = 2,
+    UserBlocked = 3,
+    LimitExceeded = 4,
+    IpPoolExhausted = 5,
+    VersionMismatch = 6,
+    Malformed = 7,
+    ServerBusy = 8,
+}
+
+impl HandshakeRejectReason {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::AuthFailed),
+            2 => Some(Self::DeviceRevoked),
+            3 => Some(Self::UserBlocked),
+            4 => Some(Self::LimitExceeded),
+            5 => Some(Self::IpPoolExhausted),
+            6 => Some(Self::VersionMismatch),
+            7 => Some(Self::Malformed),
+            8 => Some(Self::ServerBusy),
+            _ => None,
+        }
+    }
+}
+
+pub struct HandshakeReject {
+    pub version: u8,
+    pub reason: HandshakeRejectReason,
+}
+
+impl HandshakeReject {
+    pub fn serialize(&self) -> [u8; 2] {
+        [self.version, self.reason as u8]
+    }
+
+    pub fn deserialize(buf: &[u8]) -> Option<Self> {
+        if buf.len() < 2 {
+            return None;
+        }
+
+        Some(Self {
+            version: buf[0],
+            reason: HandshakeRejectReason::from_u8(buf[1])?,
+        })
+    }
+}
+
+// -- ARQ NACK Format ----------------------------------------------------------------
 
 /// ARQ NACK message: requests retransmission of missing packets.
 ///
@@ -502,13 +649,39 @@ mod tests {
             client_mtu: 1280,
             fec_support: true,
             encaps_key: vec![0xAA; MLKEM768_EK_LEN],
+            auth: Some(ClientAuth {
+                device_id: [0x11; 16],
+                device_token: [0x22; DEVICE_TOKEN_LEN],
+                platform: DevicePlatform::Windows,
+                device_name: "desktop".to_string(),
+            }),
+        };
+        let serialized = ch.serialize();
+        let parsed = ClientHello::deserialize(&serialized).unwrap();
+        assert_eq!(parsed.version, HANDSHAKE_VERSION);
+        assert_eq!(parsed.client_mtu, 1280);
+        assert!(parsed.fec_support);
+        assert_eq!(parsed.encaps_key.len(), MLKEM768_EK_LEN);
+        let auth = parsed.auth.unwrap();
+        assert_eq!(auth.device_id, [0x11; 16]);
+        assert_eq!(auth.device_token, [0x22; DEVICE_TOKEN_LEN]);
+        assert_eq!(auth.platform, DevicePlatform::Windows);
+        assert_eq!(auth.device_name, "desktop");
+    }
+
+    #[test]
+    fn test_client_hello_v1_compat() {
+        let ch = ClientHello {
+            version: 1,
+            client_mtu: 1280,
+            fec_support: false,
+            encaps_key: vec![0xAB; MLKEM768_EK_LEN],
+            auth: None,
         };
         let serialized = ch.serialize();
         let parsed = ClientHello::deserialize(&serialized).unwrap();
         assert_eq!(parsed.version, 1);
-        assert_eq!(parsed.client_mtu, 1280);
-        assert!(parsed.fec_support);
-        assert_eq!(parsed.encaps_key.len(), MLKEM768_EK_LEN);
+        assert!(parsed.auth.is_none());
     }
 
     #[test]
@@ -518,14 +691,28 @@ mod tests {
             server_mtu: 1280,
             fec_enabled: false,
             flow_id: FlowId([7u8; 16]),
+            tunnel_ip: std::net::Ipv4Addr::new(10, 7, 2, 5),
             ciphertext: vec![0xBB; MLKEM768_CT_LEN],
         };
         let serialized = sh.serialize();
         let parsed = ServerHello::deserialize(&serialized).unwrap();
-        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.version, HANDSHAKE_VERSION);
         assert_eq!(parsed.server_mtu, 1280);
         assert!(!parsed.fec_enabled);
         assert_eq!(parsed.flow_id, FlowId([7u8; 16]));
+        assert_eq!(parsed.tunnel_ip, std::net::Ipv4Addr::new(10, 7, 2, 5));
         assert_eq!(parsed.ciphertext.len(), MLKEM768_CT_LEN);
+    }
+
+    #[test]
+    fn test_handshake_reject_roundtrip() {
+        let reject = HandshakeReject {
+            version: HANDSHAKE_VERSION,
+            reason: HandshakeRejectReason::DeviceRevoked,
+        };
+        let raw = reject.serialize();
+        let parsed = HandshakeReject::deserialize(&raw).unwrap();
+        assert_eq!(parsed.version, HANDSHAKE_VERSION);
+        assert_eq!(parsed.reason, HandshakeRejectReason::DeviceRevoked);
     }
 }

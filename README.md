@@ -68,7 +68,7 @@
 2.  Скачайте [Wintun драйвер](https://www.wintun.net/). Вам нужен файл `wintun.dll` (из папки `bin/amd64` для 64-битных систем).
 3.  Положите `wintun.dll` в корень проекта (рядом с `Cargo.toml`).
 4.  Запустите скрипт `start_client.bat` (он сам скачает драйвер, если его нет).
-    *   **Важно**: Отредактируйте `start_client.bat` и замените `127.0.0.1:51820` на реальный IP вашего сервера!
+    *   **Важно**: теперь `start_client.bat` читает параметры из `.env` (см. `.env.example`), редактировать bat-файл не нужно.
 
 ## Deployment (Quick Start)
  
@@ -84,3 +84,90 @@
 Проект находится в стадии **Alpha**.
 *   ✅ Реализовано: Handshake, Шифрование, ARQ, FEC, Маскировка.
 *   🚧 В планах: eBPF оптимизация (пока не требуется), поддержка Android/iOS.
+## Поддержка нескольких пользователей и устройств (MVP)
+
+Сервер поддерживает аутентификацию устройств и динамическую выдачу tunnel IP из пула `10.7.0.0/16`.
+
+### Подготовка через админ CLI
+
+Создать пользователя:
+
+```bash
+cargo run -p omega-server -- admin create_user --max-devices 5 --max-sessions 3
+```
+
+Зарегистрировать устройство для пользователя (сохраните `device_id` и `token`):
+
+```bash
+cargo run -p omega-server -- admin register_device \
+  --user-id <user_uuid> \
+  --device-name "laptop" \
+  --platform windows
+```
+
+Запустить сервер:
+
+```bash
+cargo run -p omega-server
+```
+
+Запустить клиент с учетными данными устройства:
+
+```bash
+OMEGA_SERVER=203.0.113.1:51820 \
+OMEGA_DEVICE_ID=<device_uuid> \
+OMEGA_DEVICE_TOKEN=<device_token_hex> \
+OMEGA_DEVICE_NAME="laptop" \
+cargo run -p omega-client
+```
+
+### Полезные команды администратора
+
+```bash
+cargo run -p omega-server -- admin list_users
+cargo run -p omega-server -- admin list_user_devices --user-id <user_uuid>
+cargo run -p omega-server -- admin revoke_device --device-id <device_uuid>
+cargo run -p omega-server -- admin list_active_sessions
+cargo run -p omega-server -- admin terminate_session --flow-id <flow_id_hex>
+```
+
+### Файлы состояния
+
+- БД идентификации: `omega-server/state/identity.json` (переопределяется через `OMEGA_IDENTITY_DB`)
+- Снимок активных сессий: `omega-server/state/sessions.json` (переопределяется через `OMEGA_SESSION_SNAPSHOT`)
+- Очередь админ-команд: `omega-server/state/admin_commands.ndjson` (переопределяется через `OMEGA_ADMIN_COMMANDS`)
+### Веб-админка
+
+В `omega-server` встроена простая web admin панель.
+
+По умолчанию она слушает только localhost:
+
+```bash
+OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 cargo run -p omega-server
+```
+
+Откройте в браузере: `http://127.0.0.1:8081/`.
+
+Через UI доступны операции:
+- создание пользователя;
+- регистрация устройства (с выдачей device token);
+- блокировка/разблокировка/удаление пользователя;
+- отзыв устройства;
+- завершение активной сессии.
+
+Отключение web admin:
+
+```bash
+OMEGA_ADMIN_WEB_DISABLE=1 cargo run -p omega-server
+```
+### Windows: запуск через `.env` и `start_client.bat`
+
+1. Скопируйте `.env.example` в `.env`.
+2. Заполните значения:
+   - `OMEGA_SERVER`
+   - `OMEGA_DEVICE_ID`
+   - `OMEGA_DEVICE_TOKEN`
+   - `OMEGA_DEVICE_NAME` (опционально)
+3. Запустите `start_client.bat` от имени администратора (скрипт сам запросит права).
+
+`start_client.bat` автоматически читает `.env` и передает переменные в `omega-client`.

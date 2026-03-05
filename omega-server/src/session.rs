@@ -1,68 +1,68 @@
-/// Session manager — per-connection state with DashMap and TTL cleanup.
-
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
 use omega_core::chaos::ChaosPrng;
 use omega_core::crypto::SessionKeys;
 use omega_core::protocol::FlowId;
 use omega_core::replay::ReplayFilter;
+use serde::Serialize;
 
-use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
 #[cfg(feature = "fec")]
 use omega_core::raptorq_mgr::{FecConfig, FecDecoder, FecState};
 
-/// Per-connection session state.
+use crate::metrics;
+
+const SESSION_TTL: Duration = Duration::from_secs(120);
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_SESSIONS: usize = 10_000;
+
+const POOL_START: u32 = 2; // 10.7.0.2
+const POOL_END: u32 = 65_534; // 10.7.255.254
+const POOL_SIZE: u32 = POOL_END - POOL_START + 1;
+
 pub struct SessionState {
-    /// AEAD keys for this session.
     pub keys: SessionKeys,
-    /// Chaos PRNG for traffic morphing.
     pub chaos: ChaosPrng,
-    /// Anti-replay sliding window.
     pub replay_filter: ReplayFilter,
-    /// Send sequence counter (Omega header seq).
     pub send_seq: u32,
-    /// Maximum sent sequence number (for ARQ caching).
     pub max_send_seq: u32,
-    /// RTP sequence counter (cover header).
     pub rtp_seq: u16,
-    /// RTP timestamp counter.
     pub rtp_timestamp: u32,
-    /// SSRC derived from FlowId.
     pub ssrc: u32,
-    /// Client address (for sending responses).
-    pub client_addr: std::net::SocketAddr,
-    /// Assigned tunnel IP for this client.
-    pub tunnel_ip: std::net::Ipv4Addr,
-    /// Last activity timestamp (for TTL cleanup).
+    pub client_addr: SocketAddr,
+    pub tunnel_ip: Ipv4Addr,
+    pub user_id: String,
+    pub device_id: String,
     pub last_seen: Instant,
-    /// Whether FEC is enabled for this session.
     pub fec_enabled: bool,
-    
-    // ── ARQ / FEC State ──────────────────────────────
+
     pub retransmit_queue: RetransmitQueue,
     pub gap_detector: GapDetector,
     pub loss_estimator: LossEstimator,
-    
+
     #[cfg(feature = "fec")]
     pub fec_state: FecState,
     #[cfg(feature = "fec")]
-    pub fec_decoder: Option<FecDecoder>, // Current block decoder
+    pub fec_decoder: Option<FecDecoder>,
     #[cfg(feature = "fec")]
-    pub current_block_id: Option<u32>,   // Sequence of current decoding block
+    pub current_block_id: Option<u32>,
 
-    /// Last sequence number processed by loss estimator.
     pub loss_est_seq: u32,
-    /// Has the estimator been initialized with the first packet?
     pub loss_est_init: bool,
 }
 
 impl SessionState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         keys: SessionKeys,
-        client_addr: std::net::SocketAddr,
-        tunnel_ip: std::net::Ipv4Addr,
+        client_addr: SocketAddr,
+        tunnel_ip: Ipv4Addr,
+        user_id: String,
+        device_id: String,
         chaos_seed: u64,
         fec_enabled: bool,
         ssrc: u32,
@@ -81,6 +81,8 @@ impl SessionState {
             ssrc,
             client_addr,
             tunnel_ip,
+            user_id,
+            device_id,
             last_seen: Instant::now(),
             fec_enabled,
             retransmit_queue: RetransmitQueue::new(),
@@ -97,26 +99,24 @@ impl SessionState {
         }
     }
 
-    /// Advance send sequence and return the current value.
     pub fn next_send_seq(&mut self) -> u32 {
         let seq = self.send_seq;
         self.send_seq = self.send_seq.wrapping_add(1);
         seq
     }
 
-    /// Advance RTP sequence counter.
     pub fn next_rtp_seq(&mut self) -> u16 {
         let seq = self.rtp_seq;
         self.rtp_seq = self.rtp_seq.wrapping_add(1);
         seq
     }
 
-    /// Advance RTP timestamp (audio: +960 per 20ms frame, video: +3000 per 33ms frame).
     pub fn advance_rtp_timestamp(&mut self, is_audio: bool) {
-        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(if is_audio { 960 } else { 3000 });
+        self.rtp_timestamp = self
+            .rtp_timestamp
+            .wrapping_add(if is_audio { 960 } else { 3000 });
     }
 
-    /// Update loss estimator.
     pub fn update_loss_stats(&mut self, received_seq: u32) {
         if !self.loss_est_init {
             self.loss_est_seq = received_seq;
@@ -127,75 +127,89 @@ impl SessionState {
 
         let diff = received_seq.wrapping_sub(self.loss_est_seq);
         if diff == 0 {
-            // Duplicate or same seq, ignore
             return;
         }
-        
+
         if diff < 0x8000_0000 {
-            // Newer packet
-            // If diff > 1, we have gaps (lost packets)
             let lost_count = diff - 1;
-            // Cap lost count to avoid filling ring with junk on huge jumps
-            let to_record_lost = lost_count.min(256); 
-            
+            let to_record_lost = lost_count.min(256);
+
             for _ in 0..to_record_lost {
                 self.loss_estimator.record(false);
             }
             self.loss_estimator.record(true);
             self.loss_est_seq = received_seq;
         }
-        // Else: old packet (diff is large positive), ignore for stats
-        // (If we wanted to be precise, we'd go back and flip a 'false' to 'true' in history,
-        // but LossEstimator is a simple ring buffer without sequence mapping).
     }
 
-    /// Estimated packet loss ratio [0.0, 1.0].
     pub fn loss_ratio(&self) -> f64 {
         self.loss_estimator.loss_ratio()
     }
 
-    /// Touch last_seen to prevent TTL expiry.
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
     }
 }
 
-// ── Session Manager ────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveSessionView {
+    pub flow_id: String,
+    pub user_id: String,
+    pub device_id: String,
+    pub tunnel_ip: String,
+    pub client_addr: String,
+    pub idle_secs: u64,
+    pub fec_enabled: bool,
+}
 
-/// Default session idle timeout before cleanup.
-const SESSION_TTL: Duration = Duration::from_secs(120);
-
-/// Cleanup interval.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Concurrent session map.
 pub struct SessionManager {
     sessions: Arc<DashMap<FlowId, SessionState>>,
-    /// Pool of assignable tunnel IPs (10.7.0.2 - 10.7.0.254).
-    next_ip_octet: std::sync::atomic::AtomicU8,
+    tunnel_ip_to_flow: Arc<DashMap<Ipv4Addr, FlowId>>,
+    flow_to_user: Arc<DashMap<FlowId, String>>,
+    flow_to_device: Arc<DashMap<FlowId, String>>,
+    user_to_flows: Arc<DashMap<String, Vec<FlowId>>>,
+    device_to_flows: Arc<DashMap<String, Vec<FlowId>>>,
+    device_leases: Arc<DashMap<String, Ipv4Addr>>,
+    lease_to_device: Arc<DashMap<Ipv4Addr, String>>,
+    next_ip_cursor: AtomicU32,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(DashMap::with_capacity(64)),
-            next_ip_octet: std::sync::atomic::AtomicU8::new(2),
+            sessions: Arc::new(DashMap::with_capacity(1_024)),
+            tunnel_ip_to_flow: Arc::new(DashMap::with_capacity(1_024)),
+            flow_to_user: Arc::new(DashMap::with_capacity(1_024)),
+            flow_to_device: Arc::new(DashMap::with_capacity(1_024)),
+            user_to_flows: Arc::new(DashMap::with_capacity(1_024)),
+            device_to_flows: Arc::new(DashMap::with_capacity(1_024)),
+            device_leases: Arc::new(DashMap::with_capacity(1_024)),
+            lease_to_device: Arc::new(DashMap::with_capacity(1_024)),
+            next_ip_cursor: AtomicU32::new(POOL_START),
         }
     }
 
-/// Maximum number of concurrent sessions to prevent DoS (memory exhaustion).
-const MAX_SESSIONS: usize = 10000;
-
-    /// Insert a new session. Returns true if inserted, false if table full.
     pub fn insert(&self, flow_id: FlowId, state: SessionState) -> bool {
-        if self.sessions.len() >= Self::MAX_SESSIONS {
+        if self.sessions.len() >= MAX_SESSIONS {
             return false;
         }
+
+        let user_id = state.user_id.clone();
+        let device_id = state.device_id.clone();
+        let tunnel_ip = state.tunnel_ip;
+
+        self.tunnel_ip_to_flow.insert(tunnel_ip, flow_id);
+        self.flow_to_user.insert(flow_id, user_id.clone());
+        self.flow_to_device.insert(flow_id, device_id.clone());
+        push_flow(&self.user_to_flows, &user_id, flow_id);
+        push_flow(&self.device_to_flows, &device_id, flow_id);
         self.sessions.insert(flow_id, state);
+
+        metrics::update_session_count(self.count());
+        metrics::update_user_session_count(&user_id, self.count_user_sessions(&user_id));
         true
     }
 
-    /// Look up a session by FlowId.
     pub fn get(
         &self,
         flow_id: &FlowId,
@@ -203,83 +217,232 @@ const MAX_SESSIONS: usize = 10000;
         self.sessions.get_mut(flow_id)
     }
 
-    /// Look up a session by tunnel IP (for TUN → UDP direction).
-    pub fn find_by_tunnel_ip(
-        &self,
-        ip: std::net::Ipv4Addr,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, FlowId, SessionState>> {
-        // Linear scan — acceptable for ≤50 sessions.
-        for entry in self.sessions.iter_mut() {
-            if entry.value().tunnel_ip == ip {
-                return Some(self.sessions.get_mut(entry.key()).unwrap());
+    pub fn flow_by_tunnel_ip(&self, ip: Ipv4Addr) -> Option<FlowId> {
+        self.tunnel_ip_to_flow.get(&ip).map(|v| *v)
+    }
+
+    pub fn remove(&self, flow_id: &FlowId) -> Option<SessionState> {
+        let removed = self.sessions.remove(flow_id)?;
+        let (_flow, state) = removed;
+
+        let user_id = state.user_id.clone();
+        let device_id = state.device_id.clone();
+        let tunnel_ip = state.tunnel_ip;
+
+        self.flow_to_user.remove(flow_id);
+        self.flow_to_device.remove(flow_id);
+        remove_flow(&self.user_to_flows, &user_id, *flow_id);
+        remove_flow(&self.device_to_flows, &device_id, *flow_id);
+
+        let mapped = self.tunnel_ip_to_flow.get(&tunnel_ip).map(|v| *v);
+        if mapped == Some(*flow_id) {
+            if let Some(next) = self
+                .device_to_flows
+                .get(&device_id)
+                .and_then(|v| v.first().copied())
+            {
+                self.tunnel_ip_to_flow.insert(tunnel_ip, next);
+            } else {
+                self.tunnel_ip_to_flow.remove(&tunnel_ip);
             }
         }
-        None
+
+        metrics::update_session_count(self.count());
+        metrics::update_user_session_count(&user_id, self.count_user_sessions(&user_id));
+
+        Some(state)
     }
 
-    /// Allocate next tunnel IP from the pool.
-    pub fn allocate_tunnel_ip(&self) -> std::net::Ipv4Addr {
-        let octet = self
-            .next_ip_octet
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Wrap around at 254 → 2
-        if octet == 0 {
-            self.next_ip_octet
-                .store(3, std::sync::atomic::Ordering::Relaxed);
+    pub fn terminate_session(&self, flow_id: &FlowId) -> bool {
+        self.remove(flow_id).is_some()
+    }
+
+    pub fn terminate_device_sessions(&self, device_id: &str) -> usize {
+        let flows = self
+            .device_to_flows
+            .get(device_id)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        let mut removed = 0;
+        for flow_id in flows {
+            if self.terminate_session(&flow_id) {
+                removed += 1;
+            }
         }
-        std::net::Ipv4Addr::new(10, 7, 0, octet)
+        removed
     }
 
-    /// Remove a session.
-    pub fn remove(&self, flow_id: &FlowId) {
-        self.sessions.remove(flow_id);
-    }
-
-    /// Remove any session that uses the given tunnel IP.
-    /// Used to enforce static IP for single-client scenarios.
-    pub fn remove_by_tunnel_ip(&self, ip: std::net::Ipv4Addr) {
-        self.sessions.retain(|_fid, session| session.tunnel_ip != ip);
-    }
-
-    /// Active session count.
     pub fn count(&self) -> usize {
         self.sessions.len()
     }
 
-    /// Clone the inner Arc for sharing across tasks.
-    pub fn shared(&self) -> Arc<DashMap<FlowId, SessionState>> {
-        self.sessions.clone()
+    pub fn count_user_sessions(&self, user_id: &str) -> usize {
+        self.user_to_flows
+            .get(user_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
-    /// Run TTL cleanup: remove sessions idle longer than SESSION_TTL.
-    /// Returns the number of removed sessions.
+    pub fn count_device_sessions(&self, device_id: &str) -> usize {
+        self.device_to_flows
+            .get(device_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    pub fn allocate_tunnel_ip(&self, device_id: &str) -> Option<Ipv4Addr> {
+        if let Some(ip) = self.device_leases.get(device_id).map(|v| *v) {
+            return Some(ip);
+        }
+
+        for _ in 0..POOL_SIZE {
+            let cursor = self
+                .next_ip_cursor
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_sub(POOL_START)
+                % POOL_SIZE
+                + POOL_START;
+            let ip = ip_from_cursor(cursor);
+            if self.lease_to_device.contains_key(&ip) {
+                continue;
+            }
+
+            self.lease_to_device.insert(ip, device_id.to_string());
+            self.device_leases.insert(device_id.to_string(), ip);
+            metrics::record_ip_lease_assigned();
+            return Some(ip);
+        }
+
+        None
+    }
+
+    pub fn release_device_lease(&self, device_id: &str) -> Option<Ipv4Addr> {
+        let ip = self.device_leases.remove(device_id).map(|(_, ip)| ip)?;
+        self.lease_to_device.remove(&ip);
+        metrics::record_ip_lease_released();
+        Some(ip)
+    }
+
     pub fn cleanup_stale(&self) -> usize {
         let now = Instant::now();
+        let stale = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                if now.duration_since(entry.value().last_seen) >= SESSION_TTL {
+                    Some(*entry.key())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
         let mut removed = 0;
-        self.sessions.retain(|_flow_id, session| {
-            let alive = now.duration_since(session.last_seen) < SESSION_TTL;
-            if !alive {
+        for flow_id in stale {
+            if self.remove(&flow_id).is_some() {
                 removed += 1;
             }
-            alive
-        });
+        }
         removed
+    }
+
+    pub fn snapshot(&self) -> Vec<ActiveSessionView> {
+        let now = Instant::now();
+        self.sessions
+            .iter()
+            .map(|entry| ActiveSessionView {
+                flow_id: flow_id_to_hex(entry.key()),
+                user_id: entry.value().user_id.clone(),
+                device_id: entry.value().device_id.clone(),
+                tunnel_ip: entry.value().tunnel_ip.to_string(),
+                client_addr: entry.value().client_addr.to_string(),
+                idle_secs: now.duration_since(entry.value().last_seen).as_secs(),
+                fec_enabled: entry.value().fec_enabled,
+            })
+            .collect()
     }
 }
 
-/// Spawn a background TTL cleanup task.
-pub async fn spawn_cleanup_task(manager: Arc<DashMap<FlowId, SessionState>>) {
+pub async fn spawn_cleanup_task(manager: Arc<SessionManager>) {
     let mut interval = tokio::time::interval(CLEANUP_INTERVAL);
     loop {
         interval.tick().await;
-        let now = Instant::now();
-        let before = manager.len();
-        manager.retain(|_fid, session| {
-            now.duration_since(session.last_seen) < SESSION_TTL
-        });
-        let removed = before - manager.len();
+        let removed = manager.cleanup_stale();
         if removed > 0 {
-            tracing::info!("TTL cleanup: removed {} stale sessions, {} active", removed, manager.len());
+            tracing::info!(
+                removed,
+                active = manager.count(),
+                "TTL cleanup removed stale sessions"
+            );
         }
+    }
+}
+
+fn ip_from_cursor(cursor: u32) -> Ipv4Addr {
+    let host = cursor;
+    let third = (host / 256) as u8;
+    let fourth = (host % 256) as u8;
+    Ipv4Addr::new(10, 7, third, fourth)
+}
+
+fn push_flow(map: &DashMap<String, Vec<FlowId>>, key: &str, flow_id: FlowId) {
+    if let Some(mut entry) = map.get_mut(key) {
+        let exists = entry.iter().any(|v| *v == flow_id);
+        if !exists {
+            entry.push(flow_id);
+        }
+    } else {
+        map.insert(key.to_string(), vec![flow_id]);
+    }
+}
+
+fn remove_flow(map: &DashMap<String, Vec<FlowId>>, key: &str, flow_id: FlowId) {
+    if let Some(mut entry) = map.get_mut(key) {
+        entry.retain(|v| *v != flow_id);
+        if entry.is_empty() {
+            drop(entry);
+            map.remove(key);
+        }
+    }
+}
+
+pub fn flow_id_to_hex(flow_id: &FlowId) -> String {
+    let mut out = String::with_capacity(32);
+    for byte in &flow_id.0 {
+        out.push(nibble_to_hex((byte >> 4) & 0x0f));
+        out.push(nibble_to_hex(byte & 0x0f));
+    }
+    out
+}
+
+pub fn flow_id_from_hex(value: &str) -> Option<FlowId> {
+    if value.len() != 32 {
+        return None;
+    }
+
+    let mut bytes = [0u8; 16];
+    let chars = value.as_bytes();
+    for i in 0..16 {
+        let hi = hex_to_nibble(chars[i * 2])?;
+        let lo = hex_to_nibble(chars[i * 2 + 1])?;
+        bytes[i] = (hi << 4) | lo;
+    }
+    Some(FlowId(bytes))
+}
+
+fn nibble_to_hex(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'a' + (nibble - 10)) as char,
+        _ => '0',
+    }
+}
+
+fn hex_to_nibble(ch: u8) -> Option<u8> {
+    match ch {
+        b'0'..=b'9' => Some(ch - b'0'),
+        b'a'..=b'f' => Some(ch - b'a' + 10),
+        b'A'..=b'F' => Some(ch - b'A' + 10),
+        _ => None,
     }
 }
