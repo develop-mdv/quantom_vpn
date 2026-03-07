@@ -59,6 +59,11 @@ jobs:
           PORT="${DEPLOY_PORT:-22}"
           touch ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+
+          # Remove stale keys for host/port to avoid "Host key verification failed" on rotated hosts
+          ssh-keygen -R "$DEPLOY_HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+          ssh-keygen -R "[$DEPLOY_HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+
           if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
             printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
           else
