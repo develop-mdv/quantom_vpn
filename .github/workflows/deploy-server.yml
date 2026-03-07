@@ -52,11 +52,18 @@ jobs:
 
       - name: Add known hosts
         env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
+          PORT="${DEPLOY_PORT:-22}"
           touch ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-          printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
+            printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H -p "$PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          fi
 
       - name: Upload bundle
         env:
