@@ -39,6 +39,7 @@ pub async fn run(
 struct HttpRequest {
     method: String,
     path: String,
+    query: HashMap<String, String>,
     body: String,
 }
 
@@ -51,7 +52,11 @@ async fn handle_connection(
 
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
-            let html = render_page(&identity_store, &session_manager, None);
+            let html = render_page(
+                &identity_store,
+                &session_manager,
+                request.query.get("msg").cloned(),
+            );
             html_response(200, "OK", html)
         }
         ("POST", "/users/create") => {
@@ -67,9 +72,7 @@ async fn handle_connection(
                 ),
                 Err(err) => format!("Create user error: {}", err),
             };
-
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/users/block") => {
             let form = parse_form(&request.body);
@@ -78,8 +81,7 @@ async fn handle_connection(
                 Ok(_) => format!("User blocked: {}", user_id),
                 Err(err) => format!("Block user error {}: {}", user_id, err),
             };
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/users/unblock") => {
             let form = parse_form(&request.body);
@@ -88,8 +90,7 @@ async fn handle_connection(
                 Ok(_) => format!("User unblocked: {}", user_id),
                 Err(err) => format!("Unblock user error {}: {}", user_id, err),
             };
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/users/delete") => {
             let form = parse_form(&request.body);
@@ -98,8 +99,7 @@ async fn handle_connection(
                 Ok(_) => format!("User deleted: {}", user_id),
                 Err(err) => format!("Delete user error {}: {}", user_id, err),
             };
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/devices/register") => {
             let form = parse_form(&request.body);
@@ -137,9 +137,7 @@ async fn handle_connection(
                 ),
                 Err(err) => format!("Register device error: {}", err),
             };
-
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/devices/revoke") => {
             let form = parse_form(&request.body);
@@ -148,8 +146,7 @@ async fn handle_connection(
                 Ok(_) => format!("Device revoked: {}", device_id),
                 Err(err) => format!("Revoke device error {}: {}", device_id, err),
             };
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         ("POST", "/sessions/terminate") => {
             let form = parse_form(&request.body);
@@ -164,8 +161,7 @@ async fn handle_connection(
                 }
                 None => format!("Invalid flow_id: {}", flow),
             };
-            let html = render_page(&identity_store, &session_manager, Some(msg));
-            html_response(200, "OK", html)
+            redirect_with_message(msg)
         }
         _ => text_response(404, "Not Found", "Not Found"),
     };
@@ -218,13 +214,22 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
 
     let method = parts.next().unwrap_or("GET").to_string();
     let target = parts.next().unwrap_or("/");
-    let path = target.split('?').next().unwrap_or("/").to_string();
+    let (path, query) = if let Some((p, q)) = target.split_once('?') {
+        (p.to_string(), parse_form(q))
+    } else {
+        (target.to_string(), HashMap::new())
+    };
 
     let body_start = end + 4;
     let body_end = (body_start + content_len).min(buf.len());
     let body = String::from_utf8_lossy(&buf[body_start..body_end]).to_string();
 
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        query,
+        body,
+    })
 }
 
 fn render_page(
@@ -424,6 +429,40 @@ fn parse_form(body: &str) -> HashMap<String, String> {
     out
 }
 
+fn redirect_with_message(message: String) -> Vec<u8> {
+    let location = format!("/?msg={}", url_encode(&message));
+    redirect_response(&location)
+}
+
+fn redirect_response(location: &str) -> Vec<u8> {
+    let header = format!(
+        "HTTP/1.1 303 See Other\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        location
+    );
+    header.into_bytes()
+}
+
+fn url_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 3 / 2);
+    for b in input.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(hex_upper((b >> 4) & 0x0f));
+            out.push(hex_upper(b & 0x0f));
+        }
+    }
+    out
+}
+
+fn hex_upper(v: u8) -> char {
+    match v {
+        0..=9 => (b'0' + v) as char,
+        10..=15 => (b'A' + (v - 10)) as char,
+        _ => '0',
+    }
+}
 fn url_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

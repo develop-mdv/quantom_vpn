@@ -85,11 +85,13 @@ impl IdentityStore {
             let users = snapshot
                 .users
                 .into_iter()
+                .filter(|user| !matches!(user.status, UserStatus::Deleted))
                 .map(|user| (user.user_id.clone(), user))
                 .collect::<HashMap<_, _>>();
             let devices = snapshot
                 .devices
                 .into_iter()
+                .filter(|device| !device.revoked && users.contains_key(&device.user_id))
                 .map(|device| (device.device_id.clone(), device))
                 .collect::<HashMap<_, _>>();
             let audit_events = snapshot.audit_events.into_iter().collect::<VecDeque<_>>();
@@ -154,7 +156,38 @@ impl IdentityStore {
     }
 
     pub fn delete_user(&self, user_id: &str, actor: &str) -> anyhow::Result<UserRecord> {
-        self.set_user_status(user_id, UserStatus::Deleted, "delete_user", actor)
+        let removed = {
+            let mut inner = self.inner.write().unwrap();
+            let user = inner
+                .users
+                .remove(user_id)
+                .ok_or_else(|| anyhow!("user {} not found", user_id))?;
+
+            let device_ids = inner
+                .devices
+                .values()
+                .filter(|d| d.user_id == user_id)
+                .map(|d| d.device_id.clone())
+                .collect::<Vec<_>>();
+            for device_id in &device_ids {
+                inner.devices.remove(device_id);
+            }
+
+            push_audit(
+                &mut inner,
+                "delete_user",
+                actor,
+                json!({
+                    "user_id": user_id,
+                    "removed_devices": device_ids.len(),
+                }),
+            );
+
+            user
+        };
+
+        self.save()?;
+        Ok(removed)
     }
 
     fn set_user_status(
@@ -274,28 +307,23 @@ impl IdentityStore {
     }
 
     pub fn revoke_device(&self, device_id: &str, actor: &str) -> anyhow::Result<DeviceRecord> {
-        let updated = {
+        let removed = {
             let mut inner = self.inner.write().unwrap();
-            let (updated, user_id) = {
-                let device = inner
-                    .devices
-                    .get_mut(device_id)
-                    .ok_or_else(|| anyhow!("device {} not found", device_id))?;
-                device.revoked = true;
-                device.updated_at = now_ts();
-                (device.clone(), device.user_id.clone())
-            };
+            let device = inner
+                .devices
+                .remove(device_id)
+                .ok_or_else(|| anyhow!("device {} not found", device_id))?;
             push_audit(
                 &mut inner,
                 "revoke_device",
                 actor,
-                json!({ "device_id": device_id, "user_id": user_id }),
+                json!({ "device_id": device_id, "user_id": device.user_id }),
             );
-            updated
+            device
         };
 
         self.save()?;
-        Ok(updated)
+        Ok(removed)
     }
 
     pub fn list_user_devices(&self, user_id: &str) -> Vec<DeviceRecord> {
@@ -553,3 +581,101 @@ pub fn ensure_identity_file(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_identity_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "omega_identity_test_{}_{}_{}.json",
+            name,
+            std::process::id(),
+            now_ts()
+        ));
+        p
+    }
+
+    #[test]
+    fn delete_user_removes_user_and_devices_from_store_and_snapshot() {
+        let path = temp_identity_path("delete_user");
+        ensure_identity_file(&path).expect("init identity file");
+
+        let store = IdentityStore::load(path.clone()).expect("load store");
+        let user = store.create_user(5, 3, "test").expect("create user");
+        store
+            .register_device(&user.user_id, "laptop", Platform::Linux, "fp-1", "test")
+            .expect("register device 1");
+        store
+            .register_device(&user.user_id, "phone", Platform::Android, "fp-2", "test")
+            .expect("register device 2");
+
+        store
+            .delete_user(&user.user_id, "test")
+            .expect("delete user");
+
+        assert!(
+            !store
+                .list_users()
+                .iter()
+                .any(|u| u.user_id == user.user_id),
+            "deleted user should not be in list_users"
+        );
+        assert!(
+            store.list_user_devices(&user.user_id).is_empty(),
+            "deleted user's devices should not be in list_user_devices"
+        );
+
+        let raw = fs::read_to_string(&path).expect("read snapshot");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse snapshot json");
+
+        let users = json["users"].as_array().expect("users array");
+        assert!(
+            !users.iter().any(|u| u["user_id"] == user.user_id),
+            "deleted user should not be persisted"
+        );
+
+        let devices = json["devices"].as_array().expect("devices array");
+        assert!(
+            !devices.iter().any(|d| d["user_id"] == user.user_id),
+            "deleted user's devices should not be persisted"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn revoke_device_removes_device_from_store_and_snapshot() {
+        let path = temp_identity_path("revoke_device");
+        ensure_identity_file(&path).expect("init identity file");
+
+        let store = IdentityStore::load(path.clone()).expect("load store");
+        let user = store.create_user(5, 3, "test").expect("create user");
+        let registered = store
+            .register_device(&user.user_id, "laptop", Platform::Linux, "fp-1", "test")
+            .expect("register device");
+
+        store
+            .revoke_device(&registered.device.device_id, "test")
+            .expect("revoke device");
+
+        assert!(
+            store.list_user_devices(&user.user_id).is_empty(),
+            "revoked device should not be in list_user_devices"
+        );
+
+        let raw = fs::read_to_string(&path).expect("read snapshot");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("parse snapshot json");
+        let devices = json["devices"].as_array().expect("devices array");
+
+        assert!(
+            !devices
+                .iter()
+                .any(|d| d["device_id"] == registered.device.device_id),
+            "revoked device should not be persisted"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+}
