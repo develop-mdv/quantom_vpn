@@ -25,8 +25,8 @@ const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 24;
 const DEFAULT_MTU: u16 = 1200;
 const DEFAULT_METRICS_PORT: u16 = 9090;
-const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "omega-server/state/sessions.json";
-const DEFAULT_ADMIN_COMMAND_PATH: &str = "omega-server/state/admin_commands.ndjson";
+const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
+const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
 const DEFAULT_ADMIN_WEB_BIND: &str = "127.0.0.1:8081";
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -471,3 +471,4 @@ fn print_admin_usage() {
     println!("  terminate_session --flow-id <32_hex_chars>");
     println!("  show_audit [--limit N]");
 }
+

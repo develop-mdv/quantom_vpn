@@ -33,6 +33,37 @@ elif [[ -f "$TARGET_LINK" ]]; then
   PREVIOUS_TARGET="$TARGET_LINK"
 fi
 
+print_diagnostics() {
+  echo "[INFO] systemd status for $SERVICE_NAME"
+  systemctl --no-pager --full status "$SERVICE_NAME" || true
+
+  echo "[INFO] Last logs for $SERVICE_NAME"
+  journalctl -u "$SERVICE_NAME" -n 80 --no-pager || true
+}
+
+wait_for_active() {
+  local attempts="${1:-20}"
+  local delay="${2:-1}"
+  local state=""
+
+  for ((i = 1; i <= attempts; i++)); do
+    state="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+
+    if [[ "$state" == "active" ]]; then
+      return 0
+    fi
+
+    if [[ "$state" == "failed" || "$state" == "inactive" ]]; then
+      break
+    fi
+
+    sleep "$delay"
+  done
+
+  echo "[ERROR] Service state after restart: ${state:-unknown}"
+  return 1
+}
+
 rollback() {
   echo "[WARN] Rolling back deployment..."
   if [[ -n "$PREVIOUS_TARGET" && -e "$PREVIOUS_TARGET" ]]; then
@@ -41,6 +72,7 @@ rollback() {
       echo "[INFO] Rollback successful. Service restored to previous version."
     else
       echo "[ERROR] Rollback failed: cannot restart $SERVICE_NAME"
+      print_diagnostics
     fi
   else
     echo "[ERROR] Rollback skipped: previous binary not found"
@@ -52,13 +84,14 @@ ln -sfn "$NEW_RELEASE_BIN" "$TARGET_LINK"
 echo "[INFO] Restarting $SERVICE_NAME"
 if ! systemctl restart "$SERVICE_NAME"; then
   echo "[ERROR] Service restart failed"
+  print_diagnostics
   rollback
   exit 1
 fi
 
-sleep 2
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+if ! wait_for_active 20 1; then
   echo "[ERROR] Service is not active after restart"
+  print_diagnostics
   rollback
   exit 1
 fi

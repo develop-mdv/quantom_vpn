@@ -22,7 +22,7 @@ use devices::{DeviceRecord, Platform};
 use limits::ensure_device_limit;
 use users::{UserRecord, UserStatus};
 
-const DEFAULT_DB_PATH: &str = "omega-server/state/identity.json";
+const DEFAULT_DB_PATH: &str = "state/identity.json";
 const DEFAULT_TOKEN_PEPPER: &str = "omega-change-this-token-pepper";
 const AUDIT_CAPACITY: usize = 10_000;
 
@@ -552,3 +552,4 @@ pub fn ensure_identity_file(path: &Path) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
