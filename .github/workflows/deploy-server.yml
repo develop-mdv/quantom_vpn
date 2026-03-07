@@ -10,6 +10,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "deploy/update_server.sh"
+      - "deploy/omega-server.service"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
 
@@ -39,6 +40,7 @@ jobs:
           mkdir -p dist
           cp target/release/omega-server dist/omega-server
           cp deploy/update_server.sh dist/update_server.sh
+          cp deploy/omega-server.service dist/omega-server.service
           chmod +x dist/omega-server dist/update_server.sh
 
       - name: Setup SSH key
@@ -133,7 +135,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/update_server.sh "$USER@$HOST:$REMOTE_DIR/"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/update_server.sh dist/omega-server.service "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Deploy on server
         env:
@@ -155,6 +157,4 @@ jobs:
              OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
              OMEGA_KEEP_RELEASES='${DEPLOY_KEEP_RELEASES:-5}' \
              OMEGA_RELEASE_ID='$GITHUB_SHA' \
-             sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server'"
-
-
+             sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service'"

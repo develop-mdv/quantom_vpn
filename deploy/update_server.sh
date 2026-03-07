@@ -2,20 +2,35 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <path_to_new_omega_server_binary>"
+  echo "Usage: $0 <path_to_new_omega_server_binary> [path_to_systemd_unit_file]"
   exit 1
 fi
 
 NEW_BIN="$1"
+NEW_UNIT="${2:-}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
 INSTALL_DIR="${OMEGA_INSTALL_DIR:-/opt/omega}"
 RELEASES_DIR="$INSTALL_DIR/releases"
 TARGET_LINK="$INSTALL_DIR/omega-server"
 KEEP_RELEASES="${OMEGA_KEEP_RELEASES:-5}"
 RELEASE_ID="${OMEGA_RELEASE_ID:-$(date +%Y%m%d%H%M%S)}"
+UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
+PREVIOUS_UNIT=""
+
+cleanup() {
+  if [[ -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
+    rm -f "$PREVIOUS_UNIT"
+  fi
+}
+trap cleanup EXIT
 
 if [[ ! -f "$NEW_BIN" ]]; then
   echo "[ERROR] Binary not found: $NEW_BIN"
+  exit 1
+fi
+
+if [[ -n "$NEW_UNIT" && ! -f "$NEW_UNIT" ]]; then
+  echo "[ERROR] Unit file not found: $NEW_UNIT"
   exit 1
 fi
 
@@ -31,6 +46,11 @@ if [[ -L "$TARGET_LINK" ]]; then
   PREVIOUS_TARGET="$(readlink -f "$TARGET_LINK" || true)"
 elif [[ -f "$TARGET_LINK" ]]; then
   PREVIOUS_TARGET="$TARGET_LINK"
+fi
+
+if [[ -f "$UNIT_PATH" ]]; then
+  PREVIOUS_UNIT="$(mktemp)"
+  cp "$UNIT_PATH" "$PREVIOUS_UNIT"
 fi
 
 print_diagnostics() {
@@ -66,6 +86,13 @@ wait_for_active() {
 
 rollback() {
   echo "[WARN] Rolling back deployment..."
+
+  if [[ -n "$NEW_UNIT" && -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
+    echo "[INFO] Restoring previous systemd unit"
+    install -m 0644 "$PREVIOUS_UNIT" "$UNIT_PATH"
+    systemctl daemon-reload || true
+  fi
+
   if [[ -n "$PREVIOUS_TARGET" && -e "$PREVIOUS_TARGET" ]]; then
     ln -sfn "$PREVIOUS_TARGET" "$TARGET_LINK"
     if systemctl restart "$SERVICE_NAME"; then
@@ -80,6 +107,12 @@ rollback() {
 }
 
 ln -sfn "$NEW_RELEASE_BIN" "$TARGET_LINK"
+
+if [[ -n "$NEW_UNIT" ]]; then
+  echo "[INFO] Installing systemd unit to $UNIT_PATH"
+  install -m 0644 "$NEW_UNIT" "$UNIT_PATH"
+  systemctl daemon-reload
+fi
 
 echo "[INFO] Restarting $SERVICE_NAME"
 if ! systemctl restart "$SERVICE_NAME"; then
