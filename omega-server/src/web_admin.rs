@@ -127,8 +127,13 @@ async fn handle_connection(
                 )
             }) {
                 Ok(reg) => format!(
-                    "Device registered: device_id={}, token={} (save token now)",
-                    reg.device.device_id, reg.device_token
+                    "Device registered successfully.\nSave token now (shown once): {}\n\nClient .env:\nOMEGA_SERVER={}\nOMEGA_DEVICE_ID={}\nOMEGA_DEVICE_TOKEN={}\nOMEGA_DEVICE_NAME={}\nOMEGA_PLATFORM={}",
+                    reg.device_token,
+                    client_server_hint(),
+                    reg.device.device_id,
+                    reg.device_token,
+                    reg.device.device_name,
+                    reg.device.platform.as_str()
                 ),
                 Err(err) => format!("Register device error: {}", err),
             };
@@ -229,6 +234,7 @@ fn render_page(
 ) -> String {
     let users = identity_store.list_users();
     let sessions = session_manager.snapshot();
+    let client_server = client_server_hint();
 
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Omega Admin</title>");
@@ -248,9 +254,13 @@ fn render_page(
     out.push_str(
         "th,td{border-bottom:1px solid #e5e7eb;padding:8px;vertical-align:top;text-align:left}",
     );
-    out.push_str(".msg{padding:10px;background:#e0f2fe;border:1px solid #7dd3fc;border-radius:8px;margin-bottom:12px}");
+    out.push_str(".msg{padding:10px;background:#e0f2fe;border:1px solid #7dd3fc;border-radius:8px;margin-bottom:12px;white-space:pre-wrap}");
     out.push_str(".mini{display:inline-block;margin-right:8px}");
     out.push_str(".mini button{margin-top:0;padding:6px 10px;font-size:12px;background:#334155}");
+    out.push_str(".env{margin:8px 0 0;padding:8px;background:#0f172a;color:#e2e8f0;border-radius:8px;white-space:pre-wrap;font-size:12px;line-height:1.35}");
+    out.push_str(".note{display:block;margin-top:6px;font-size:12px;color:#64748b}");
+    out.push_str(".copy-btn{margin-top:8px;padding:6px 10px;font-size:12px;background:#0ea5e9}");
+    out.push_str(".copy-status{margin-left:8px;font-size:12px;color:#0f766e}");
     out.push_str("</style></head><body>");
 
     out.push_str("<h1>Omega VPN Admin</h1>");
@@ -305,12 +315,25 @@ fn render_page(
             for device in devices {
                 out.push_str("<div style=\"margin-bottom:8px;padding:6px;border:1px solid #e5e7eb;border-radius:8px\">");
                 out.push_str(&format!(
-                    "<b>{}</b><br>{}<br>platform={} revoked={}",
+                    "<b>{}</b><br>{}<br>platform={} revoked={}<br>fingerprint={}",
                     escape_html(&device.device_name),
                     escape_html(&device.device_id),
                     device.platform.as_str(),
-                    device.revoked
+                    device.revoked,
+                    escape_html(&device.public_key_fingerprint)
                 ));
+                let env_block = format!(
+                    "OMEGA_SERVER={}\nOMEGA_DEVICE_ID={}\nOMEGA_DEVICE_TOKEN=<token_from_register_output>\nOMEGA_DEVICE_NAME={}\nOMEGA_PLATFORM={}",
+                    client_server,
+                    device.device_id,
+                    device.device_name,
+                    device.platform.as_str()
+                );
+                out.push_str("<pre class=\"env\">");
+                out.push_str(&escape_html(&env_block));
+                out.push_str("</pre>");
+                out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyEnv(this)\">Copy .env</button><span class=\"copy-status\"></span>");
+                out.push_str("<span class=\"note\">OMEGA_DEVICE_TOKEN is shown only once during device registration.</span>");
                 if !device.revoked {
                     out.push_str(
                         "<form method=\"post\" action=\"/devices/revoke\" class=\"mini\">",
@@ -376,6 +399,9 @@ fn render_page(
     }
     out.push_str("</tbody></table></div>");
 
+    out.push_str("<script>");
+    out.push_str("async function copyEnv(btn){const card=btn.closest('div');if(!card)return;const pre=card.querySelector('pre.env');const status=card.querySelector('.copy-status');if(!pre)return;const text=pre.innerText;try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);}else{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}if(status){status.textContent='Copied';setTimeout(()=>status.textContent='',1500);}}catch(e){if(status){status.textContent='Copy failed';setTimeout(()=>status.textContent='',2000);}}}");
+    out.push_str("</script>");
     out.push_str("</body></html>");
     out
 }
@@ -462,6 +488,25 @@ fn parse_content_length(header: &[u8]) -> usize {
         }
     }
     0
+}
+
+fn client_server_hint() -> String {
+    if let Ok(v) = std::env::var("OMEGA_CLIENT_SERVER") {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let bind = std::env::var("OMEGA_BIND").unwrap_or_else(|_| "0.0.0.0:51820".to_string());
+    if let Some(port) = bind.strip_prefix("0.0.0.0:") {
+        return format!("<SERVER_IP>:{}", port);
+    }
+    if let Some(port) = bind.strip_prefix("[::]:") {
+        return format!("<SERVER_IP>:{}", port);
+    }
+
+    bind
 }
 
 fn html_response(status: u16, reason: &str, body: String) -> Vec<u8> {
