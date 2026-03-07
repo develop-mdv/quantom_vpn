@@ -50,59 +50,111 @@ jobs:
           printf "%s" "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
-      - name: Add known hosts
+      - name: Normalize deploy config
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r\n\t ')"
+          PORT="$(printf '%s' "${DEPLOY_PORT:-22}" | tr -d '\r\n\t ')"
+          USER="$(printf '%s' "$DEPLOY_USER" | tr -d '\r\n\t ')"
+
+          if [ -z "$HOST" ]; then
+            echo "DEPLOY_HOST is empty"
+            exit 1
+          fi
+
+          if [ -z "$USER" ]; then
+            echo "DEPLOY_USER is empty"
+            exit 1
+          fi
+
+          if [ -z "$PORT" ]; then
+            PORT="22"
+          fi
+
+          if echo "$HOST" | grep -Eq '^https?://' || echo "$HOST" | grep -q '@'; then
+            echo "DEPLOY_HOST must be host/IP only (without protocol and without user@)"
+            exit 1
+          fi
+
+          if ! echo "$PORT" | grep -Eq '^[0-9]+$'; then
+            echo "DEPLOY_PORT must be numeric"
+            exit 1
+          fi
+
+          echo "DEPLOY_HOST_CLEAN=$HOST" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT_CLEAN=$PORT" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER_CLEAN=$USER" >> "$GITHUB_ENV"
+
+      - name: Add known hosts
+        env:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
-          PORT="${DEPLOY_PORT:-22}"
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          KNOWN="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r')"
+
           touch ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-          # Remove stale keys for host/port to avoid "Host key verification failed" on rotated hosts
-          ssh-keygen -R "$DEPLOY_HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
-          ssh-keygen -R "[$DEPLOY_HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+          # Remove stale keys for host/port to avoid host key mismatch after server reinstall/rotation
+          ssh-keygen -R "$HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+          ssh-keygen -R "[$HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
 
-          if [ -n "$DEPLOY_KNOWN_HOSTS" ]; then
-            printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          # Prefer live host key; use secret fallback only when keyscan is unavailable
+          SCANNED="$(ssh-keyscan -H -p "$PORT" "$HOST" 2>/dev/null || true)"
+          if [ -n "$SCANNED" ]; then
+            printf "%s\n" "$SCANNED" >> ~/.ssh/known_hosts
+          elif [ -n "$KNOWN" ]; then
+            printf "%s\n" "$KNOWN" >> ~/.ssh/known_hosts
           else
-            ssh-keyscan -H -p "$PORT" "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+            echo "Unable to fetch SSH host key via ssh-keyscan for $HOST:$PORT"
+            echo "Check DEPLOY_HOST/DEPLOY_PORT and network access from GitHub runner"
+            exit 1
+          fi
+
+          if ! ssh-keygen -F "$HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 && \
+             ! ssh-keygen -F "[$HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1; then
+            echo "No host key entry found in known_hosts for $HOST:$PORT"
+            exit 1
           fi
 
       - name: Upload bundle
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          PORT="${DEPLOY_PORT:-22}"
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
           REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
-          ssh -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -P "$PORT" dist/omega-server dist/update_server.sh "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_DIR/"
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/update_server.sh "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Deploy on server
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
           DEPLOY_INSTALL_DIR: ${{ secrets.DEPLOY_INSTALL_DIR }}
           DEPLOY_KEEP_RELEASES: ${{ secrets.DEPLOY_KEEP_RELEASES }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
-          PORT="${DEPLOY_PORT:-22}"
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
           REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
-          ssh -p "$PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
              OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
              OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
              OMEGA_KEEP_RELEASES='${DEPLOY_KEEP_RELEASES:-5}' \
              OMEGA_RELEASE_ID='$GITHUB_SHA' \
              sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server'"
+
+
