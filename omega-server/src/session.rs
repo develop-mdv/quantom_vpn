@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
 use omega_core::chaos::ChaosPrng;
 use omega_core::crypto::SessionKeys;
-use omega_core::protocol::FlowId;
+use omega_core::protocol::{FlowId, NackMessage};
 use omega_core::replay::ReplayFilter;
 use serde::Serialize;
 
@@ -23,6 +23,13 @@ const MAX_SESSIONS: usize = 10_000;
 const POOL_START: u32 = 2; // 10.7.0.2
 const POOL_END: u32 = 65_534; // 10.7.255.254
 const POOL_SIZE: u32 = POOL_END - POOL_START + 1;
+const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
+const PADDING_BUDGET_MIN: usize = 0;
+const PADDING_BUDGET_MAX: usize = 256;
+const PADDING_RECOVERY_STEP: usize = 24;
+const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
+const REDUNDANCY_EXTRA_MAX: u8 = 2;
+const REDUNDANCY_DECAY_SECS: u64 = 8;
 
 pub struct SessionState {
     pub keys: SessionKeys,
@@ -39,6 +46,10 @@ pub struct SessionState {
     pub device_id: String,
     pub last_seen: Instant,
     pub fec_enabled: bool,
+    pub padding_budget: usize,
+    pub last_padding_adjust: Instant,
+    pub redundancy_extra: u8,
+    pub last_redundancy_adjust: Instant,
 
     pub retransmit_queue: RetransmitQueue,
     pub gap_detector: GapDetector,
@@ -85,7 +96,11 @@ impl SessionState {
             device_id,
             last_seen: Instant::now(),
             fec_enabled,
-            retransmit_queue: RetransmitQueue::new(),
+            padding_budget: PADDING_BUDGET_MAX,
+            last_padding_adjust: Instant::now(),
+            redundancy_extra: 0,
+            last_redundancy_adjust: Instant::now(),
+            retransmit_queue: RetransmitQueue::with_initial_rtt(DEFAULT_INITIAL_ARQ_RTT_MS),
             gap_detector: GapDetector::new(),
             loss_estimator: LossEstimator::new(),
             #[cfg(feature = "fec")]
@@ -148,6 +163,51 @@ impl SessionState {
 
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
+    }
+
+    pub fn current_padding_budget(&mut self) -> usize {
+        let elapsed = self.last_padding_adjust.elapsed().as_secs();
+        let ticks = elapsed / PADDING_RECOVERY_INTERVAL_SECS;
+        if ticks > 0 {
+            let growth = (ticks as usize).saturating_mul(PADDING_RECOVERY_STEP);
+            self.padding_budget = self
+                .padding_budget
+                .saturating_add(growth)
+                .min(PADDING_BUDGET_MAX);
+            self.last_padding_adjust = Instant::now();
+        }
+        self.padding_budget
+    }
+
+    pub fn on_remote_nack(&mut self, nack: &NackMessage) {
+        let missing = nack.bitmap.count_ones() as usize;
+        if missing == 0 {
+            return;
+        }
+
+        let penalty = 16 + missing.saturating_mul(8);
+        self.padding_budget = self
+            .padding_budget
+            .saturating_sub(penalty)
+            .max(PADDING_BUDGET_MIN);
+        self.last_padding_adjust = Instant::now();
+
+        let bump = if missing >= 16 { 2 } else { 1 };
+        self.redundancy_extra = self
+            .redundancy_extra
+            .saturating_add(bump)
+            .min(REDUNDANCY_EXTRA_MAX);
+        self.last_redundancy_adjust = Instant::now();
+    }
+
+    pub fn current_redundancy_extra(&mut self) -> usize {
+        let elapsed = self.last_redundancy_adjust.elapsed().as_secs();
+        let ticks = elapsed / REDUNDANCY_DECAY_SECS;
+        if ticks > 0 {
+            self.redundancy_extra = self.redundancy_extra.saturating_sub(ticks as u8);
+            self.last_redundancy_adjust = Instant::now();
+        }
+        self.redundancy_extra as usize
     }
 }
 

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use bytes::BytesMut;
@@ -17,6 +17,20 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
 const DEFAULT_TUN_PREFIX: u8 = 24;
 const DEFAULT_MTU: u16 = 1200;
+const DEFAULT_KEEPALIVE_SECS: u64 = 15;
+const DEFAULT_HANDSHAKE_ATTEMPTS: u32 = 5;
+const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 1500;
+const DEFAULT_HANDSHAKE_BACKOFF_MS: u64 = 500;
+const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
+const MAX_RETRANSMIT_BURST: usize = 24;
+const RETRANSMIT_PACING_US: u64 = 500;
+const PADDING_BUDGET_MIN: usize = 0;
+const PADDING_BUDGET_MAX: usize = 256;
+const PADDING_RECOVERY_STEP: usize = 24;
+const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
+const REDUNDANCY_EXTRA_MAX: u8 = 2;
+const REDUNDANCY_DECAY_SECS: u64 = 8;
+const REDUNDANCY_PACING_US: u64 = 200;
 
 struct ClientState {
     retransmit_queue: RetransmitQueue,
@@ -26,19 +40,72 @@ struct ClientState {
     rtp_timestamp: u32,
     ssrc: u32,
     chaos: ChaosPrng,
+    padding_budget: usize,
+    last_padding_adjust: Instant,
+    redundancy_extra: u8,
+    last_redundancy_adjust: Instant,
 }
 
 impl ClientState {
     fn new(ssrc: u32, chaos_seed: u64) -> Self {
         Self {
-            retransmit_queue: RetransmitQueue::new(),
+            retransmit_queue: RetransmitQueue::with_initial_rtt(DEFAULT_INITIAL_ARQ_RTT_MS),
             gap_detector: GapDetector::new(),
             send_seq: 0,
             rtp_seq: 0,
             rtp_timestamp: 0,
             ssrc,
             chaos: ChaosPrng::new(chaos_seed),
+            padding_budget: PADDING_BUDGET_MAX,
+            last_padding_adjust: Instant::now(),
+            redundancy_extra: 0,
+            last_redundancy_adjust: Instant::now(),
         }
+    }
+
+    fn current_padding_budget(&mut self) -> usize {
+        let elapsed = self.last_padding_adjust.elapsed().as_secs();
+        let ticks = elapsed / PADDING_RECOVERY_INTERVAL_SECS;
+        if ticks > 0 {
+            let growth = (ticks as usize).saturating_mul(PADDING_RECOVERY_STEP);
+            self.padding_budget = self
+                .padding_budget
+                .saturating_add(growth)
+                .min(PADDING_BUDGET_MAX);
+            self.last_padding_adjust = Instant::now();
+        }
+        self.padding_budget
+    }
+
+    fn on_remote_nack(&mut self, nack: &NackMessage) {
+        let missing = nack.bitmap.count_ones() as usize;
+        if missing == 0 {
+            return;
+        }
+
+        let penalty = 16 + missing.saturating_mul(8);
+        self.padding_budget = self
+            .padding_budget
+            .saturating_sub(penalty)
+            .max(PADDING_BUDGET_MIN);
+        self.last_padding_adjust = Instant::now();
+
+        let bump = if missing >= 16 { 2 } else { 1 };
+        self.redundancy_extra = self
+            .redundancy_extra
+            .saturating_add(bump)
+            .min(REDUNDANCY_EXTRA_MAX);
+        self.last_redundancy_adjust = Instant::now();
+    }
+
+    fn current_redundancy_extra(&mut self) -> usize {
+        let elapsed = self.last_redundancy_adjust.elapsed().as_secs();
+        let ticks = elapsed / REDUNDANCY_DECAY_SECS;
+        if ticks > 0 {
+            self.redundancy_extra = self.redundancy_extra.saturating_sub(ticks as u8);
+            self.last_redundancy_adjust = Instant::now();
+        }
+        self.redundancy_extra as usize
     }
 }
 
@@ -284,6 +351,99 @@ fn hex_value(v: u8) -> Option<u8> {
     }
 }
 
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+async fn perform_handshake(
+    udp: &UdpSocket,
+    server_addr: SocketAddr,
+    client_hello: &ClientHello,
+) -> anyhow::Result<ServerHello> {
+    let attempts = env_u32("OMEGA_HANDSHAKE_ATTEMPTS", DEFAULT_HANDSHAKE_ATTEMPTS).max(1);
+    let timeout_ms = env_u64("OMEGA_HANDSHAKE_TIMEOUT_MS", DEFAULT_HANDSHAKE_TIMEOUT_MS).max(250);
+    let backoff_ms = env_u64("OMEGA_HANDSHAKE_BACKOFF_MS", DEFAULT_HANDSHAKE_BACKOFF_MS).max(100);
+
+    let txn_id: [u8; 12] = rand::random();
+    let request = StunWrapper::wrap_request(&txn_id, &client_hello.serialize());
+    let mut buf = vec![0u8; 4096];
+    let mut last_error = String::from("timeout");
+
+    for attempt in 1..=attempts {
+        udp.send_to(&request, server_addr).await?;
+        tracing::info!(attempt, attempts, %server_addr, "handshake request sent");
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, udp.recv_from(&mut buf)).await {
+                Ok(Ok((n, _src))) => {
+                    let parsed = StunWrapper::parse(&buf[..n]);
+                    let Some((is_request, resp_txn, resp_payload)) = parsed else {
+                        continue;
+                    };
+                    if is_request || resp_txn != txn_id {
+                        continue;
+                    }
+
+                    if let Some(hello) = ServerHello::deserialize(resp_payload) {
+                        return Ok(hello);
+                    }
+                    if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
+                        return Err(anyhow::anyhow!(
+                            "handshake rejected by server: {:?}",
+                            reject.reason
+                        ));
+                    }
+
+                    last_error = "malformed handshake response payload".to_string();
+                    break;
+                }
+                Ok(Err(err)) => {
+                    return Err(err.into());
+                }
+                Err(_) => {
+                    last_error = format!("timeout after {} ms", timeout_ms);
+                    break;
+                }
+            }
+        }
+
+        if attempt < attempts {
+            let backoff = Duration::from_millis(backoff_ms.saturating_mul(attempt as u64));
+            tracing::warn!(
+                attempt,
+                attempts,
+                wait_ms = backoff.as_millis(),
+                "handshake attempt failed, retrying"
+            );
+            tokio::time::sleep(backoff).await;
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "handshake failed after {} attempts: {}",
+        attempts,
+        last_error
+    ))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -352,31 +512,8 @@ async fn main() -> anyhow::Result<()> {
         }),
     };
 
-    let txn_id: [u8; 12] = rand::random();
-    let request = StunWrapper::wrap_request(&txn_id, &client_hello.serialize());
-    udp.send_to(&request, server_addr).await?;
-    tracing::info!(%server_addr, "handshake request sent");
-
-    let mut buf = vec![0u8; 4096];
-    let (n, _src) =
-        tokio::time::timeout(std::time::Duration::from_secs(10), udp.recv_from(&mut buf)).await??;
-
-    let (is_request, _resp_txn, resp_payload) =
-        StunWrapper::parse(&buf[..n]).ok_or_else(|| anyhow::anyhow!("invalid STUN response"))?;
-    if is_request {
-        return Err(anyhow::anyhow!("expected STUN response, got request"));
-    }
-
-    let server_hello = if let Some(hello) = ServerHello::deserialize(resp_payload) {
-        hello
-    } else if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
-        return Err(anyhow::anyhow!(
-            "handshake rejected by server: {:?}",
-            reject.reason
-        ));
-    } else {
-        return Err(anyhow::anyhow!("malformed handshake response payload"));
-    };
+    let keepalive_secs = env_u64("OMEGA_KEEPALIVE_SECS", DEFAULT_KEEPALIVE_SECS).max(5);
+    let server_hello = perform_handshake(&udp, server_addr, &client_hello).await?;
 
     let ct_array: &ml_kem::Ciphertext<MlKem768> = server_hello
         .ciphertext
@@ -420,7 +557,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (nack_tx, mut nack_rx) = tokio::sync::mpsc::channel::<NackMessage>(100);
 
-    let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let mut keepalive_interval = tokio::time::interval(Duration::from_secs(keepalive_secs));
     keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tokio::spawn(async move {
@@ -467,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(nack) = nack_rx.recv() => {
                     let (nack_seq, rtp_s, rtp_ts, ssrc) = {
                         let mut s = state_send.lock().unwrap();
+                        s.on_remote_nack(&nack);
                         let seq = s.send_seq;
                         s.send_seq = s.send_seq.wrapping_add(1);
                         s.rtp_seq = s.rtp_seq.wrapping_add(1);
@@ -505,7 +643,7 @@ async fn main() -> anyhow::Result<()> {
 
                     let is_small = n < 500;
 
-                    let (seq, rtp_s, rtp_ts, ssrc, target_size) = {
+                    let (seq, rtp_s, rtp_ts, ssrc, target_size, padding_budget, redundancy_extra) = {
                         let mut s = state_send.lock().unwrap();
                         let seq = s.send_seq;
                         s.send_seq = s.send_seq.wrapping_add(1);
@@ -513,8 +651,18 @@ async fn main() -> anyhow::Result<()> {
                         s.rtp_seq = s.rtp_seq.wrapping_add(1);
                         s.rtp_timestamp = s.rtp_timestamp.wrapping_add(if is_small { 960 } else { 3000 });
                         let target_size = s.chaos.get_target_size() as usize;
+                        let padding_budget = s.current_padding_budget();
+                        let redundancy_extra = s.current_redundancy_extra();
 
-                        (seq, s.rtp_seq, s.rtp_timestamp, s.ssrc, target_size)
+                        (
+                            seq,
+                            s.rtp_seq,
+                            s.rtp_timestamp,
+                            s.ssrc,
+                            target_size,
+                            padding_budget,
+                            redundancy_extra,
+                        )
                     };
 
                     let rtp = if is_small {
@@ -531,7 +679,8 @@ async fn main() -> anyhow::Result<()> {
 
                     let overhead = TOTAL_HEADER_LEN + AEAD_TAG_LEN;
                     let wire_size = n + overhead;
-                    let padding_len = target_size.saturating_sub(wire_size);
+                    let desired_padding = target_size.saturating_sub(wire_size);
+                    let padding_len = desired_padding.min(padding_budget);
 
                     let mut out = BytesMut::with_capacity(wire_size + padding_len);
                     out.resize(TOTAL_HEADER_LEN, 0);
@@ -559,6 +708,14 @@ async fn main() -> anyhow::Result<()> {
 
                     if let Err(e) = udp_r.send_to(&out, server_addr).await {
                         tracing::error!(error = %e, "UDP send failed");
+                    } else {
+                        for _ in 0..redundancy_extra {
+                            tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
+                            if let Err(e) = udp_r.send_to(&out, server_addr).await {
+                                tracing::trace!(error = %e, "UDP redundant send failed");
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -638,16 +795,26 @@ async fn main() -> anyhow::Result<()> {
                                 PacketType::Nack => {
                                     if let Some(nack) = NackMessage::read_from(plaintext) {
                                         let packets = {
-                                            let s = state_recv.lock().unwrap();
+                                            let mut s = state_recv.lock().unwrap();
+                                            s.on_remote_nack(&nack);
+                                            s.retransmit_queue.observe_nack(&nack, current_ms());
                                             s.retransmit_queue
                                                 .process_nack(&nack)
                                                 .into_iter()
+                                                .take(MAX_RETRANSMIT_BURST)
                                                 .map(|p| p.data.clone())
                                                 .collect::<Vec<_>>()
                                         };
 
-                                        for pkt in packets {
+                                        let packets_len = packets.len();
+                                        for (idx, pkt) in packets.into_iter().enumerate() {
                                             let _ = udp_w.send_to(&pkt, server_addr).await;
+                                            if idx + 1 < packets_len {
+                                                tokio::time::sleep(Duration::from_micros(
+                                                    RETRANSMIT_PACING_US,
+                                                ))
+                                                .await;
+                                            }
                                         }
                                     }
                                 }

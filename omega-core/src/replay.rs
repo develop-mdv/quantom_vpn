@@ -142,10 +142,7 @@ mod tests {
             "seq 10 should be too old (window at 200, size 128)"
         );
         // But seq 200-127 = 73 should still be in window if not seen
-        assert!(
-            rf.check_and_update(73),
-            "seq 73 should be within window"
-        );
+        assert!(rf.check_and_update(73), "seq 73 should be within window");
     }
 
     #[test]
@@ -153,8 +150,8 @@ mod tests {
         let mut rf = ReplayFilter::new();
         assert!(rf.check_and_update(0));
         assert!(rf.check_and_update(127)); // advance to 127
-        // seq 0 is exactly at window boundary (127 - 0 = 127 < 128) → should accept
-        // But we already received seq 0 above
+                                           // seq 0 is exactly at window boundary (127 - 0 = 127 < 128) → should accept
+                                           // But we already received seq 0 above
         assert!(!rf.check_and_update(0), "already received");
         // seq 1 is at diff 126, not yet received
         assert!(rf.check_and_update(1));
@@ -165,7 +162,7 @@ mod tests {
         let mut rf = ReplayFilter::new();
         assert!(rf.check_and_update(0));
         assert!(rf.check_and_update(128)); // window_top=128
-        // seq 0: diff = 128 = WINDOW_SIZE → too old
+                                           // seq 0: diff = 128 = WINDOW_SIZE → too old
         assert!(
             !rf.check_and_update(0),
             "seq 0 should be outside window (diff=128)"

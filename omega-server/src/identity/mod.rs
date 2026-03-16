@@ -581,7 +581,6 @@ pub fn ensure_identity_file(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,10 +615,7 @@ mod tests {
             .expect("delete user");
 
         assert!(
-            !store
-                .list_users()
-                .iter()
-                .any(|u| u.user_id == user.user_id),
+            !store.list_users().iter().any(|u| u.user_id == user.user_id),
             "deleted user should not be in list_users"
         );
         assert!(

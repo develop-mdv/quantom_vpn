@@ -30,5 +30,10 @@ fn bench_chaos_batch_1000(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_chaos_next, bench_chaos_get_target_size, bench_chaos_batch_1000);
+criterion_group!(
+    benches,
+    bench_chaos_next,
+    bench_chaos_get_target_size,
+    bench_chaos_batch_1000
+);
 criterion_main!(benches);

@@ -8,7 +8,6 @@
 /// - Dynamic repair: +3 at low loss, up to +10 at high loss.
 /// - Uses `Encoder::get_encoded_packets(repair_count)` which returns
 ///   all source + repair packets in a single call.
-
 extern crate alloc;
 use alloc::vec::Vec;
 
@@ -196,7 +195,8 @@ mod tests {
         let config = FecConfig::default();
         let encoder = FecEncoder::new(config);
 
-        let original = b"Hello, this is a test payload for RaptorQ FEC encoding and decoding roundtrip!";
+        let original =
+            b"Hello, this is a test payload for RaptorQ FEC encoding and decoding roundtrip!";
         let packets = encoder.encode_block(original, 5.0);
         assert!(!packets.is_empty());
 

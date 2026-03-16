@@ -5,10 +5,9 @@
 /// - **Receiver** (`GapDetector`): detects missing sequence numbers, emits NACK bitmaps.
 ///
 /// Design constraints:
-/// - Max 64 outstanding packets in retransmit queue (bounded memory).
+/// - Max 256 outstanding packets in retransmit queue (bounded memory).
 /// - NACK bitmap: 64 bits → covers 64 consecutive seq numbers.
 /// - Timeout: retransmit queue entries expire after 3×RTT.
-
 extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -18,7 +17,7 @@ use crate::protocol::NackMessage;
 // ── Sender: Retransmit Queue ───────────────────────────────────────
 
 /// Maximum cached packets for retransmission.
-const RETRANSMIT_CACHE_SIZE: usize = 64;
+const RETRANSMIT_CACHE_SIZE: usize = 256;
 
 /// A cached packet ready for retransmission.
 #[derive(Clone)]
@@ -42,9 +41,13 @@ pub struct RetransmitQueue {
 
 impl RetransmitQueue {
     pub fn new() -> Self {
+        Self::with_initial_rtt(100)
+    }
+
+    pub fn with_initial_rtt(initial_rtt_ms: u64) -> Self {
         Self {
             cache: VecDeque::with_capacity(RETRANSMIT_CACHE_SIZE),
-            rtt_ms: 100, // Initial RTT estimate
+            rtt_ms: initial_rtt_ms.clamp(20, 5_000),
         }
     }
 
@@ -69,6 +72,20 @@ impl RetransmitQueue {
             }
         }
         out
+    }
+
+    /// Observe NACK timing and refine RTT estimate.
+    pub fn observe_nack(&mut self, nack: &NackMessage, now_ms: u64) {
+        let sample = nack.missing_seqs().find_map(|seq| {
+            self.cache
+                .iter()
+                .find(|pkt| pkt.seq == seq)
+                .map(|pkt| now_ms.saturating_sub(pkt.sent_at_ms))
+        });
+
+        if let Some(sample_ms) = sample {
+            self.update_rtt(sample_ms.clamp(20, 5_000));
+        }
     }
 
     /// Purge packets older than 3×RTT.
@@ -160,7 +177,7 @@ impl GapDetector {
         if self.nack_cooldown == 0 {
             let nack = self.check_gaps();
             if nack.is_some() {
-                self.nack_cooldown = 10;
+                self.nack_cooldown = 4;
                 self.pending_nacks += 1;
             }
             nack

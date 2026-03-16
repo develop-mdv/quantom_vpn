@@ -96,6 +96,18 @@ pub fn process_client_handshake(
         }
     };
 
+    let replaced_sessions = session_manager.terminate_device_sessions(&auth_ctx.device.device_id);
+    if replaced_sessions > 0 {
+        metrics::record_device_reconnect(replaced_sessions);
+        tracing::info!(
+            %client_addr,
+            user_id = %auth_ctx.user.user_id,
+            device_id = %auth_ctx.device.device_id,
+            replaced_sessions,
+            "device reconnect: replaced stale active session(s)"
+        );
+    }
+
     if ensure_session_limit(
         &auth_ctx.user,
         session_manager.count_user_sessions(&auth_ctx.user.user_id),
@@ -186,6 +198,7 @@ pub fn process_client_handshake(
         %tunnel_ip,
         mtu = negotiated_mtu,
         fec = fec_enabled,
+        replaced_sessions,
         sessions = session_manager.count(),
         "new session established"
     );

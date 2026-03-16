@@ -1,5 +1,6 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::BytesMut;
 use tokio::net::UdpSocket;
@@ -16,6 +17,9 @@ use crate::session::SessionManager;
 
 const UDP_BUF_SIZE: usize = 2048;
 const TUN_BUF_SIZE: usize = 1500;
+const MAX_RETRANSMIT_BURST: usize = 24;
+const RETRANSMIT_PACING_US: u64 = 500;
+const REDUNDANCY_PACING_US: u64 = 200;
 
 pub async fn tun_to_udp_loop(
     tun: Arc<tun_rs::AsyncDevice>,
@@ -51,6 +55,8 @@ pub async fn tun_to_udp_loop(
         };
 
         let target_size = session.chaos.get_target_size() as usize;
+        let padding_budget = session.current_padding_budget();
+        let redundancy_extra = session.current_redundancy_extra();
 
         let is_small = n < 500;
         let rtp_seq = session.next_rtp_seq();
@@ -70,7 +76,8 @@ pub async fn tun_to_udp_loop(
 
         let overhead = TOTAL_HEADER_LEN + AEAD_TAG_LEN;
         let wire_size = n + overhead;
-        let padding_len = target_size.saturating_sub(wire_size);
+        let desired_padding = target_size.saturating_sub(wire_size);
+        let padding_len = desired_padding.min(padding_budget);
 
         let total_len = wire_size + padding_len;
         let mut out = BytesMut::with_capacity(total_len);
@@ -108,9 +115,17 @@ pub async fn tun_to_udp_loop(
         if let Err(e) = udp.send_to(&out, client_addr).await {
             tracing::error!(error = %e, "UDP send error");
             continue;
+        } else {
+            metrics::record_packet_out(out.len());
+            for _ in 0..redundancy_extra {
+                tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
+                if let Err(e) = udp.send_to(&out, client_addr).await {
+                    tracing::trace!(error = %e, "UDP redundant send error");
+                    break;
+                }
+                metrics::record_packet_out(out.len());
+            }
         }
-
-        metrics::record_packet_out(out.len());
     }
 }
 
@@ -202,6 +217,8 @@ pub async fn udp_to_tun_loop(
                             PacketType::Data => {
                                 if let Some(nack) = session.gap_detector.record_received(omega.seq)
                                 {
+                                    session.on_remote_nack(&nack);
+                                    metrics::record_nack_sent(nack.bitmap.count_ones());
                                     let nack_seq = session.next_send_seq();
                                     let nack_omega = OmegaHeader {
                                         flow_id: omega.flow_id,
@@ -256,15 +273,34 @@ pub async fn udp_to_tun_loop(
                             }
                             PacketType::Nack => {
                                 if let Some(nack) = NackMessage::read_from(plaintext) {
+                                    metrics::record_nack_received(nack.bitmap.count_ones());
+                                    session.on_remote_nack(&nack);
+                                    let now_ms = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64;
+                                    session.retransmit_queue.observe_nack(&nack, now_ms);
                                     let packets = session.retransmit_queue.process_nack(&nack);
                                     if !packets.is_empty() {
                                         let addr = session.client_addr;
                                         let udp_clone = udp.clone();
-                                        let to_send: Vec<Vec<u8>> =
-                                            packets.iter().map(|p| p.data.clone()).collect();
+                                        let to_send: Vec<Vec<u8>> = packets
+                                            .iter()
+                                            .take(MAX_RETRANSMIT_BURST)
+                                            .map(|p| p.data.clone())
+                                            .collect();
+                                        let dropped = packets.len().saturating_sub(to_send.len());
+                                        metrics::record_retransmit_sent(to_send.len(), dropped);
                                         tokio::spawn(async move {
-                                            for pkt in to_send {
+                                            let total = to_send.len();
+                                            for (idx, pkt) in to_send.into_iter().enumerate() {
                                                 let _ = udp_clone.send_to(&pkt, addr).await;
+                                                if idx + 1 < total {
+                                                    tokio::time::sleep(Duration::from_micros(
+                                                        RETRANSMIT_PACING_US,
+                                                    ))
+                                                    .await;
+                                                }
                                             }
                                         });
                                     }

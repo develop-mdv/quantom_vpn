@@ -1,10 +1,9 @@
+use hkdf::Hkdf;
 /// Crypto module — ChaCha20-Poly1305 AEAD + HKDF key derivation.
 ///
 /// Uses `ring` for AEAD (SIMD-accelerated) and `hkdf`+`sha2` for key derivation.
 /// Provides `SessionKeys` for per-connection encrypt/decrypt with auto-incrementing nonces.
-
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
-use hkdf::Hkdf;
 use sha2::Sha256;
 
 /// Derived session keys for one direction of traffic.
@@ -37,7 +36,10 @@ impl SessionKeys {
     }
 
     /// Derive raw key bytes from the shared secret.
-    pub fn derive_raw_keys(shared_secret: &[u8], is_server: bool) -> Result<RawKeyMaterial, CryptoError> {
+    pub fn derive_raw_keys(
+        shared_secret: &[u8],
+        is_server: bool,
+    ) -> Result<RawKeyMaterial, CryptoError> {
         let hk = Hkdf::<Sha256>::new(Some(b"omega-vpn-v1"), shared_secret);
 
         let mut key_a = [0u8; 32];

@@ -177,11 +177,7 @@ mod tests {
             let size = prng.get_target_size();
             let in_small = size >= SMALL_MIN && size <= SMALL_MAX;
             let in_large = size >= LARGE_MIN && size <= LARGE_MAX;
-            assert!(
-                in_small || in_large,
-                "size {} not in any valid range",
-                size
-            );
+            assert!(in_small || in_large, "size {} not in any valid range", size);
         }
     }
 
