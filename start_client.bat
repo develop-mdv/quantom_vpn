@@ -79,6 +79,7 @@ echo Optional:
 echo   OMEGA_DEVICE_NAME=my-laptop
 
 echo   OMEGA_PLATFORM=windows
+echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
 
 echo.
 echo Example .env:
@@ -86,6 +87,7 @@ echo   OMEGA_SERVER=203.0.113.1:51820
 echo   OMEGA_DEVICE_ID=11111111-2222-3333-4444-555555555555
 echo   OMEGA_DEVICE_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 echo   OMEGA_DEVICE_NAME=home-pc
+echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
 pause
 goto :end
 

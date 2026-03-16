@@ -18,17 +18,17 @@ echo "Backed up /etc/ufw/before.rules"
 # 3. Check if NAT is already configured
 if grep -q "*nat" /etc/ufw/before.rules; then
     echo "NAT *might* already be configured. Please check /etc/ufw/before.rules manually."
-    echo "Look for: -A POSTROUTING -s 10.7.0.0/24 -o $IFACE -j MASQUERADE"
+    echo "Look for: -A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE"
 else
     # 4. Inject NAT block at the top
-    echo "Injecting NAT rules for 10.7.0.0/24 -> $IFACE..."
+    echo "Injecting NAT rules for 10.7.0.0/16 -> $IFACE..."
     
     # We use a temp file to prepend the NAT block
     cat <<EOF > /tmp/ufw_nat.tmp
 # START OMEGA VPN NAT
 *nat
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s 10.7.0.0/24 -o $IFACE -j MASQUERADE
+-A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE
 COMMIT
 # END OMEGA VPN NAT
 

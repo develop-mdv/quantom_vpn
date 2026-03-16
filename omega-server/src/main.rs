@@ -22,7 +22,7 @@ use identity::{
 
 const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
-const DEFAULT_TUN_PREFIX: u8 = 24;
+const DEFAULT_TUN_PREFIX: u8 = 16;
 const DEFAULT_MTU: u16 = 1200;
 const DEFAULT_METRICS_PORT: u16 = 9090;
 const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";

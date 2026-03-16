@@ -15,7 +15,7 @@ use tokio::net::UdpSocket;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
-const DEFAULT_TUN_PREFIX: u8 = 24;
+const DEFAULT_TUN_PREFIX: u8 = 16;
 const DEFAULT_MTU: u16 = 1200;
 const DEFAULT_KEEPALIVE_SECS: u64 = 15;
 const DEFAULT_HANDSHAKE_ATTEMPTS: u32 = 5;
@@ -184,7 +184,7 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
         std::thread::sleep(Duration::from_millis(500));
     }
 
-    if if_index.is_empty() {
+    if if_index.is_empty() || if_alias.is_empty() {
         tracing::error!("could not find Wintun interface");
         return;
     }
@@ -200,6 +200,28 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
             "store=active",
         ])
         .status();
+
+    let dns_servers = windows_dns_servers();
+    if !dns_servers.is_empty() {
+        let dns_ps = dns_servers
+            .iter()
+            .map(|v| format!("'{}'", v))
+            .collect::<Vec<_>>()
+            .join(",");
+        let alias_ps = powershell_quote(&if_alias);
+        let set_dns_cmd = format!(
+            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
+            alias_ps, dns_ps
+        );
+        let _ = Command::new("powershell")
+            .args(["-Command", &set_dns_cmd])
+            .status();
+        tracing::info!(
+            interface = %if_alias,
+            dns = %dns_servers.join(","),
+            "configured DNS on Wintun interface"
+        );
+    }
 
     let ps_cmd = format!(
         "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object {{ $_.InterfaceIndex -ne {} }} | Sort-Object RouteMetric | Select-Object -First 1).NextHop",
@@ -261,8 +283,30 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
 }
 
 #[cfg(target_os = "windows")]
-fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr) {
+fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net::Ipv4Addr) {
     use std::process::Command;
+
+    let tunnel_ip_s = tunnel_ip.to_string();
+    let alias_cmd = format!(
+        "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceAlias",
+        tunnel_ip_s
+    );
+    if let Ok(output) = Command::new("powershell")
+        .args(["-Command", &alias_cmd])
+        .output()
+    {
+        let alias = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !alias.is_empty() {
+            let reset_dns = format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+                powershell_quote(&alias)
+            );
+            let _ = Command::new("powershell")
+                .args(["-Command", &reset_dns])
+                .status();
+        }
+    }
+
     let _ = Command::new("route")
         .args(["delete", &server_ip.to_string()])
         .status();
@@ -277,7 +321,37 @@ fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr) {
 #[cfg(not(target_os = "windows"))]
 fn configure_windows_routing(_: std::net::Ipv4Addr, _: std::net::Ipv4Addr) {}
 #[cfg(not(target_os = "windows"))]
-fn cleanup_windows_routing(_: std::net::Ipv4Addr) {}
+fn cleanup_windows_routing(_: std::net::Ipv4Addr, _: std::net::Ipv4Addr) {}
+
+#[cfg(target_os = "windows")]
+fn windows_dns_servers() -> Vec<String> {
+    let configured =
+        std::env::var("OMEGA_DNS_SERVERS").unwrap_or_else(|_| "1.1.1.1,8.8.8.8".to_string());
+    let mut servers = Vec::new();
+
+    for item in configured
+        .split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        if item.parse::<std::net::Ipv4Addr>().is_ok() {
+            servers.push(item.to_string());
+        } else {
+            tracing::warn!(value = %item, "ignoring invalid OMEGA_DNS_SERVERS entry");
+        }
+    }
+
+    if servers.is_empty() {
+        vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]
+    } else {
+        servers
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
 
 fn detect_platform() -> DevicePlatform {
     #[cfg(target_os = "windows")]
@@ -842,7 +916,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
         if let std::net::SocketAddr::V4(v4) = server_addr {
-            cleanup_windows_routing(*v4.ip());
+            cleanup_windows_routing(*v4.ip(), tun_ip);
         }
     }
 
