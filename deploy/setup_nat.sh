@@ -153,3 +153,12 @@ fi
 
 echo "Done! NAT is configured. Clients should now have internet access."
 ufw status verbose
+
+if command -v ss >/dev/null 2>&1; then
+    echo "[INFO] Active ${VPN_PROTO^^} listeners on port ${VPN_PORT}:"
+    if [[ "$VPN_PROTO" == "udp" ]]; then
+        ss -lunp | grep -E "[[:space:]]:${VPN_PORT}[[:space:]]" || true
+    else
+        ss -ltnp | grep -E "[[:space:]]:${VPN_PORT}[[:space:]]" || true
+    fi
+fi

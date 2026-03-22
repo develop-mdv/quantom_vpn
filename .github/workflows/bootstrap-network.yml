@@ -166,3 +166,12 @@ jobs:
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='$SSH_PORT' \
              sudo '$REMOTE_DIR/setup_nat.sh'"
+
+      - name: Verify omega-server status
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "sudo systemctl is-active omega-server || true; sudo systemctl --no-pager --full status omega-server || true"
