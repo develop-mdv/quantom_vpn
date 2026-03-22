@@ -1,56 +1,141 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-# 1. Detect Primary Interface
-IFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+IFACE="${OMEGA_PUBLIC_IFACE:-${1:-}}"
+VPN_PORT="${OMEGA_VPN_PORT:-443}"
+VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
+SSH_PORT="${OMEGA_SSH_PORT:-22}"
+SYSCTL_FILE="/etc/sysctl.d/99-omega.conf"
 
-if [ -z "$IFACE" ]; then
-    echo "Error: Could not detect network interface. Please specify manually."
+if [[ -z "$IFACE" ]]; then
+    IFACE="$(ip route | awk '/default/ {print $5; exit}')"
+fi
+
+if [[ -z "$IFACE" ]]; then
+    echo "[ERROR] Could not detect network interface. Specify OMEGA_PUBLIC_IFACE or pass it as the first argument."
     exit 1
 fi
 
-echo "Detected primary interface: $IFACE"
+if ! [[ "$VPN_PORT" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] OMEGA_VPN_PORT must be numeric."
+    exit 1
+fi
+
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]]; then
+    echo "[ERROR] OMEGA_SSH_PORT must be numeric."
+    exit 1
+fi
+
+if [[ "$VPN_PROTO" != "udp" && "$VPN_PROTO" != "tcp" ]]; then
+    echo "[ERROR] OMEGA_VPN_PROTO must be either 'udp' or 'tcp'."
+    exit 1
+fi
+
+if ! command -v ufw >/dev/null 2>&1; then
+    echo "[ERROR] ufw is not installed."
+    exit 1
+fi
+
+echo "Using public interface: $IFACE"
+echo "Allowing SSH on port: $SSH_PORT/tcp"
+echo "Allowing VPN on port: $VPN_PORT/$VPN_PROTO"
 
 # 2. Backup existing rules
 cp /etc/ufw/before.rules /etc/ufw/before.rules.bak
 echo "Backed up /etc/ufw/before.rules"
 
-# 3. Check if NAT is already configured
-if grep -q "*nat" /etc/ufw/before.rules; then
-    echo "NAT *might* already be configured. Please check /etc/ufw/before.rules manually."
-    echo "Look for: -A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE"
+# 3. Ensure NAT and MSS rules are present
+NAT_RULE="-A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE"
+MSS_RULE="-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+
+if grep -Fq "$NAT_RULE" /etc/ufw/before.rules; then
+    echo "NAT rule already present."
+elif grep -q "^\*nat" /etc/ufw/before.rules; then
+    echo "Injecting NAT rule into existing *nat table..."
+    awk -v rule="$NAT_RULE" '
+        BEGIN { in_nat=0; inserted=0 }
+        {
+            print
+            if ($0 == "*nat") {
+                in_nat=1
+            } else if (in_nat && $0 ~ /^:POSTROUTING / && !inserted) {
+                print rule
+                inserted=1
+            } else if (in_nat && $0 == "COMMIT") {
+                in_nat=0
+            }
+        }
+        END {
+            if (!inserted) exit 1
+        }
+    ' /etc/ufw/before.rules > /tmp/ufw_nat.tmp
+    mv /tmp/ufw_nat.tmp /etc/ufw/before.rules
 else
-    # 4. Inject NAT block at the top
-    echo "Injecting NAT rules for 10.7.0.0/16 -> $IFACE..."
-    
-    # We use a temp file to prepend the NAT block
+    echo "Injecting NAT block for 10.7.0.0/16 -> $IFACE..."
     cat <<EOF > /tmp/ufw_nat.tmp
 # START OMEGA VPN NAT
 *nat
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE
+$NAT_RULE
 COMMIT
 # END OMEGA VPN NAT
-
-# START OMEGA VPN MSS CLAMPING
-*filter
-:FORWARD ACCEPT [0:0]
--A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-COMMIT
-# END OMEGA VPN MSS CLAMPING
 EOF
     cat /etc/ufw/before.rules >> /tmp/ufw_nat.tmp
     mv /tmp/ufw_nat.tmp /etc/ufw/before.rules
-    echo "NAT rules injected."
 fi
 
-# 5. Enable IP Forwarding in UFW
-echo "Enabling IP forwarding in /etc/default/ufw..."
-sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+if grep -Fq "$MSS_RULE" /etc/ufw/before.rules; then
+    echo "MSS clamping rule already present."
+else
+    echo "Injecting MSS clamping rule..."
+    awk -v rule="$MSS_RULE" '
+        BEGIN { in_filter=0; inserted=0 }
+        {
+            print
+            if ($0 == "*filter") {
+                in_filter=1
+            } else if (in_filter && $0 ~ /^:FORWARD / && !inserted) {
+                print rule
+                inserted=1
+            } else if (in_filter && $0 == "COMMIT") {
+                in_filter=0
+            }
+        }
+        END {
+            if (!inserted) exit 1
+        }
+    ' /etc/ufw/before.rules > /tmp/ufw_filter.tmp
+    mv /tmp/ufw_filter.tmp /etc/ufw/before.rules
+fi
 
-# 6. Apply changes
+# 5. Allow required inbound traffic
+ufw allow "${SSH_PORT}/tcp"
+ufw allow "${VPN_PORT}/${VPN_PROTO}"
+
+# 6. Enable kernel IP forwarding now and persist it
+echo "Enabling net.ipv4.ip_forward..."
+sysctl -w net.ipv4.ip_forward=1
+if [[ -f "$SYSCTL_FILE" ]] && grep -q '^net\.ipv4\.ip_forward=' "$SYSCTL_FILE"; then
+    sed -i 's/^net\.ipv4\.ip_forward=.*/net.ipv4.ip_forward=1/' "$SYSCTL_FILE"
+else
+    printf 'net.ipv4.ip_forward=1\n' >> "$SYSCTL_FILE"
+fi
+
+# 7. Enable IP forwarding in UFW
+echo "Enabling IP forwarding in /etc/default/ufw..."
+if grep -q '^DEFAULT_FORWARD_POLICY=' /etc/default/ufw; then
+    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+else
+    printf 'DEFAULT_FORWARD_POLICY="ACCEPT"\n' >> /etc/default/ufw
+fi
+
+# 8. Apply changes
 echo "Reloading UFW..."
-ufw disable
-ufw enable
+if ufw status | grep -q '^Status: active'; then
+    ufw reload
+else
+    ufw --force enable
+fi
 
 echo "Done! NAT is configured. Clients should now have internet access."
+ufw status verbose

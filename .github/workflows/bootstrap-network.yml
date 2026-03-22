@@ -1,0 +1,168 @@
+name: Bootstrap Omega Network
+
+on:
+  workflow_dispatch:
+    inputs:
+      public_interface:
+        description: Public egress interface. Leave blank to auto-detect.
+        required: false
+        type: string
+      vpn_port:
+        description: Public VPN listener port to allow in UFW.
+        required: true
+        default: "443"
+        type: string
+      vpn_protocol:
+        description: Public VPN listener protocol.
+        required: true
+        default: udp
+        type: choice
+        options:
+          - udp
+          - tcp
+      ssh_port:
+        description: SSH port to keep allowed. Leave blank to reuse DEPLOY_PORT or 22.
+        required: false
+        type: string
+
+concurrency:
+  group: omega-server-network
+  cancel-in-progress: false
+
+jobs:
+  bootstrap-network:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf "%s" "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Normalize deploy config
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r\n\t ')"
+          PORT="$(printf '%s' "${DEPLOY_PORT:-22}" | tr -d '\r\n\t ')"
+          USER="$(printf '%s' "$DEPLOY_USER" | tr -d '\r\n\t ')"
+
+          if [ -z "$HOST" ]; then
+            echo "DEPLOY_HOST is empty"
+            exit 1
+          fi
+
+          if [ -z "$USER" ]; then
+            echo "DEPLOY_USER is empty"
+            exit 1
+          fi
+
+          if [ -z "$PORT" ]; then
+            PORT="22"
+          fi
+
+          if echo "$HOST" | grep -Eq '^https?://' || echo "$HOST" | grep -q '@'; then
+            echo "DEPLOY_HOST must be host/IP only (without protocol and without user@)"
+            exit 1
+          fi
+
+          if ! echo "$PORT" | grep -Eq '^[0-9]+$'; then
+            echo "DEPLOY_PORT must be numeric"
+            exit 1
+          fi
+
+          echo "DEPLOY_HOST_CLEAN=$HOST" >> "$GITHUB_ENV"
+          echo "DEPLOY_PORT_CLEAN=$PORT" >> "$GITHUB_ENV"
+          echo "DEPLOY_USER_CLEAN=$USER" >> "$GITHUB_ENV"
+
+      - name: Add known hosts
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          KNOWN="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | tr -d '\r')"
+
+          touch ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          ssh-keygen -R "$HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+          ssh-keygen -R "[$HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+
+          SCANNED="$(ssh-keyscan -H -p "$PORT" "$HOST" 2>/dev/null || true)"
+          if [ -n "$SCANNED" ]; then
+            printf "%s\n" "$SCANNED" >> ~/.ssh/known_hosts
+          elif [ -n "$KNOWN" ]; then
+            printf "%s\n" "$KNOWN" >> ~/.ssh/known_hosts
+          else
+            echo "Unable to fetch SSH host key via ssh-keyscan for $HOST:$PORT"
+            exit 1
+          fi
+
+      - name: Upload network bootstrap script
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-network}"
+          REMOTE_DIR="$REMOTE_BASE"
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" deploy/setup_nat.sh "$USER@$HOST:$REMOTE_DIR/setup_nat.sh"
+
+      - name: Apply network bootstrap on server
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
+          VPN_PORT_INPUT: ${{ inputs.vpn_port }}
+          VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
+          SSH_PORT_INPUT: ${{ inputs.ssh_port }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-network}"
+          REMOTE_DIR="$REMOTE_BASE"
+          PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
+          VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
+          VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
+
+          if [ -z "$SSH_PORT" ]; then
+            SSH_PORT="22"
+          fi
+
+          if ! echo "$VPN_PORT" | grep -Eq '^[0-9]+$'; then
+            echo "vpn_port must be numeric"
+            exit 1
+          fi
+
+          if ! echo "$SSH_PORT" | grep -Eq '^[0-9]+$'; then
+            echo "ssh_port must be numeric"
+            exit 1
+          fi
+
+          if [ "$VPN_PROTOCOL" != "udp" ] && [ "$VPN_PROTOCOL" != "tcp" ]; then
+            echo "vpn_protocol must be udp or tcp"
+            exit 1
+          fi
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "chmod +x '$REMOTE_DIR/setup_nat.sh' && \
+             OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
+             OMEGA_VPN_PORT='$VPN_PORT' \
+             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_SSH_PORT='$SSH_PORT' \
+             sudo '$REMOTE_DIR/setup_nat.sh'"

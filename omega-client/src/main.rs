@@ -140,7 +140,16 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
 }
 
 #[cfg(target_os = "windows")]
-fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net::Ipv4Addr) {
+struct WindowsNetworkState {
+    disabled_ipv6_adapters: Vec<String>,
+    interface_alias: String,
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_routing(
+    server_ip: std::net::Ipv4Addr,
+    tunnel_ip: std::net::Ipv4Addr,
+) -> Option<WindowsNetworkState> {
     use std::process::Command;
     use std::time::Duration;
 
@@ -186,7 +195,7 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
 
     if if_index.is_empty() || if_alias.is_empty() {
         tracing::error!("could not find Wintun interface");
-        return;
+        return None;
     }
 
     let _ = Command::new("netsh")
@@ -199,6 +208,14 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
             &format!("mtu={}", DEFAULT_MTU),
             "store=active",
         ])
+        .status();
+
+    let set_metric_cmd = format!(
+        "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -InterfaceMetric 1",
+        powershell_quote(&if_alias)
+    );
+    let _ = Command::new("powershell")
+        .args(["-Command", &set_metric_cmd])
         .status();
 
     let dns_servers = windows_dns_servers();
@@ -223,10 +240,22 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
         );
     }
 
+    let disabled_ipv6_adapters = configure_windows_ipv6_guard(&if_alias);
+
     let ps_cmd = format!(
         "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object {{ $_.InterfaceIndex -ne {} }} | Sort-Object RouteMetric | Select-Object -First 1).NextHop",
         if_index
     );
+
+    let _ = Command::new("route")
+        .args(["delete", &server_ip.to_string()])
+        .status();
+    let _ = Command::new("route")
+        .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
+        .status();
+    let _ = Command::new("route")
+        .args(["delete", "128.0.0.0", "mask", "128.0.0.0"])
+        .status();
 
     if let Ok(output) = Command::new("powershell")
         .args(["-Command", &ps_cmd])
@@ -280,31 +309,35 @@ fn configure_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net:
             "1",
         ])
         .status();
+
+    Some(WindowsNetworkState {
+        disabled_ipv6_adapters,
+        interface_alias: if_alias,
+    })
 }
 
 #[cfg(target_os = "windows")]
-fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net::Ipv4Addr) {
+fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, state: Option<&WindowsNetworkState>) {
     use std::process::Command;
 
-    let tunnel_ip_s = tunnel_ip.to_string();
-    let alias_cmd = format!(
-        "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceAlias",
-        tunnel_ip_s
-    );
-    if let Ok(output) = Command::new("powershell")
-        .args(["-Command", &alias_cmd])
-        .output()
-    {
-        let alias = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !alias.is_empty() {
-            let reset_dns = format!(
-                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
-                powershell_quote(&alias)
-            );
-            let _ = Command::new("powershell")
-                .args(["-Command", &reset_dns])
-                .status();
-        }
+    if let Some(state) = state {
+        let reset_dns = format!(
+            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+            powershell_quote(&state.interface_alias)
+        );
+        let _ = Command::new("powershell")
+            .args(["-Command", &reset_dns])
+            .status();
+
+        let reset_metric = format!(
+            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -AutomaticMetric Enabled",
+            powershell_quote(&state.interface_alias)
+        );
+        let _ = Command::new("powershell")
+            .args(["-Command", &reset_metric])
+            .status();
+
+        restore_windows_ipv6_guard(&state.disabled_ipv6_adapters);
     }
 
     let _ = Command::new("route")
@@ -319,9 +352,11 @@ fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, tunnel_ip: std::net::I
 }
 
 #[cfg(not(target_os = "windows"))]
-fn configure_windows_routing(_: std::net::Ipv4Addr, _: std::net::Ipv4Addr) {}
+fn configure_windows_routing(_: std::net::Ipv4Addr, _: std::net::Ipv4Addr) -> Option<()> {
+    None
+}
 #[cfg(not(target_os = "windows"))]
-fn cleanup_windows_routing(_: std::net::Ipv4Addr, _: std::net::Ipv4Addr) {}
+fn cleanup_windows_routing(_: std::net::Ipv4Addr, _: Option<&()>) {}
 
 #[cfg(target_os = "windows")]
 fn windows_dns_servers() -> Vec<String> {
@@ -351,6 +386,75 @@ fn windows_dns_servers() -> Vec<String> {
 #[cfg(target_os = "windows")]
 fn powershell_quote(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_ipv6_guard(wintun_alias: &str) -> Vec<String> {
+    use std::process::Command;
+
+    if !env_bool("OMEGA_DISABLE_IPV6", true) {
+        return Vec::new();
+    }
+
+    let list_cmd = format!(
+        "Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -ne '{}' -and $_.InterfaceDescription -notlike '*Wintun*' }} | ForEach-Object {{ $binding = Get-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue; if ($binding -and $binding.Enabled) {{ $_.Name }} }}",
+        powershell_quote(wintun_alias)
+    );
+
+    let Ok(output) = Command::new("powershell")
+        .args(["-Command", &list_cmd])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let adapters = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    for adapter in &adapters {
+        let disable_cmd = format!(
+            "Disable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
+            powershell_quote(adapter)
+        );
+        let _ = Command::new("powershell")
+            .args(["-Command", &disable_cmd])
+            .status();
+    }
+
+    if !adapters.is_empty() {
+        tracing::info!(
+            adapters = %adapters.join(","),
+            "disabled IPv6 on active physical adapters while VPN is running"
+        );
+    }
+
+    adapters
+}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_ipv6_guard(adapters: &[String]) {
+    use std::process::Command;
+
+    for adapter in adapters {
+        let enable_cmd = format!(
+            "Enable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
+            powershell_quote(adapter)
+        );
+        let _ = Command::new("powershell")
+            .args(["-Command", &enable_cmd])
+            .status();
+    }
+
+    if !adapters.is_empty() {
+        tracing::info!(
+            adapters = %adapters.join(","),
+            "restored IPv6 on physical adapters"
+        );
+    }
 }
 
 fn detect_platform() -> DevicePlatform {
@@ -437,6 +541,107 @@ fn env_u32(name: &str, default: u32) -> u32 {
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(default)
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn build_dns_query(hostname: &str, txid: u16) -> Vec<u8> {
+    let mut query = Vec::with_capacity(64);
+    query.extend_from_slice(&txid.to_be_bytes());
+    query.extend_from_slice(&0x0100u16.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query.extend_from_slice(&0u16.to_be_bytes());
+    query.extend_from_slice(&0u16.to_be_bytes());
+    query.extend_from_slice(&0u16.to_be_bytes());
+
+    for label in hostname.split('.').filter(|part| !part.is_empty()) {
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.push(0);
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    query
+}
+
+#[cfg(target_os = "windows")]
+async fn run_udp_dns_diagnostic(dns_servers: Vec<String>) {
+    if !env_bool("OMEGA_NETWORK_DIAG", true) {
+        return;
+    }
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let targets = dns_servers
+        .into_iter()
+        .filter_map(|value| value.parse::<std::net::Ipv4Addr>().ok())
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        tracing::warn!("UDP diagnostic skipped: no valid DNS servers");
+        return;
+    }
+
+    let socket = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(socket) => socket,
+        Err(err) => {
+            tracing::warn!(error = %err, "UDP diagnostic failed to bind socket");
+            return;
+        }
+    };
+
+    let txid: u16 = rand::random();
+    let query = build_dns_query("example.com", txid);
+    let mut buf = [0u8; 1500];
+
+    for dns_ip in targets {
+        let target = SocketAddr::from((dns_ip, 53));
+        if let Err(err) = socket.send_to(&query, target).await {
+            tracing::warn!(error = %err, %target, "UDP diagnostic send failed");
+            continue;
+        }
+
+        match tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, src))) => {
+                if n >= 4 && u16::from_be_bytes([buf[0], buf[1]]) == txid && (buf[2] & 0x80) != 0 {
+                    tracing::info!(
+                        %src,
+                        dns_server = %target,
+                        "UDP DNS diagnostic passed; generic UDP through the tunnel works"
+                    );
+                    return;
+                }
+                tracing::warn!(
+                    %src,
+                    dns_server = %target,
+                    bytes = n,
+                    "UDP diagnostic got an unexpected reply"
+                );
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, %target, "UDP diagnostic receive failed");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    %target,
+                    "UDP diagnostic timed out; generic UDP through the tunnel may be blocked"
+                );
+            }
+        }
+    }
+
+    tracing::warn!(
+        "all UDP DNS diagnostics failed; if websites still open, the remaining problem is likely blocked outbound UDP on the VPS/provider side"
+    );
 }
 
 async fn perform_handshake(
@@ -614,10 +819,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%tun_ip, server_mtu = server_hello.server_mtu, "handshake complete");
 
     #[cfg(target_os = "windows")]
+    let windows_state = if let std::net::SocketAddr::V4(v4) = server_addr {
+        configure_windows_routing(*v4.ip(), tun_ip)
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "windows")]
     {
-        if let std::net::SocketAddr::V4(v4) = server_addr {
-            configure_windows_routing(*v4.ip(), tun_ip);
-        }
+        let diag_dns_servers = windows_dns_servers();
+        tokio::spawn(async move {
+            run_udp_dns_diagnostic(diag_dns_servers).await;
+        });
     }
 
     let state = Arc::new(Mutex::new(ClientState::new(ssrc, chaos_seed)));
@@ -916,7 +1129,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
         if let std::net::SocketAddr::V4(v4) = server_addr {
-            cleanup_windows_routing(*v4.ip(), tun_ip);
+            cleanup_windows_routing(*v4.ip(), windows_state.as_ref());
         }
     }
 
