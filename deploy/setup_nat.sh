@@ -157,11 +157,28 @@ repair_ufw_hooks() {
     ufw --force enable
 }
 
-input_hook_attached() {
+input_rule_present() {
     if ! command -v iptables >/dev/null 2>&1; then
         return 0
     fi
-    iptables -S INPUT | grep -q 'ufw-before-input'
+    local proto="$1"
+    local port="$2"
+    iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+}
+
+input_path_healthy() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if iptables -S INPUT | grep -q 'ufw-before-input'; then
+        return 0
+    fi
+
+    # Some Ubuntu/UFW+nft configurations materialize direct allow rules in the
+    # INPUT chain instead of jump-based ufw-before-input hooks. Treat that as
+    # healthy as long as the required public ports are explicitly accepted.
+    input_rule_present tcp "$SSH_PORT" && input_rule_present "$VPN_PROTO" "$VPN_PORT"
 }
 
 nat_rule_active() {
@@ -174,13 +191,14 @@ nat_rule_active() {
 # 9. Verify that IPv4 UFW hooks are actually attached and NAT is active.
 # Without these checks, UFW can report "active" while IPv4 INPUT is still
 # effectively dropped due to missing base-chain jumps.
-if ! input_hook_attached; then
+if ! input_path_healthy; then
     repair_ufw_hooks
 fi
 
-if ! input_hook_attached; then
-    echo "[ERROR] IPv4 INPUT is not hooked into UFW chains."
-    echo "[ERROR] Inbound IPv4 traffic (including SSH/VPN) may still be dropped."
+if ! input_path_healthy; then
+    echo "[ERROR] IPv4 INPUT does not expose the required public allow rules."
+    echo "[ERROR] Expected either UFW hook chains or direct ACCEPT rules for SSH/VPN."
+    echo "[ERROR] Inbound IPv4 traffic may still be dropped."
     echo "[ERROR] Verify UFW initialization and inspect /etc/ufw/*.rules for corruption."
     exit 1
 fi
