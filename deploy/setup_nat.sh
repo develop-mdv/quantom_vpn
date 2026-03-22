@@ -151,22 +151,49 @@ else
     ufw --force enable
 fi
 
+repair_ufw_hooks() {
+    echo "[WARN] Re-enabling UFW to repair missing IPv4 base hooks..."
+    ufw disable || true
+    ufw --force enable
+}
+
+input_hook_attached() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        return 0
+    fi
+    iptables -S INPUT | grep -q 'ufw-before-input'
+}
+
+nat_rule_active() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        return 0
+    fi
+    iptables -t nat -S POSTROUTING | grep -Fq -- "$NAT_RULE"
+}
+
 # 9. Verify that IPv4 UFW hooks are actually attached and NAT is active.
 # Without these checks, UFW can report "active" while IPv4 INPUT is still
 # effectively dropped due to missing base-chain jumps.
-if command -v iptables >/dev/null 2>&1; then
-    if ! iptables -S INPUT | grep -q 'ufw-before-input'; then
-        echo "[ERROR] IPv4 INPUT is not hooked into UFW chains."
-        echo "[ERROR] Inbound IPv4 traffic (including SSH/VPN) may still be dropped."
-        echo "[ERROR] Verify UFW initialization and run: ufw disable && ufw --force enable"
-        exit 1
-    fi
+if ! input_hook_attached; then
+    repair_ufw_hooks
+fi
 
-    if ! iptables -t nat -S POSTROUTING | grep -Fq -- "$NAT_RULE"; then
-        echo "[ERROR] Expected NAT rule is missing from the active POSTROUTING chain."
-        echo "[ERROR] Clients may connect to the tunnel but still lose internet access."
-        exit 1
-    fi
+if ! input_hook_attached; then
+    echo "[ERROR] IPv4 INPUT is not hooked into UFW chains."
+    echo "[ERROR] Inbound IPv4 traffic (including SSH/VPN) may still be dropped."
+    echo "[ERROR] Verify UFW initialization and inspect /etc/ufw/*.rules for corruption."
+    exit 1
+fi
+
+if ! nat_rule_active; then
+    echo "[WARN] Expected NAT rule is missing after reload. Re-enabling UFW to repair NAT..."
+    repair_ufw_hooks
+fi
+
+if ! nat_rule_active; then
+    echo "[ERROR] Expected NAT rule is missing from the active POSTROUTING chain."
+    echo "[ERROR] Clients may connect to the tunnel but still lose internet access."
+    exit 1
 fi
 
 echo "Done! NAT is configured. Clients should now have internet access."
