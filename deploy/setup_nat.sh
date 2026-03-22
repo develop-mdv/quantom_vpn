@@ -48,20 +48,22 @@ echo "Backed up /etc/ufw/before.rules"
 NAT_RULE="-A POSTROUTING -s 10.7.0.0/16 -o $IFACE -j MASQUERADE"
 MSS_RULE="-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
 
-if grep -Fq "$NAT_RULE" /etc/ufw/before.rules; then
+if grep -Fq -- "$NAT_RULE" /etc/ufw/before.rules; then
     echo "NAT rule already present."
 elif grep -q "^\*nat" /etc/ufw/before.rules; then
     echo "Injecting NAT rule into existing *nat table..."
     awk -v rule="$NAT_RULE" '
         BEGIN { in_nat=0; inserted=0 }
         {
-            print
             if ($0 == "*nat") {
                 in_nat=1
-            } else if (in_nat && $0 ~ /^:POSTROUTING / && !inserted) {
+            }
+            if (in_nat && $0 == "COMMIT" && !inserted) {
                 print rule
                 inserted=1
-            } else if (in_nat && $0 == "COMMIT") {
+            }
+            print
+            if (in_nat && $0 == "COMMIT") {
                 in_nat=0
             }
         }
@@ -84,20 +86,22 @@ EOF
     mv /tmp/ufw_nat.tmp /etc/ufw/before.rules
 fi
 
-if grep -Fq "$MSS_RULE" /etc/ufw/before.rules; then
+if grep -Fq -- "$MSS_RULE" /etc/ufw/before.rules; then
     echo "MSS clamping rule already present."
-else
-    echo "Injecting MSS clamping rule..."
+elif grep -q "^\*filter" /etc/ufw/before.rules; then
+    echo "Injecting MSS clamping rule into existing *filter table..."
     awk -v rule="$MSS_RULE" '
         BEGIN { in_filter=0; inserted=0 }
         {
-            print
             if ($0 == "*filter") {
                 in_filter=1
-            } else if (in_filter && $0 ~ /^:FORWARD / && !inserted) {
+            }
+            if (in_filter && $0 == "COMMIT" && !inserted) {
                 print rule
                 inserted=1
-            } else if (in_filter && $0 == "COMMIT") {
+            }
+            print
+            if (in_filter && $0 == "COMMIT") {
                 in_filter=0
             }
         }
@@ -106,6 +110,16 @@ else
         }
     ' /etc/ufw/before.rules > /tmp/ufw_filter.tmp
     mv /tmp/ufw_filter.tmp /etc/ufw/before.rules
+else
+    echo "Injecting standalone MSS clamping block..."
+    cat <<EOF >> /etc/ufw/before.rules
+# START OMEGA VPN MSS CLAMPING
+*filter
+:FORWARD ACCEPT [0:0]
+$MSS_RULE
+COMMIT
+# END OMEGA VPN MSS CLAMPING
+EOF
 fi
 
 # 5. Allow required inbound traffic
