@@ -99,20 +99,24 @@ jobs:
           ssh-keygen -R "$HOST" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
           ssh-keygen -R "[$HOST]:$PORT" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
 
-          SCANNED="$(ssh-keyscan -4 -T 10 -H -p "$PORT" "$HOST" 2>/dev/null || true)"
-          if [ -n "$SCANNED" ]; then
-            printf "%s\n" "$SCANNED" >> ~/.ssh/known_hosts
-          elif [ -n "$KNOWN" ]; then
+          # Prefer a pinned host key from secrets for deterministic bootstrap runs.
+          # Fall back to live keyscan only when no pinned key is configured.
+          if [ -n "$KNOWN" ]; then
             printf "%s\n" "$KNOWN" >> ~/.ssh/known_hosts
           else
-            echo "Unable to fetch SSH host key via ssh-keyscan for $HOST:$PORT"
-            echo "DEPLOY_KNOWN_HOSTS secret is empty, so there is no fallback host key."
-            echo "Check DEPLOY_HOST/DEPLOY_PORT, and remember DEPLOY_PORT is the SSH connection port used by GitHub Actions."
-            echo "The workflow input ssh_port only controls which port setup_nat.sh keeps open in ufw."
-            echo "If SSH is on a non-default port, set DEPLOY_PORT in GitHub Secrets."
-            echo "You can also fill DEPLOY_KNOWN_HOSTS with: ssh-keyscan -H -p $PORT $HOST"
-            echo "Check network access from GitHub runner and that the server allows SSH from the public internet."
-            exit 1
+            SCANNED="$(ssh-keyscan -4 -T 10 -H -p "$PORT" "$HOST" 2>/dev/null || true)"
+            if [ -n "$SCANNED" ]; then
+              printf "%s\n" "$SCANNED" >> ~/.ssh/known_hosts
+            else
+              echo "Unable to fetch SSH host key via ssh-keyscan for $HOST:$PORT"
+              echo "DEPLOY_KNOWN_HOSTS secret is empty, so there is no fallback host key."
+              echo "Check DEPLOY_HOST/DEPLOY_PORT, and remember DEPLOY_PORT is the SSH connection port used by GitHub Actions."
+              echo "The workflow input ssh_port only controls which port setup_nat.sh keeps open in ufw."
+              echo "If SSH is on a non-default port, set DEPLOY_PORT in GitHub Secrets."
+              echo "You can also fill DEPLOY_KNOWN_HOSTS with: ssh-keyscan -H -p $PORT $HOST"
+              echo "Check network access from GitHub runner and that the server allows SSH from the public internet."
+              exit 1
+            fi
           fi
 
       - name: Upload network bootstrap script

@@ -151,6 +151,24 @@ else
     ufw --force enable
 fi
 
+# 9. Verify that IPv4 UFW hooks are actually attached and NAT is active.
+# Without these checks, UFW can report "active" while IPv4 INPUT is still
+# effectively dropped due to missing base-chain jumps.
+if command -v iptables >/dev/null 2>&1; then
+    if ! iptables -S INPUT | grep -q 'ufw-before-input'; then
+        echo "[ERROR] IPv4 INPUT is not hooked into UFW chains."
+        echo "[ERROR] Inbound IPv4 traffic (including SSH/VPN) may still be dropped."
+        echo "[ERROR] Verify UFW initialization and run: ufw disable && ufw --force enable"
+        exit 1
+    fi
+
+    if ! iptables -t nat -S POSTROUTING | grep -Fq -- "$NAT_RULE"; then
+        echo "[ERROR] Expected NAT rule is missing from the active POSTROUTING chain."
+        echo "[ERROR] Clients may connect to the tunnel but still lose internet access."
+        exit 1
+    fi
+fi
+
 echo "Done! NAT is configured. Clients should now have internet access."
 ufw status verbose
 
