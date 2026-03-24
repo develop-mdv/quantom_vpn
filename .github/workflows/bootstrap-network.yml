@@ -24,6 +24,16 @@ on:
         description: SSH port to keep allowed. Leave blank to reuse DEPLOY_PORT or 22.
         required: false
         type: string
+      client_cidr:
+        description: VPN client subnet that must be NATed and audited.
+        required: true
+        default: "10.7.0.0/16"
+        type: string
+      metrics_port:
+        description: Public Prometheus metrics TCP port.
+        required: true
+        default: "9090"
+        type: string
 
 concurrency:
   group: omega-server-network
@@ -119,7 +129,7 @@ jobs:
             fi
           fi
 
-      - name: Upload network bootstrap script
+      - name: Upload network bootstrap tools
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
@@ -130,7 +140,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" deploy/setup_nat.sh "$USER@$HOST:$REMOTE_DIR/setup_nat.sh"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" deploy/setup_nat.sh deploy/diagnose_server.sh "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Apply network bootstrap on server
         env:
@@ -139,6 +149,8 @@ jobs:
           VPN_PORT_INPUT: ${{ inputs.vpn_port }}
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
+          CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
+          METRICS_PORT_INPUT: ${{ inputs.metrics_port }}
         run: |
           HOST="$DEPLOY_HOST_CLEAN"
           PORT="$DEPLOY_PORT_CLEAN"
@@ -149,9 +161,19 @@ jobs:
           VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
+          CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
+          METRICS_PORT="$(printf '%s' "$METRICS_PORT_INPUT" | tr -d '\r\n\t ')"
 
           if [ -z "$SSH_PORT" ]; then
             SSH_PORT="22"
+          fi
+
+          if [ -z "$CLIENT_CIDR" ]; then
+            CLIENT_CIDR="10.7.0.0/16"
+          fi
+
+          if [ -z "$METRICS_PORT" ]; then
+            METRICS_PORT="9090"
           fi
 
           if ! echo "$VPN_PORT" | grep -Eq '^[0-9]+$'; then
@@ -164,18 +186,72 @@ jobs:
             exit 1
           fi
 
+          if ! echo "$METRICS_PORT" | grep -Eq '^[0-9]+$'; then
+            echo "metrics_port must be numeric"
+            exit 1
+          fi
+
           if [ "$VPN_PROTOCOL" != "udp" ] && [ "$VPN_PROTOCOL" != "tcp" ]; then
             echo "vpn_protocol must be udp or tcp"
             exit 1
           fi
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
-            "chmod +x '$REMOTE_DIR/setup_nat.sh' && \
+            "chmod +x '$REMOTE_DIR/setup_nat.sh' '$REMOTE_DIR/diagnose_server.sh' && \
              OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
+             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='$SSH_PORT' \
+             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_METRICS_PORT='$METRICS_PORT' \
              sudo '$REMOTE_DIR/setup_nat.sh'"
+
+      - name: Run post-bootstrap diagnostics
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
+          VPN_PORT_INPUT: ${{ inputs.vpn_port }}
+          VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
+          SSH_PORT_INPUT: ${{ inputs.ssh_port }}
+          CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
+          METRICS_PORT_INPUT: ${{ inputs.metrics_port }}
+          DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-network}"
+          REMOTE_DIR="$REMOTE_BASE"
+          PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
+          VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
+          VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
+          CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
+          METRICS_PORT="$(printf '%s' "$METRICS_PORT_INPUT" | tr -d '\r\n\t ')"
+
+          if [ -z "$SSH_PORT" ]; then
+            SSH_PORT="22"
+          fi
+
+          if [ -z "$CLIENT_CIDR" ]; then
+            CLIENT_CIDR="10.7.0.0/16"
+          fi
+
+          if [ -z "$METRICS_PORT" ]; then
+            METRICS_PORT="9090"
+          fi
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
+             OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
+             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_VPN_PORT='$VPN_PORT' \
+             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_SSH_PORT='$SSH_PORT' \
+             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_METRICS_PORT='$METRICS_PORT' \
+             sudo '$REMOTE_DIR/diagnose_server.sh'"
 
       - name: Verify omega-server status
         run: |
@@ -185,4 +261,3 @@ jobs:
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "sudo systemctl is-active omega-server || true; sudo systemctl --no-pager --full status omega-server || true"
-

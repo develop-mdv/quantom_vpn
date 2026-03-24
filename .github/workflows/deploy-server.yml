@@ -9,7 +9,9 @@ on:
       - "omega-core/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "deploy/setup_nat.sh"
       - "deploy/update_server.sh"
+      - "deploy/diagnose_server.sh"
       - "deploy/omega-server.service"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
@@ -39,9 +41,11 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/omega-server dist/omega-server
+          cp deploy/setup_nat.sh dist/setup_nat.sh
           cp deploy/update_server.sh dist/update_server.sh
+          cp deploy/diagnose_server.sh dist/diagnose_server.sh
           cp deploy/omega-server.service dist/omega-server.service
-          chmod +x dist/omega-server dist/update_server.sh
+          chmod +x dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh
 
       - name: Setup SSH key
         env:
@@ -142,7 +146,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/update_server.sh dist/omega-server.service "$USER@$HOST:$REMOTE_DIR/"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh dist/omega-server.service "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Deploy on server
         env:
@@ -166,3 +170,78 @@ jobs:
              OMEGA_RELEASE_ID='$GITHUB_SHA' \
              sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service'"
 
+      - name: Re-apply network rules
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
+          DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
+          DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
+          CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
+          VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
+          VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "chmod +x '$REMOTE_DIR/setup_nat.sh' && \
+             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_VPN_PORT='$VPN_PORT' \
+             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_SSH_PORT='${PORT}' \
+             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_METRICS_PORT='$METRICS_PORT' \
+             sudo '$REMOTE_DIR/setup_nat.sh'"
+
+      - name: Run post-deploy diagnostics
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
+          DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
+          DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
+          DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          HOST="$DEPLOY_HOST_CLEAN"
+          PORT="$DEPLOY_PORT_CLEAN"
+          USER="$DEPLOY_USER_CLEAN"
+          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
+          CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
+          VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
+          VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
+
+          if [ -z "$CLIENT_CIDR" ]; then
+            CLIENT_CIDR="10.7.0.0/16"
+          fi
+
+          if [ -z "$VPN_PORT" ]; then
+            VPN_PORT="443"
+          fi
+
+          if [ -z "$VPN_PROTOCOL" ]; then
+            VPN_PROTOCOL="udp"
+          fi
+
+          if [ -z "$METRICS_PORT" ]; then
+            METRICS_PORT="9090"
+          fi
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "chmod +x '$REMOTE_DIR/diagnose_server.sh' && \
+             OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
+             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_VPN_PORT='$VPN_PORT' \
+             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_SSH_PORT='${PORT}' \
+             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_METRICS_PORT='$METRICS_PORT' \
+             sudo '$REMOTE_DIR/diagnose_server.sh'"

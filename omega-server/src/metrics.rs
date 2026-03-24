@@ -1,13 +1,16 @@
+use std::net::SocketAddr;
+
 use metrics::{counter, gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
-pub fn init_metrics(port: u16) -> anyhow::Result<()> {
+pub fn init_metrics(bind: &str) -> anyhow::Result<()> {
+    let addr: SocketAddr = bind.parse()?;
     PrometheusBuilder::new()
-        .with_http_listener(([0, 0, 0, 0], port))
+        .with_http_listener(addr)
         .install()?;
 
     gauge!("omega_active_sessions").set(0.0);
-    tracing::info!(port, "prometheus metrics enabled");
+    tracing::info!(%addr, "prometheus metrics enabled");
     Ok(())
 }
 

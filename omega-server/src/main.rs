@@ -8,6 +8,7 @@ mod web_admin;
 
 use std::fs;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,10 +25,12 @@ const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 16;
 const DEFAULT_MTU: u16 = 1200;
-const DEFAULT_METRICS_PORT: u16 = 9090;
+const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
 const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
 const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
 const DEFAULT_ADMIN_WEB_BIND: &str = "127.0.0.1:8081";
+const DEFAULT_UDP_RCVBUF: usize = 8 * 1024 * 1024;
+const DEFAULT_UDP_SNDBUF: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct AdminCommand {
@@ -64,13 +67,13 @@ async fn run_server() -> anyhow::Result<()> {
     tracing::info!("omega-server v{} starting", env!("CARGO_PKG_VERSION"));
 
     let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let metrics_port: u16 = std::env::var("OMEGA_METRICS_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_METRICS_PORT);
+    let metrics_bind =
+        std::env::var("OMEGA_METRICS_BIND").unwrap_or_else(|_| DEFAULT_METRICS_BIND.to_string());
+    let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF);
+    let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF);
     let allow_legacy_v1 = env_bool("OMEGA_ALLOW_LEGACY_V1");
 
-    if let Err(e) = metrics::init_metrics(metrics_port) {
+    if let Err(e) = metrics::init_metrics(&metrics_bind) {
         tracing::warn!(error = %e, "failed to init metrics, continuing without exporter");
     }
 
@@ -96,8 +99,8 @@ async fn run_server() -> anyhow::Result<()> {
         }
     };
 
-    let udp = Arc::new(tokio::net::UdpSocket::bind(&bind_addr).await?);
-    tracing::info!(%bind_addr, "listening on UDP");
+    let udp = Arc::new(bind_udp_socket(&bind_addr, udp_rcvbuf, udp_sndbuf)?);
+    tracing::info!(%bind_addr, udp_rcvbuf, udp_sndbuf, "listening on UDP");
 
     let session_manager = Arc::new(session::SessionManager::new());
 
@@ -455,6 +458,48 @@ fn env_bool(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn bind_udp_socket(
+    bind_addr: &str,
+    recv_buffer: usize,
+    send_buffer: usize,
+) -> anyhow::Result<tokio::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let addr: SocketAddr = bind_addr
+        .parse()
+        .with_context(|| format!("invalid OMEGA_BIND address '{}'", bind_addr))?;
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+        .with_context(|| format!("failed to create UDP socket for {}", bind_addr))?;
+    socket
+        .set_nonblocking(true)
+        .context("failed to set UDP socket nonblocking")?;
+    let _ = socket.set_reuse_address(true);
+    if addr.is_ipv6() {
+        let _ = socket.set_only_v6(false);
+    }
+    let _ = socket.set_recv_buffer_size(recv_buffer);
+    let _ = socket.set_send_buffer_size(send_buffer);
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("failed to bind UDP socket to {}", bind_addr))?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+    tokio::net::UdpSocket::from_std(std_socket).context("failed to convert UDP socket for tokio")
 }
 
 fn print_admin_usage() {

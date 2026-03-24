@@ -278,7 +278,8 @@ pub async fn udp_to_tun_loop(
                                     let now_ms = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
-                                        .as_millis() as u64;
+                                        .as_millis()
+                                        as u64;
                                     session.retransmit_queue.observe_nack(&nack, now_ms);
                                     let packets = session.retransmit_queue.process_nack(&nack);
                                     if !packets.is_empty() {
