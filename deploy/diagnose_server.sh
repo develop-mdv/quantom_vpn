@@ -66,7 +66,7 @@ is_listener_exposed() {
     if ! cmd_exists ss; then
         return 1
     fi
-    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:)${port}$"
+    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${port}$"
 }
 
 check_udp_listener() {
@@ -74,7 +74,7 @@ check_udp_listener() {
         warn "ss is not installed; cannot verify runtime listener state."
         return
     fi
-    if ss -H -lun 2>/dev/null | awk '{print $5}' | grep -Eq "[:.]${VPN_PORT}$"; then
+    if ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${VPN_PORT}$"; then
         pass "UDP listener is present on port ${VPN_PORT}."
     else
         fail "UDP listener on port ${VPN_PORT} is not visible."

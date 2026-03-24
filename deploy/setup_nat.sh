@@ -336,12 +336,12 @@ if command -v ss >/dev/null 2>&1; then
     echo
     echo "[INFO] Active ${VPN_PROTO^^} listeners on port ${VPN_PORT}:"
     if [[ "$VPN_PROTO" == "udp" ]]; then
-        ss -lunp | grep -E "[[:space:]]:${VPN_PORT}[[:space:]]" || true
+        ss -H -lunp | grep -E "[:.]${VPN_PORT}\\b" || true
     else
-        ss -ltnp | grep -E "[[:space:]]:${VPN_PORT}[[:space:]]" || true
+        ss -H -ltnp | grep -E "[:.]${VPN_PORT}\\b" || true
     fi
     if [[ "$METRICS_PUBLIC" == "1" ]]; then
         echo "[INFO] Active TCP listeners on metrics port ${METRICS_PORT}:"
-        ss -ltnp | grep -E "[[:space:]]:${METRICS_PORT}[[:space:]]" || true
+        ss -H -ltnp | grep -E "[:.]${METRICS_PORT}\\b" || true
     fi
 fi
