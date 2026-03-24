@@ -14,6 +14,8 @@ Environment:
   OMEGA_VPN_PORT      public VPN port (default: 443)
   OMEGA_VPN_PROTO     udp or tcp (default: udp)
   OMEGA_SSH_PORT      SSH port that must remain reachable (default: 22)
+  OMEGA_ADMIN_WEB_PUBLIC 1/0, expect public admin web UI (default: 1)
+  OMEGA_ADMIN_WEB_PORT  public admin web UI TCP port (default: 8081)
   OMEGA_METRICS_PUBLIC 1/0, expect public Prometheus metrics (default: 1)
   OMEGA_METRICS_PORT  public Prometheus metrics TCP port (default: 9090)
   OMEGA_SERVICE_NAME  systemd service name (default: omega-server)
@@ -30,6 +32,8 @@ CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
+ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-1}"
+ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8081}"
 METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-1}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
@@ -100,6 +104,11 @@ echo "[INFO] Public interface: ${IFACE:-unknown}"
 echo "[INFO] Client subnet: ${CLIENT_CIDR}"
 echo "[INFO] VPN public port: ${VPN_PORT}/${VPN_PROTO}"
 echo "[INFO] SSH port: ${SSH_PORT}/tcp"
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    echo "[INFO] Public admin web UI port: ${ADMIN_WEB_PORT}/tcp"
+else
+    echo "[INFO] Public admin web UI: disabled"
+fi
 if [[ "$METRICS_PUBLIC" == "1" ]]; then
     echo "[INFO] Public metrics port: ${METRICS_PORT}/tcp"
 else
@@ -161,6 +170,14 @@ else
     fail "VPN allow rule for ${VPN_PORT}/${VPN_PROTO} is missing in UFW."
 fi
 
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    if grep -Eiq "\\b${ADMIN_WEB_PORT}/tcp\\b.*ALLOW" <<<"$ufw_status"; then
+        pass "Admin web allow rule is present in UFW."
+    else
+        fail "Admin web allow rule for ${ADMIN_WEB_PORT}/tcp is missing in UFW."
+    fi
+fi
+
 if [[ "$METRICS_PUBLIC" == "1" ]]; then
     if grep -Eiq "\\b${METRICS_PORT}/tcp\\b.*ALLOW" <<<"$ufw_status"; then
         pass "Metrics allow rule is present in UFW."
@@ -198,10 +215,16 @@ else
     check_tcp_listener
 fi
 
-if is_listener_exposed 8081; then
-    warn "Admin web UI is listening on a public address. Prefer 127.0.0.1:8081 plus SSH tunnel or reverse proxy."
-elif grep -Fq 'OMEGA_ADMIN_WEB_BIND=0.0.0.0:8081' <<<"$unit_dump"; then
-    warn "Service template exposes admin web UI publicly."
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    if is_listener_exposed "$ADMIN_WEB_PORT"; then
+        pass "Admin web UI is exposed publicly on port ${ADMIN_WEB_PORT}."
+    elif grep -Fq "OMEGA_ADMIN_WEB_BIND=0.0.0.0:${ADMIN_WEB_PORT}" <<<"$unit_dump"; then
+        fail "Admin web UI is expected to be public on port ${ADMIN_WEB_PORT}, but the listener is not up."
+    else
+        fail "Admin web UI is not exposed publicly on port ${ADMIN_WEB_PORT}."
+    fi
+elif is_listener_exposed "$ADMIN_WEB_PORT"; then
+    warn "Admin web UI is listening on a public address unexpectedly."
 else
     pass "Admin web UI is not exposed publicly by default."
 fi

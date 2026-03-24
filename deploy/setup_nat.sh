@@ -14,6 +14,8 @@ Environment:
   OMEGA_VPN_PORT           public VPN port (default: 443)
   OMEGA_VPN_PROTO          udp or tcp (default: udp)
   OMEGA_SSH_PORT           SSH port to preserve (default: 22)
+  OMEGA_ADMIN_WEB_PUBLIC   1/0, expose built-in admin UI publicly (default: 1)
+  OMEGA_ADMIN_WEB_PORT     built-in admin UI TCP port (default: 8081)
   OMEGA_METRICS_PUBLIC     1/0, expose Prometheus metrics publicly (default: 1)
   OMEGA_METRICS_PORT       Prometheus metrics TCP port (default: 9090)
   OMEGA_APPLY_SYSCTL_TUNING 1/0, apply UDP/TCP forwarding tuning (default: 1)
@@ -41,6 +43,8 @@ CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
+ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-1}"
+ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8081}"
 METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-1}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 APPLY_SYSCTL_TUNING="${OMEGA_APPLY_SYSCTL_TUNING:-1}"
@@ -75,6 +79,7 @@ require_numeric() {
 
 require_numeric "$VPN_PORT" "OMEGA_VPN_PORT"
 require_numeric "$SSH_PORT" "OMEGA_SSH_PORT"
+require_numeric "$ADMIN_WEB_PORT" "OMEGA_ADMIN_WEB_PORT"
 require_numeric "$METRICS_PORT" "OMEGA_METRICS_PORT"
 require_numeric "$RMEM_MAX" "OMEGA_RMEM_MAX"
 require_numeric "$WMEM_MAX" "OMEGA_WMEM_MAX"
@@ -151,6 +156,11 @@ echo "[INFO] Public interface: ${IFACE}"
 echo "[INFO] VPN client subnet: ${CLIENT_CIDR}"
 echo "[INFO] Preserving SSH on: ${SSH_PORT}/tcp"
 echo "[INFO] Allowing VPN on: ${VPN_PORT}/${VPN_PROTO}"
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    echo "[INFO] Exposing admin web UI on: ${ADMIN_WEB_PORT}/tcp"
+else
+    echo "[INFO] Public admin web UI is disabled."
+fi
 if [[ "$METRICS_PUBLIC" == "1" ]]; then
     echo "[INFO] Exposing Prometheus metrics on: ${METRICS_PORT}/tcp"
 else
@@ -239,6 +249,9 @@ fi
 
 ufw allow "${SSH_PORT}/tcp"
 ufw allow "${VPN_PORT}/${VPN_PROTO}"
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    ufw allow "${ADMIN_WEB_PORT}/tcp"
+fi
 if [[ "$METRICS_PUBLIC" == "1" ]]; then
     ufw allow "${METRICS_PORT}/tcp"
 fi
@@ -298,6 +311,11 @@ if ! input_rule_healthy "$VPN_PROTO" "$VPN_PORT"; then
     exit 1
 fi
 
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]] && ! input_rule_healthy tcp "$ADMIN_WEB_PORT"; then
+    echo "[ERROR] Admin web allow rule is not visible in active UFW state."
+    exit 1
+fi
+
 if [[ "$METRICS_PUBLIC" == "1" ]] && ! input_rule_healthy tcp "$METRICS_PORT"; then
     echo "[ERROR] Metrics allow rule is not visible in active UFW state."
     exit 1
@@ -331,6 +349,9 @@ ufw status verbose
 if [[ "$METRICS_PUBLIC" == "1" ]]; then
     echo "[INFO] Prometheus metrics should be reachable at http://<server-ip>:${METRICS_PORT}/"
 fi
+if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    echo "[INFO] Admin web UI should be reachable at http://<server-ip>:${ADMIN_WEB_PORT}/"
+fi
 
 if command -v ss >/dev/null 2>&1; then
     echo
@@ -339,6 +360,10 @@ if command -v ss >/dev/null 2>&1; then
         ss -H -lunp | grep -E "[:.]${VPN_PORT}\\b" || true
     else
         ss -H -ltnp | grep -E "[:.]${VPN_PORT}\\b" || true
+    fi
+    if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+        echo "[INFO] Active TCP listeners on admin web port ${ADMIN_WEB_PORT}:"
+        ss -H -ltnp | grep -E "[:.]${ADMIN_WEB_PORT}\\b" || true
     fi
     if [[ "$METRICS_PUBLIC" == "1" ]]; then
         echo "[INFO] Active TCP listeners on metrics port ${METRICS_PORT}:"

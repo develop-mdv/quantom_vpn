@@ -11,13 +11,14 @@ WorkingDirectory=/opt/omega
 ExecStart=/opt/omega/omega-server
 Environment=RUST_LOG=info
 Environment=OMEGA_BIND=0.0.0.0:443
-Environment=OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081
+Environment=OMEGA_ADMIN_WEB_BIND=0.0.0.0:8081
 Environment=OMEGA_METRICS_BIND=0.0.0.0:9090
 Environment=OMEGA_UDP_RCVBUF=8388608
 Environment=OMEGA_UDP_SNDBUF=8388608
 Environment=OMEGA_IDENTITY_DB=/opt/omega/state/identity.json
 Environment=OMEGA_SESSION_SNAPSHOT=/opt/omega/state/sessions.json
 Environment=OMEGA_ADMIN_COMMANDS=/opt/omega/state/admin_commands.ndjson
+EnvironmentFile=-/etc/default/omega-server
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
