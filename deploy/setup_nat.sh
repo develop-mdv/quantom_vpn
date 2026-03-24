@@ -60,7 +60,7 @@ UFW_BEFORE_RULES="/etc/ufw/before.rules"
 UFW_DEFAULTS="/etc/default/ufw"
 
 if [[ -z "$IFACE" ]]; then
-    IFACE="$(ip route | awk '/default/ {print $5; exit}')"
+    IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
 fi
 
 if [[ -z "$IFACE" ]]; then
@@ -133,10 +133,12 @@ input_rule_healthy() {
 }
 
 nat_rule_active() {
+    local postrouting_rules
     if ! command -v iptables >/dev/null 2>&1; then
         return 0
     fi
-    iptables -t nat -S POSTROUTING | grep -Fq -- "$NAT_RULE"
+    postrouting_rules="$(iptables -t nat -S POSTROUTING 2>/dev/null || true)"
+    grep -Fq -- "$NAT_RULE" <<<"$postrouting_rules"
 }
 
 repair_ufw_hooks() {
@@ -290,7 +292,8 @@ else
 fi
 
 echo "[INFO] Reloading UFW..."
-if ufw status | grep -q '^Status: active'; then
+ufw_current_status="$(ufw status 2>/dev/null || true)"
+if grep -q '^Status: active' <<<"$ufw_current_status"; then
     ufw reload
 else
     ufw --force enable

@@ -39,7 +39,7 @@ METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
 
 if [[ -z "$IFACE" ]]; then
-    IFACE="$(ip route | awk '/default/ {print $5; exit}')"
+    IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
 fi
 
 pass_count=0
@@ -67,18 +67,22 @@ cmd_exists() {
 
 is_listener_exposed() {
     local port="$1"
+    local listeners
     if ! cmd_exists ss; then
         return 1
     fi
-    ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${port}$"
+    listeners="$(ss -H -ltn 2>/dev/null | awk '{print $4}' || true)"
+    grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${port}$" <<<"$listeners"
 }
 
 check_udp_listener() {
+    local listeners
     if ! cmd_exists ss; then
         warn "ss is not installed; cannot verify runtime listener state."
         return
     fi
-    if ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${VPN_PORT}$"; then
+    listeners="$(ss -H -lun 2>/dev/null | awk '{print $4}' || true)"
+    if grep -Eq "[:.]${VPN_PORT}$" <<<"$listeners"; then
         pass "UDP listener is present on port ${VPN_PORT}."
     else
         fail "UDP listener on port ${VPN_PORT} is not visible."
@@ -86,11 +90,13 @@ check_udp_listener() {
 }
 
 check_tcp_listener() {
+    local listeners
     if ! cmd_exists ss; then
         warn "ss is not installed; cannot verify runtime listener state."
         return
     fi
-    if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${VPN_PORT}$"; then
+    listeners="$(ss -H -ltn 2>/dev/null | awk '{print $4}' || true)"
+    if grep -Eq "[:.]${VPN_PORT}$" <<<"$listeners"; then
         pass "TCP listener is present on port ${VPN_PORT}."
     else
         fail "TCP listener on port ${VPN_PORT} is not visible."
@@ -193,8 +199,9 @@ else
 fi
 
 if cmd_exists iptables; then
+    nat_rules="$(iptables -t nat -S POSTROUTING 2>/dev/null || true)"
     nat_rule="-A POSTROUTING -s ${CLIENT_CIDR} -o ${IFACE} -j MASQUERADE"
-    if iptables -t nat -S POSTROUTING 2>/dev/null | grep -Fq -- "$nat_rule"; then
+    if grep -Fq -- "$nat_rule" <<<"$nat_rules"; then
         pass "IPv4 NAT rule for ${CLIENT_CIDR} -> ${IFACE} is active."
     else
         fail "IPv4 NAT rule for ${CLIENT_CIDR} -> ${IFACE} is missing."
