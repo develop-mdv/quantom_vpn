@@ -3,6 +3,7 @@ mod handshake;
 mod identity;
 mod metrics;
 mod morphing;
+mod runtime;
 mod session;
 mod web_admin;
 
@@ -24,7 +25,6 @@ use identity::{
 const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 16;
-const DEFAULT_MTU: u16 = 1200;
 const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
 const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
 const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
@@ -66,12 +66,20 @@ async fn main() -> anyhow::Result<()> {
 async fn run_server() -> anyhow::Result<()> {
     tracing::info!("omega-server v{} starting", env!("CARGO_PKG_VERSION"));
 
+    let profile = runtime::ServerProfile::from_env();
     let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let metrics_bind =
         std::env::var("OMEGA_METRICS_BIND").unwrap_or_else(|_| DEFAULT_METRICS_BIND.to_string());
+    let web_admin_bind = std::env::var("OMEGA_ADMIN_WEB_BIND")
+        .unwrap_or_else(|_| DEFAULT_ADMIN_WEB_BIND.to_string());
     let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF);
     let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF);
     let allow_legacy_v1 = env_bool("OMEGA_ALLOW_LEGACY_V1");
+    let tunnel_mtu = std::env::var("OMEGA_TUN_MTU")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .map(|value| value.clamp(1200, 1420))
+        .unwrap_or_else(|| profile.default_mtu());
 
     if let Err(e) = metrics::init_metrics(&metrics_bind) {
         tracing::warn!(error = %e, "failed to init metrics, continuing without exporter");
@@ -84,12 +92,12 @@ async fn run_server() -> anyhow::Result<()> {
     tracing::info!(
         "creating TUN device at {} with MTU {}",
         DEFAULT_TUN_IP,
-        DEFAULT_MTU
+        tunnel_mtu
     );
 
     let tun: Arc<tun_rs::AsyncDevice> = match tun_rs::DeviceBuilder::new()
         .ipv4(DEFAULT_TUN_IP, DEFAULT_TUN_PREFIX, None)
-        .mtu(DEFAULT_MTU)
+        .mtu(tunnel_mtu)
         .build_async()
     {
         Ok(dev) => Arc::new(dev),
@@ -103,9 +111,22 @@ async fn run_server() -> anyhow::Result<()> {
     tracing::info!(%bind_addr, udp_rcvbuf, udp_sndbuf, "listening on UDP");
 
     let session_manager = Arc::new(session::SessionManager::new());
+    let runtime_config = runtime::ServerRuntimeConfig {
+        profile,
+        bind_addr: bind_addr.clone(),
+        metrics_bind: metrics_bind.clone(),
+        admin_web_bind: web_admin_bind.clone(),
+        tunnel_ip: DEFAULT_TUN_IP.to_string(),
+        tunnel_prefix: DEFAULT_TUN_PREFIX,
+        tunnel_mtu,
+        udp_rcvbuf,
+        udp_sndbuf,
+        transport: "udp".to_string(),
+        tunnel_family: "ipv4".to_string(),
+        ipv6_mode: runtime::Ipv6Mode::Disabled,
+        allow_legacy_v1,
+    };
 
-    let web_admin_bind = std::env::var("OMEGA_ADMIN_WEB_BIND")
-        .unwrap_or_else(|_| DEFAULT_ADMIN_WEB_BIND.to_string());
     if !env_bool("OMEGA_ADMIN_WEB_DISABLE") {
         let web_identity = identity_store.clone();
         let web_sessions = session_manager.clone();
@@ -128,6 +149,21 @@ async fn run_server() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(err) = spawn_session_snapshot_task(snapshot_manager, snapshot_path).await {
             tracing::warn!(error = %err, "session snapshot task stopped");
+        }
+    });
+
+    let runtime_snapshot_path = runtime::ServerRuntimeConfig::runtime_snapshot_path();
+    let runtime_sessions = session_manager.clone();
+    let runtime_details = runtime_config.clone();
+    tokio::spawn(async move {
+        if let Err(err) = runtime::spawn_runtime_snapshot_task(
+            runtime_details,
+            runtime_sessions,
+            runtime_snapshot_path,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "runtime snapshot task stopped");
         }
     });
 
@@ -161,7 +197,7 @@ async fn run_server() -> anyhow::Result<()> {
             udp_w,
             sessions_w,
             identity_w,
-            DEFAULT_MTU,
+            tunnel_mtu,
             allow_legacy_v1,
         )
         .await;
@@ -264,6 +300,16 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
             let raw = fs::read_to_string(&snapshot_path).with_context(|| {
                 format!(
                     "failed to read session snapshot {} (is server running?)",
+                    snapshot_path.display()
+                )
+            })?;
+            println!("{}", raw);
+        }
+        "show_runtime" => {
+            let snapshot_path = runtime::ServerRuntimeConfig::runtime_snapshot_path();
+            let raw = fs::read_to_string(&snapshot_path).with_context(|| {
+                format!(
+                    "failed to read runtime snapshot {} (is server running?)",
                     snapshot_path.display()
                 )
             })?;
@@ -513,6 +559,7 @@ fn print_admin_usage() {
     println!("  revoke_device --device-id <uuid>");
     println!("  list_user_devices --user-id <uuid>");
     println!("  list_active_sessions");
+    println!("  show_runtime");
     println!("  terminate_session --flow-id <32_hex_chars>");
     println!("  show_audit [--limit N]");
 }

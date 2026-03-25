@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use metrics::{counter, gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
+use crate::runtime::RuntimeSummary;
+
 pub fn init_metrics(bind: &str) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse()?;
     PrometheusBuilder::new()
@@ -10,6 +12,9 @@ pub fn init_metrics(bind: &str) -> anyhow::Result<()> {
         .install()?;
 
     gauge!("omega_active_sessions").set(0.0);
+    gauge!("omega_runtime_max_idle_seconds").set(0.0);
+    gauge!("omega_runtime_max_age_seconds").set(0.0);
+    gauge!("omega_runtime_avg_loss_ratio").set(0.0);
     tracing::info!(%addr, "prometheus metrics enabled");
     Ok(())
 }
@@ -71,4 +76,10 @@ pub fn record_retransmit_sent(sent_packets: usize, dropped_packets: usize) {
     if dropped_packets > 0 {
         counter!("omega_retransmit_dropped_total").increment(dropped_packets as u64);
     }
+}
+
+pub fn update_runtime_summary(summary: &RuntimeSummary) {
+    gauge!("omega_runtime_max_idle_seconds").set(summary.max_idle_secs as f64);
+    gauge!("omega_runtime_max_age_seconds").set(summary.max_age_secs as f64);
+    gauge!("omega_runtime_avg_loss_ratio").set(summary.avg_loss_ratio);
 }

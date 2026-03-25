@@ -44,6 +44,7 @@ pub struct SessionState {
     pub tunnel_ip: Ipv4Addr,
     pub user_id: String,
     pub device_id: String,
+    pub created_at: Instant,
     pub last_seen: Instant,
     pub fec_enabled: bool,
     pub padding_budget: usize,
@@ -94,6 +95,7 @@ impl SessionState {
             tunnel_ip,
             user_id,
             device_id,
+            created_at: Instant::now(),
             last_seen: Instant::now(),
             fec_enabled,
             padding_budget: PADDING_BUDGET_MAX,
@@ -218,7 +220,9 @@ pub struct ActiveSessionView {
     pub device_id: String,
     pub tunnel_ip: String,
     pub client_addr: String,
+    pub age_secs: u64,
     pub idle_secs: u64,
+    pub loss_ratio: f64,
     pub fec_enabled: bool,
 }
 
@@ -416,7 +420,9 @@ impl SessionManager {
                 device_id: entry.value().device_id.clone(),
                 tunnel_ip: entry.value().tunnel_ip.to_string(),
                 client_addr: entry.value().client_addr.to_string(),
+                age_secs: now.duration_since(entry.value().created_at).as_secs(),
                 idle_secs: now.duration_since(entry.value().last_seen).as_secs(),
+                loss_ratio: entry.value().loss_ratio(),
                 fec_enabled: entry.value().fec_enabled,
             })
             .collect()

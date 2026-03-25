@@ -3,22 +3,25 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Omega VPN server diagnostics.
+Omega VPN nftables diagnostics.
 
 Usage:
   sudo bash diagnose_server.sh [public_iface]
 
 Environment:
-  OMEGA_PUBLIC_IFACE  public interface, autodetected from default route when empty
-  OMEGA_CLIENT_CIDR   VPN client subnet (default: 10.7.0.0/16)
-  OMEGA_VPN_PORT      public VPN port (default: 443)
-  OMEGA_VPN_PROTO     udp or tcp (default: udp)
-  OMEGA_SSH_PORT      SSH port that must remain reachable (default: 22)
-  OMEGA_ADMIN_WEB_PUBLIC 1/0, expect public admin web UI (default: 1)
-  OMEGA_ADMIN_WEB_PORT  public admin web UI TCP port (default: 8081)
-  OMEGA_METRICS_PUBLIC 1/0, expect public Prometheus metrics (default: 1)
-  OMEGA_METRICS_PORT  public Prometheus metrics TCP port (default: 9090)
-  OMEGA_SERVICE_NAME  systemd service name (default: omega-server)
+  OMEGA_PUBLIC_IFACE           public interface; autodetected from default route when empty
+  OMEGA_TUN_IFACE_PATTERN      tunnel interface glob expected in nftables (default: tun*)
+  OMEGA_CLIENT_CIDR            VPN client subnet (default: 10.7.0.0/16)
+  OMEGA_VPN_PORT               public UDP port (default: 443)
+  OMEGA_VPN_PROTO              expected transport, should stay udp (default: udp)
+  OMEGA_VPN_IPV6_MODE          expected IPv6 mode, should stay disabled (default: disabled)
+  OMEGA_SSH_PORT               SSH port that must remain reachable (default: 22)
+  OMEGA_ADMIN_WEB_PUBLIC       1/0, expect public admin web UI (default: 0)
+  OMEGA_ADMIN_WEB_PORT         admin web UI TCP port (default: 8081)
+  OMEGA_METRICS_PUBLIC         1/0, expect public Prometheus metrics (default: 0)
+  OMEGA_METRICS_PORT           Prometheus metrics TCP port (default: 9090)
+  OMEGA_SERVICE_NAME           systemd service name (default: omega-server)
+  OMEGA_RUNTIME_SNAPSHOT       runtime snapshot path (default: /opt/omega/state/runtime.json)
 EOF
 }
 
@@ -28,15 +31,20 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 IFACE="${OMEGA_PUBLIC_IFACE:-${1:-}}"
+TUN_IFACE_PATTERN="${OMEGA_TUN_IFACE_PATTERN:-tun*}"
 CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
+VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-disabled}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
-ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-1}"
+ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-0}"
 ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8081}"
-METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-1}"
+METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-0}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
+RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-/opt/omega/state/runtime.json}"
+NFT_INET_TABLE="omega_vpn"
+NFT_NAT_TABLE="omega_vpn_nat"
 
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
@@ -65,149 +73,105 @@ cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-is_listener_exposed() {
-    local port="$1"
-    local listeners
-    if ! cmd_exists ss; then
-        return 1
-    fi
-    listeners="$(ss -H -ltn 2>/dev/null | awk '{print $4}' || true)"
-    grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${port}$" <<<"$listeners"
-}
-
-check_udp_listener() {
-    local listeners
-    if ! cmd_exists ss; then
-        warn "ss is not installed; cannot verify runtime listener state."
-        return
-    fi
-    listeners="$(ss -H -lun 2>/dev/null | awk '{print $4}' || true)"
-    if grep -Eq "[:.]${VPN_PORT}$" <<<"$listeners"; then
-        pass "UDP listener is present on port ${VPN_PORT}."
-    else
-        fail "UDP listener on port ${VPN_PORT} is not visible."
-    fi
-}
-
-check_tcp_listener() {
-    local listeners
-    if ! cmd_exists ss; then
-        warn "ss is not installed; cannot verify runtime listener state."
-        return
-    fi
-    listeners="$(ss -H -ltn 2>/dev/null | awk '{print $4}' || true)"
-    if grep -Eq "[:.]${VPN_PORT}$" <<<"$listeners"; then
-        pass "TCP listener is present on port ${VPN_PORT}."
-    else
-        fail "TCP listener on port ${VPN_PORT} is not visible."
-    fi
-}
-
-ufw_status="$(ufw status 2>/dev/null || true)"
-unit_dump="$(systemctl cat "$SERVICE_NAME" 2>/dev/null || true)"
+if [[ -z "$IFACE" ]]; then
+    fail "Could not detect the public interface."
+fi
 
 echo "[INFO] Public interface: ${IFACE:-unknown}"
+echo "[INFO] Tunnel interface pattern: ${TUN_IFACE_PATTERN}"
 echo "[INFO] Client subnet: ${CLIENT_CIDR}"
-echo "[INFO] VPN public port: ${VPN_PORT}/${VPN_PROTO}"
-echo "[INFO] SSH port: ${SSH_PORT}/tcp"
-if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
-    echo "[INFO] Public admin web UI port: ${ADMIN_WEB_PORT}/tcp"
-else
-    echo "[INFO] Public admin web UI: disabled"
-fi
-if [[ "$METRICS_PUBLIC" == "1" ]]; then
-    echo "[INFO] Public metrics port: ${METRICS_PORT}/tcp"
-else
-    echo "[INFO] Public metrics: disabled"
-fi
-echo "[INFO] Service: ${SERVICE_NAME}"
+echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
+echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
+echo "[INFO] Runtime snapshot: ${RUNTIME_SNAPSHOT}"
 echo
 
 if [[ "$(id -u)" -ne 0 ]]; then
-    warn "Running without root; some iptables and system checks may be incomplete."
+    warn "Running without root; nftables and conntrack checks may be incomplete."
+fi
+
+if [[ "$VPN_PROTO" == "udp" ]]; then
+    pass "VPN transport is UDP-first as required for the current gaming profile."
+else
+    fail "Expected UDP transport, got ${VPN_PROTO}."
+fi
+
+if [[ "$VPN_IPV6_MODE" == "disabled" ]]; then
+    pass "IPv6 mode is explicitly disabled, which matches the current IPv4-only Omega tunnel."
+else
+    fail "IPv6 mode is not disabled even though the current datapath is IPv4-only."
 fi
 
 if cmd_exists sysctl; then
-    if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]]; then
-        pass "IPv4 forwarding is enabled."
-    else
-        fail "IPv4 forwarding is disabled."
+    [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] \
+        && pass "IPv4 forwarding is enabled." \
+        || fail "IPv4 forwarding is disabled."
+
+    [[ "$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)" == "2" ]] \
+        && pass "net.ipv4.conf.all.rp_filter is in loose mode." \
+        || fail "net.ipv4.conf.all.rp_filter is not 2."
+
+    [[ "$(sysctl -n net.ipv4.conf.default.rp_filter 2>/dev/null || echo 0)" == "2" ]] \
+        && pass "net.ipv4.conf.default.rp_filter is in loose mode." \
+        || fail "net.ipv4.conf.default.rp_filter is not 2."
+
+    if [[ -n "$IFACE" ]]; then
+        iface_rpf="$(sysctl -n "net.ipv4.conf.${IFACE}.rp_filter" 2>/dev/null || echo 2)"
+        [[ "$iface_rpf" == "2" ]] \
+            && pass "net.ipv4.conf.${IFACE}.rp_filter is in loose mode." \
+            || warn "net.ipv4.conf.${IFACE}.rp_filter is ${iface_rpf}, expected 2."
     fi
 
-    rmem_max="$(sysctl -n net.core.rmem_max 2>/dev/null || echo 0)"
-    wmem_max="$(sysctl -n net.core.wmem_max 2>/dev/null || echo 0)"
-    if (( rmem_max >= 8388608 )); then
-        pass "net.core.rmem_max is tuned for larger UDP bursts (${rmem_max})."
+    [[ "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo 0)" == "1" ]] \
+        && pass "TCP MTU probing is enabled." \
+        || warn "TCP MTU probing is disabled."
+
+    udp_timeout="$(sysctl -n net.netfilter.nf_conntrack_udp_timeout 2>/dev/null || echo 0)"
+    udp_stream="$(sysctl -n net.netfilter.nf_conntrack_udp_timeout_stream 2>/dev/null || echo 0)"
+    if (( udp_timeout >= 60 )); then
+        pass "nf_conntrack UDP timeout is ${udp_timeout}s."
     else
-        warn "net.core.rmem_max is low (${rmem_max}); high-rate UDP can drop under burst load."
+        warn "nf_conntrack UDP timeout is only ${udp_timeout}s."
     fi
-    if (( wmem_max >= 8388608 )); then
-        pass "net.core.wmem_max is tuned for larger UDP bursts (${wmem_max})."
+    if (( udp_stream >= 120 )); then
+        pass "nf_conntrack UDP stream timeout is ${udp_stream}s."
     else
-        warn "net.core.wmem_max is low (${wmem_max}); outbound burst handling can suffer."
-    fi
-
-    rp_all="$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)"
-    rp_default="$(sysctl -n net.ipv4.conf.default.rp_filter 2>/dev/null || echo 0)"
-    if [[ "$rp_all" == "2" && "$rp_default" == "2" ]]; then
-        pass "rp_filter is set to loose mode (2), which is safer for tunneled/NATed paths."
-    else
-        warn "rp_filter is not set to loose mode (all=${rp_all}, default=${rp_default})."
-    fi
-else
-    warn "sysctl is not available; kernel tuning checks skipped."
-fi
-
-if [[ -n "$ufw_status" && "$ufw_status" != "Status: inactive" ]]; then
-    pass "UFW is active."
-else
-    fail "UFW is inactive or unavailable."
-fi
-
-if grep -Eiq "\\b${SSH_PORT}/tcp\\b.*ALLOW" <<<"$ufw_status"; then
-    pass "SSH allow rule is present in UFW."
-else
-    fail "SSH allow rule for ${SSH_PORT}/tcp is missing in UFW."
-fi
-
-if grep -Eiq "\\b${VPN_PORT}/${VPN_PROTO}\\b.*ALLOW" <<<"$ufw_status"; then
-    pass "VPN allow rule is present in UFW."
-else
-    fail "VPN allow rule for ${VPN_PORT}/${VPN_PROTO} is missing in UFW."
-fi
-
-if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
-    if grep -Eiq "\\b${ADMIN_WEB_PORT}/tcp\\b.*ALLOW" <<<"$ufw_status"; then
-        pass "Admin web allow rule is present in UFW."
-    else
-        fail "Admin web allow rule for ${ADMIN_WEB_PORT}/tcp is missing in UFW."
-    fi
-fi
-
-if [[ "$METRICS_PUBLIC" == "1" ]]; then
-    if grep -Eiq "\\b${METRICS_PORT}/tcp\\b.*ALLOW" <<<"$ufw_status"; then
-        pass "Metrics allow rule is present in UFW."
-    else
-        fail "Metrics allow rule for ${METRICS_PORT}/tcp is missing in UFW."
-    fi
-fi
-
-if grep -Eq '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw 2>/dev/null; then
-    pass "UFW forward policy is ACCEPT."
-else
-    fail "UFW forward policy is not ACCEPT."
-fi
-
-if cmd_exists iptables; then
-    nat_rules="$(iptables -t nat -S POSTROUTING 2>/dev/null || true)"
-    nat_rule="-A POSTROUTING -s ${CLIENT_CIDR} -o ${IFACE} -j MASQUERADE"
-    if grep -Fq -- "$nat_rule" <<<"$nat_rules"; then
-        pass "IPv4 NAT rule for ${CLIENT_CIDR} -> ${IFACE} is active."
-    else
-        fail "IPv4 NAT rule for ${CLIENT_CIDR} -> ${IFACE} is missing."
+        warn "nf_conntrack UDP stream timeout is only ${udp_stream}s."
     fi
 else
-    warn "iptables is not available; NAT verification skipped."
+    fail "sysctl is not available."
+fi
+
+if cmd_exists nft; then
+    inet_table="$(nft list table inet "$NFT_INET_TABLE" 2>/dev/null || true)"
+    nat_table="$(nft list table ip "$NFT_NAT_TABLE" 2>/dev/null || true)"
+
+    [[ -n "$inet_table" ]] \
+        && pass "nftables inet table ${NFT_INET_TABLE} is loaded." \
+        || fail "nftables inet table ${NFT_INET_TABLE} is missing."
+
+    [[ -n "$nat_table" ]] \
+        && pass "nftables nat table ${NFT_NAT_TABLE} is loaded." \
+        || fail "nftables nat table ${NFT_NAT_TABLE} is missing."
+
+    if grep -Fq 'tcp option maxseg size set rt mtu' <<<"$inet_table"; then
+        pass "MSS clamping by PMTU is configured."
+    else
+        fail "MSS clamping rule is missing."
+    fi
+
+    if grep -Fq "ip saddr ${CLIENT_CIDR}" <<<"$inet_table"; then
+        pass "Forward rule for ${CLIENT_CIDR} is present."
+    else
+        fail "Forward rule for ${CLIENT_CIDR} is missing."
+    fi
+
+    if grep -Fq "masquerade" <<<"$nat_table" && grep -Fq "ip saddr ${CLIENT_CIDR}" <<<"$nat_table"; then
+        pass "MASQUERADE is enabled for ${CLIENT_CIDR}."
+    else
+        fail "MASQUERADE rule for ${CLIENT_CIDR} is missing."
+    fi
+else
+    fail "nft is not installed."
 fi
 
 if systemctl is-active --quiet "$SERVICE_NAME"; then
@@ -216,48 +180,67 @@ else
     fail "systemd service ${SERVICE_NAME} is not active."
 fi
 
-if [[ "$VPN_PROTO" == "udp" ]]; then
-    check_udp_listener
+if cmd_exists ss; then
+    if ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${VPN_PORT}$"; then
+        pass "UDP listener is present on port ${VPN_PORT}."
+    else
+        fail "UDP listener on port ${VPN_PORT} is not visible."
+    fi
+
+    if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+        if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${ADMIN_WEB_PORT}$"; then
+            pass "Admin web UI is exposed publicly on port ${ADMIN_WEB_PORT}."
+        else
+            fail "Admin web UI is expected to be public on ${ADMIN_WEB_PORT}, but no listener was found."
+        fi
+    else
+        warn "Admin web public exposure is disabled by default; that is safer for production."
+    fi
+
+    if [[ "$METRICS_PUBLIC" == "1" ]]; then
+        if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${METRICS_PORT}$"; then
+            pass "Prometheus metrics are exposed publicly on port ${METRICS_PORT}."
+        else
+            fail "Metrics are expected to be public on ${METRICS_PORT}, but no listener was found."
+        fi
+    else
+        warn "Prometheus metrics public exposure is disabled by default; that is safer for production."
+    fi
 else
-    check_tcp_listener
+    warn "ss is not installed; listener checks skipped."
 fi
 
-if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
-    if is_listener_exposed "$ADMIN_WEB_PORT"; then
-        pass "Admin web UI is exposed publicly on port ${ADMIN_WEB_PORT}."
-    elif grep -Fq "OMEGA_ADMIN_WEB_BIND=0.0.0.0:${ADMIN_WEB_PORT}" <<<"$unit_dump"; then
-        fail "Admin web UI is expected to be public on port ${ADMIN_WEB_PORT}, but the listener is not up."
+if [[ -f "$RUNTIME_SNAPSHOT" ]]; then
+    pass "Runtime snapshot exists."
+    if grep -Fq '"tunnel_family": "ipv4"' "$RUNTIME_SNAPSHOT"; then
+        pass "Runtime snapshot confirms IPv4 tunnel family."
     else
-        fail "Admin web UI is not exposed publicly on port ${ADMIN_WEB_PORT}."
+        warn "Runtime snapshot does not show tunnel_family=ipv4."
     fi
-elif is_listener_exposed "$ADMIN_WEB_PORT"; then
-    warn "Admin web UI is listening on a public address unexpectedly."
-else
-    pass "Admin web UI is not exposed publicly by default."
-fi
 
-if [[ "$METRICS_PUBLIC" == "1" ]]; then
-    if is_listener_exposed "$METRICS_PORT"; then
-        pass "Prometheus metrics are exposed publicly on port ${METRICS_PORT}."
-    elif grep -Fq "OMEGA_METRICS_BIND=0.0.0.0:${METRICS_PORT}" <<<"$unit_dump"; then
-        warn "Service template expects public metrics, but the listener is not up yet."
+    if grep -Fq '"ipv6_mode": "disabled"' "$RUNTIME_SNAPSHOT"; then
+        pass "Runtime snapshot confirms IPv6 is disabled."
     else
-        fail "Prometheus metrics are not exposed publicly on port ${METRICS_PORT}."
+        warn "Runtime snapshot does not confirm ipv6_mode=disabled."
     fi
-elif is_listener_exposed "$METRICS_PORT"; then
-    warn "Prometheus metrics are listening on a public address unexpectedly."
+
+    if grep -Fq '"profile": "gaming"' "$RUNTIME_SNAPSHOT"; then
+        pass "Runtime snapshot is using the gaming profile."
+    else
+        warn "Runtime snapshot is not using the gaming profile; verify the active profile intentionally."
+    fi
 else
-    pass "Prometheus metrics are not exposed publicly by default."
+    warn "Runtime snapshot file is missing; diagnostics JSON is not being written yet."
 fi
 
 if (( fail_count == 0 )); then
-    pass "Server-side IPv4 full-tunnel path is ready for Steam remote ports: TCP 80/443/27015-27050 and UDP 3478/4379/4380/27000-27100/27014-27050."
+    pass "Server path looks Steam/Dota-ready for UDP relay traffic from the VPN side."
 else
-    fail "Server-side Steam IPv4 path is not fully healthy because one or more prerequisite checks failed."
+    fail "Server path is not yet healthy enough for a reliable gaming profile."
 fi
 
-warn "Steam client-local ports 27031-27036/udp and 27036/tcp are not controlled by the VPN server; keep them open on each client host."
-warn "Valve IPv6 prefixes are not fully covered because the current Omega tunnel is IPv4-only."
+warn "Cloud security groups and provider ACLs are outside this script; verify outbound UDP is open."
+warn "Client-side DNS policy, IPv6 leak guard, and split routes must still be validated on each client host."
 
 echo
 echo "[INFO] Summary: ${pass_count} passed, ${warn_count} warnings, ${fail_count} failed."

@@ -1,0 +1,73 @@
+# Gaming Networking Notes
+
+This repository now ships a gaming-oriented runtime profile and a server bootstrap that is closer
+to the "UDP-first, MTU-aware, diagnosable" target from the Dota/Steam VPN spec.
+
+## What Was Added
+
+- `OMEGA_PROFILE=gaming|general|restricted`
+- `OMEGA_TUNNEL_MODE=full|split`
+- `OMEGA_TUN_MTU` for explicit tunnel MTU selection
+- `OMEGA_DNS_POLICY=tunnel|system`
+- `OMEGA_IPV6_POLICY=disabled|passthrough`
+- `OMEGA_DIAGNOSTICS_PATH` client runtime snapshot JSON
+- `OMEGA_RUNTIME_SNAPSHOT` server runtime snapshot JSON
+- `deploy/setup_nat.sh` now configures `nftables`, `MASQUERADE`, MSS clamping, loose `rp_filter`,
+  and longer UDP conntrack timeouts
+- `deploy/diagnose_server.sh` now validates the `nftables` and runtime snapshot state
+
+## Recommended Gaming Defaults
+
+Client:
+
+```env
+OMEGA_PROFILE=gaming
+OMEGA_TUNNEL_MODE=full
+OMEGA_TUN_MTU=1380
+OMEGA_KEEPALIVE_SECS=25
+OMEGA_DNS_POLICY=tunnel
+OMEGA_IPV6_POLICY=disabled
+OMEGA_NETWORK_DIAG=1
+```
+
+Server:
+
+```env
+OMEGA_PROFILE=gaming
+OMEGA_TUN_MTU=1380
+OMEGA_BIND=0.0.0.0:443
+OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
+```
+
+Then bootstrap the server networking as root:
+
+```bash
+sudo OMEGA_VPN_PORT=443 bash deploy/setup_nat.sh
+sudo bash deploy/diagnose_server.sh
+```
+
+## Diagnostics Files
+
+Client runtime snapshot:
+
+- `omega-client/state/diagnostics.json` by default
+
+Server runtime snapshot:
+
+- `state/runtime.json` by default
+- `/opt/omega/state/runtime.json` in the provided systemd service
+
+These snapshots are intended to answer "what MTU, DNS policy, tunnel mode, keepalive, and session
+health are active right now?" without guessing from logs.
+
+## Important Current Limitations
+
+The repository still does **not** meet the spec completely:
+
+- The datapath is still a custom Omega UDP tunnel, not WireGuard.
+- There is no real OpenVPN TCP fallback implementation.
+- The runtime is still IPv4-only; IPv6 is explicitly disabled rather than fully tunneled.
+- Split tunnel route selection exists on the client, but true split-DNS behavior is still limited.
+
+So the project is now much closer to the operational requirements for Steam/Dota troubleshooting,
+but it has not yet completed the protocol-level migration required by the spec.

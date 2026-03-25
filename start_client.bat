@@ -93,11 +93,16 @@ echo   OMEGA_DEVICE_ID=uuid
 echo   OMEGA_DEVICE_TOKEN=hex_token
 echo Optional:
 echo   OMEGA_DEVICE_NAME=my-laptop
-
 echo   OMEGA_PLATFORM=windows
+echo   OMEGA_PROFILE=gaming
+echo   OMEGA_TUNNEL_MODE=full
+echo   OMEGA_TUN_MTU=1380
+echo   OMEGA_KEEPALIVE_SECS=25
+echo   OMEGA_DNS_POLICY=tunnel
 echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
-echo   OMEGA_DISABLE_IPV6=1
+echo   OMEGA_IPV6_POLICY=disabled
 echo   OMEGA_NETWORK_DIAG=1
+echo   OMEGA_DIAGNOSTICS_PATH=omega-client/state/diagnostics.json
 
 echo.
 echo Example .env:
@@ -105,8 +110,13 @@ echo   OMEGA_SERVER=203.0.113.1:51820
 echo   OMEGA_DEVICE_ID=11111111-2222-3333-4444-555555555555
 echo   OMEGA_DEVICE_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 echo   OMEGA_DEVICE_NAME=home-pc
+echo   OMEGA_PROFILE=gaming
+echo   OMEGA_TUNNEL_MODE=full
+echo   OMEGA_TUN_MTU=1380
+echo   OMEGA_KEEPALIVE_SECS=25
+echo   OMEGA_DNS_POLICY=tunnel
 echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
-echo   OMEGA_DISABLE_IPV6=1
+echo   OMEGA_IPV6_POLICY=disabled
 echo   OMEGA_NETWORK_DIAG=1
 pause
 goto :end
