@@ -67,6 +67,7 @@ async fn run_server() -> anyhow::Result<()> {
     tracing::info!("omega-server v{} starting", env!("CARGO_PKG_VERSION"));
 
     let profile = runtime::ServerProfile::from_env();
+    let morphing_policy = runtime::MorphingPolicy::from_env(profile);
     let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let metrics_bind =
         std::env::var("OMEGA_METRICS_BIND").unwrap_or_else(|_| DEFAULT_METRICS_BIND.to_string());
@@ -113,6 +114,7 @@ async fn run_server() -> anyhow::Result<()> {
     let session_manager = Arc::new(session::SessionManager::new());
     let runtime_config = runtime::ServerRuntimeConfig {
         profile,
+        morphing_policy,
         bind_addr: bind_addr.clone(),
         metrics_bind: metrics_bind.clone(),
         admin_web_bind: web_admin_bind.clone(),
@@ -199,6 +201,7 @@ async fn run_server() -> anyhow::Result<()> {
             identity_w,
             tunnel_mtu,
             allow_legacy_v1,
+            morphing_policy,
         )
         .await;
     });

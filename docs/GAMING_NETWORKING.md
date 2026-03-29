@@ -6,6 +6,7 @@ to the "UDP-first, MTU-aware, diagnosable" target from the Dota/Steam VPN spec.
 ## What Was Added
 
 - `OMEGA_PROFILE=gaming|general|restricted`
+- `OMEGA_MORPHING=balanced|full|off`
 - `OMEGA_TUNNEL_MODE=full|split`
 - `OMEGA_TUN_MTU` for explicit tunnel MTU selection
 - `OMEGA_DNS_POLICY=tunnel|system`
@@ -22,6 +23,7 @@ Client:
 
 ```env
 OMEGA_PROFILE=gaming
+OMEGA_MORPHING=balanced
 OMEGA_TUNNEL_MODE=full
 OMEGA_TUN_MTU=1380
 OMEGA_KEEPALIVE_SECS=25
@@ -34,6 +36,7 @@ Server:
 
 ```env
 OMEGA_PROFILE=gaming
+OMEGA_MORPHING=balanced
 OMEGA_TUN_MTU=1380
 OMEGA_BIND=0.0.0.0:443
 OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
@@ -59,6 +62,19 @@ Server runtime snapshot:
 
 These snapshots are intended to answer "what MTU, DNS policy, tunnel mode, keepalive, and session
 health are active right now?" without guessing from logs.
+
+## Interpreting Very High In-Game Ping
+
+If the client diagnostics show a moderate handshake RTT to the VPN server (for example ~100-200 ms)
+but the game reports ~1s+ latency to every region, the bottleneck is usually not just "server is
+far away". That pattern more often points to one of these issues:
+
+- heavy packet loss and retransmits on the UDP relay path;
+- provider/security-group egress filtering for game UDP traffic;
+- an MTU/path issue that causes bursts of loss and recovery.
+
+In those cases, try `OMEGA_MORPHING=balanced` first, and if the line is still unstable, test
+`OMEGA_MORPHING=off` plus a smaller `OMEGA_TUN_MTU` such as `1320` or `1280`.
 
 ## Important Current Limitations
 

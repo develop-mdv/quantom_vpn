@@ -52,6 +52,7 @@ pub fn process_client_handshake(
     identity_store: &IdentityStore,
     server_mtu: u16,
     allow_legacy_v1: bool,
+    morphing_policy: crate::runtime::MorphingPolicy,
 ) -> Result<HandshakeOutcome, HandshakeError> {
     let (is_request, txn_id, payload) =
         StunWrapper::parse(raw_packet).ok_or(HandshakeError::InvalidStun)?;
@@ -181,6 +182,7 @@ pub fn process_client_handshake(
         auth_ctx.device.device_id.clone(),
         chaos_seed,
         fec_enabled,
+        morphing_policy,
         ssrc,
     );
     if !session_manager.insert(flow_id, session) {

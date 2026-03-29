@@ -229,6 +229,30 @@ if [[ -f "$RUNTIME_SNAPSHOT" ]]; then
     else
         warn "Runtime snapshot is not using the gaming profile; verify the active profile intentionally."
     fi
+
+    morphing_policy="$(grep -oE '"morphing_policy": "[^"]+"' "$RUNTIME_SNAPSHOT" | head -n1 | sed -E 's/.*"([^"]+)"/\1/')"
+    if [[ -n "$morphing_policy" ]]; then
+        if [[ "$morphing_policy" == "off" ]]; then
+            warn "Runtime snapshot shows OMEGA_MORPHING=off; latency is prioritized over traffic morphing."
+        else
+            pass "Runtime snapshot reports morphing policy ${morphing_policy}."
+        fi
+    else
+        warn "Runtime snapshot does not expose morphing_policy yet."
+    fi
+
+    avg_loss_ratio="$(grep -oE '"avg_loss_ratio": [0-9.]+' "$RUNTIME_SNAPSHOT" | head -n1 | awk '{print $2}')"
+    if [[ -n "$avg_loss_ratio" ]]; then
+        if awk "BEGIN { exit !($avg_loss_ratio < 0.02) }"; then
+            pass "Average active-session loss ratio is low (${avg_loss_ratio})."
+        elif awk "BEGIN { exit !($avg_loss_ratio < 0.05) }"; then
+            warn "Average active-session loss ratio is elevated (${avg_loss_ratio}); jitter or retransmits may be visible."
+        else
+            fail "Average active-session loss ratio is high (${avg_loss_ratio}); expect severe latency spikes."
+        fi
+    else
+        warn "Runtime snapshot does not expose avg_loss_ratio."
+    fi
 else
     warn "Runtime snapshot file is missing; diagnostics JSON is not being written yet."
 fi

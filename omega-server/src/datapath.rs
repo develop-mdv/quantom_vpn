@@ -136,6 +136,7 @@ pub async fn udp_to_tun_loop(
     identity_store: Arc<IdentityStore>,
     server_mtu: u16,
     allow_legacy_v1: bool,
+    morphing_policy: crate::runtime::MorphingPolicy,
 ) {
     let mut buf = vec![0u8; UDP_BUF_SIZE];
     loop {
@@ -160,6 +161,7 @@ pub async fn udp_to_tun_loop(
                 &udp,
                 server_mtu,
                 allow_legacy_v1,
+                morphing_policy,
             )
             .await;
             continue;
@@ -344,6 +346,7 @@ async fn handle_handshake(
     udp: &UdpSocket,
     server_mtu: u16,
     allow_legacy_v1: bool,
+    morphing_policy: crate::runtime::MorphingPolicy,
 ) {
     match handshake::process_client_handshake(
         buf,
@@ -352,6 +355,7 @@ async fn handle_handshake(
         identity_store,
         server_mtu,
         allow_legacy_v1,
+        morphing_policy,
     ) {
         Ok(HandshakeOutcome::Accepted { response, flow_id }) => {
             if let Err(e) = udp.send_to(&response, src_addr).await {

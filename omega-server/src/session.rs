@@ -25,7 +25,6 @@ const POOL_END: u32 = 65_534; // 10.7.255.254
 const POOL_SIZE: u32 = POOL_END - POOL_START + 1;
 const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
 const PADDING_BUDGET_MIN: usize = 0;
-const PADDING_BUDGET_MAX: usize = 256;
 const PADDING_RECOVERY_STEP: usize = 24;
 const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
 const REDUNDANCY_EXTRA_MAX: u8 = 2;
@@ -40,6 +39,7 @@ pub struct SessionState {
     pub rtp_seq: u16,
     pub rtp_timestamp: u32,
     pub ssrc: u32,
+    pub morphing_policy: crate::runtime::MorphingPolicy,
     pub client_addr: SocketAddr,
     pub tunnel_ip: Ipv4Addr,
     pub user_id: String,
@@ -77,6 +77,7 @@ impl SessionState {
         device_id: String,
         chaos_seed: u64,
         fec_enabled: bool,
+        morphing_policy: crate::runtime::MorphingPolicy,
         ssrc: u32,
     ) -> Self {
         #[cfg(feature = "fec")]
@@ -91,6 +92,7 @@ impl SessionState {
             rtp_seq: 0,
             rtp_timestamp: 0,
             ssrc,
+            morphing_policy,
             client_addr,
             tunnel_ip,
             user_id,
@@ -98,7 +100,7 @@ impl SessionState {
             created_at: Instant::now(),
             last_seen: Instant::now(),
             fec_enabled,
-            padding_budget: PADDING_BUDGET_MAX,
+            padding_budget: morphing_policy.padding_budget_cap(),
             last_padding_adjust: Instant::now(),
             redundancy_extra: 0,
             last_redundancy_adjust: Instant::now(),
@@ -168,17 +170,20 @@ impl SessionState {
     }
 
     pub fn current_padding_budget(&mut self) -> usize {
+        let padding_cap = self.morphing_policy.padding_budget_cap();
+        if padding_cap == 0 {
+            self.padding_budget = 0;
+            return 0;
+        }
+
         let elapsed = self.last_padding_adjust.elapsed().as_secs();
         let ticks = elapsed / PADDING_RECOVERY_INTERVAL_SECS;
         if ticks > 0 {
             let growth = (ticks as usize).saturating_mul(PADDING_RECOVERY_STEP);
-            self.padding_budget = self
-                .padding_budget
-                .saturating_add(growth)
-                .min(PADDING_BUDGET_MAX);
+            self.padding_budget = self.padding_budget.saturating_add(growth).min(padding_cap);
             self.last_padding_adjust = Instant::now();
         }
-        self.padding_budget
+        self.padding_budget.min(padding_cap)
     }
 
     pub fn on_remote_nack(&mut self, nack: &NackMessage) {

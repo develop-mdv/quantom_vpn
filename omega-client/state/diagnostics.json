@@ -1,0 +1,38 @@
+{
+  "status": "connected",
+  "started_at_ms": 1774453861335,
+  "updated_at_ms": 1774453966346,
+  "server_endpoint": "72.56.88.224:443",
+  "device_name": "laptop",
+  "platform": "windows",
+  "profile": "gaming",
+  "tunnel_mode": "full",
+  "dns_policy": "tunnel",
+  "ipv6_policy": "disabled",
+  "requested_mtu": 1380,
+  "negotiated_mtu": 1380,
+  "keepalive_secs": 25,
+  "dns_servers": [
+    "1.1.1.1",
+    "8.8.8.8"
+  ],
+  "split_routes": [],
+  "handshake_attempts": 5,
+  "handshake_timeout_ms": 1500,
+  "handshake_backoff_ms": 500,
+  "handshake_rtt_ms": 136,
+  "interface_name": "tun0",
+  "tunnel_ip": "10.7.0.2",
+  "udp_dns_check": {
+    "passed": {
+      "target": "1.1.1.1:53",
+      "responder": "1.1.1.1:53",
+      "checked_at_ms": 1774453879704
+    }
+  },
+  "last_server_packet_ms": 1774453966002,
+  "last_tun_packet_ms": 1774453966316,
+  "nacks_sent": 1710,
+  "nacks_received": 1182,
+  "retransmits_sent": 7
+}

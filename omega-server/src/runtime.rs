@@ -47,9 +47,45 @@ pub enum Ipv6Mode {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MorphingPolicy {
+    Full,
+    Balanced,
+    Off,
+}
+
+impl MorphingPolicy {
+    pub fn from_env(profile: ServerProfile) -> Self {
+        let default = match profile {
+            ServerProfile::RestrictedFallback => Self::Full,
+            ServerProfile::Gaming | ServerProfile::GeneralInternet => Self::Balanced,
+        };
+
+        match std::env::var("OMEGA_MORPHING") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "full" | "aggressive" => Self::Full,
+                "balanced" | "auto" | "reduced" => Self::Balanced,
+                "off" | "disabled" | "low_latency" | "low-latency" => Self::Off,
+                _ => default,
+            },
+            Err(_) => default,
+        }
+    }
+
+    pub fn padding_budget_cap(self) -> usize {
+        match self {
+            Self::Full => 256,
+            Self::Balanced => 96,
+            Self::Off => 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ServerRuntimeConfig {
     pub profile: ServerProfile,
+    pub morphing_policy: MorphingPolicy,
     pub bind_addr: String,
     pub metrics_bind: String,
     pub admin_web_bind: String,

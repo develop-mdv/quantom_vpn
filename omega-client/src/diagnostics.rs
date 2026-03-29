@@ -31,6 +31,7 @@ pub struct ClientDiagnosticsSnapshot {
     pub device_name: String,
     pub platform: String,
     pub profile: crate::config::ConnectionProfile,
+    pub morphing_policy: crate::config::MorphingPolicy,
     pub tunnel_mode: crate::config::TunnelMode,
     pub dns_policy: crate::config::DnsPolicy,
     pub ipv6_policy: crate::config::Ipv6Policy,
@@ -46,6 +47,13 @@ pub struct ClientDiagnosticsSnapshot {
     pub interface_name: Option<String>,
     pub tunnel_ip: Option<String>,
     pub udp_dns_check: UdpCheckStatus,
+    pub estimated_rx_loss_ratio: f64,
+    pub estimated_rx_loss_percent: f64,
+    pub arq_rtt_ms: u64,
+    pub active_padding_budget: usize,
+    pub active_redundancy_extra: u8,
+    pub path_quality: String,
+    pub suspected_issue: Option<String>,
     pub last_server_packet_ms: Option<u64>,
     pub last_tun_packet_ms: Option<u64>,
     pub nacks_sent: u64,
@@ -78,6 +86,7 @@ impl ClientDiagnostics {
                 device_name: device_name.to_string(),
                 platform: platform.to_string(),
                 profile: config.profile,
+                morphing_policy: config.morphing_policy,
                 tunnel_mode: config.tunnel_mode,
                 dns_policy: config.dns_policy,
                 ipv6_policy: config.ipv6_policy,
@@ -97,6 +106,13 @@ impl ClientDiagnostics {
                 interface_name: None,
                 tunnel_ip: None,
                 udp_dns_check: UdpCheckStatus::Pending,
+                estimated_rx_loss_ratio: 0.0,
+                estimated_rx_loss_percent: 0.0,
+                arq_rtt_ms: 350,
+                active_padding_budget: config.morphing_policy.padding_budget_cap(),
+                active_redundancy_extra: 0,
+                path_quality: "starting".to_string(),
+                suspected_issue: None,
                 last_server_packet_ms: None,
                 last_tun_packet_ms: None,
                 nacks_sent: 0,
@@ -151,6 +167,9 @@ impl ClientDiagnostics {
             snapshot.tunnel_ip = Some(tunnel_ip.to_string());
             snapshot.negotiated_mtu = Some(negotiated_mtu);
             snapshot.handshake_rtt_ms = Some(rtt_ms);
+            let (quality, suspected_issue) = summarize_path(snapshot);
+            snapshot.path_quality = quality;
+            snapshot.suspected_issue = suspected_issue;
         });
     }
 
@@ -200,6 +219,9 @@ impl ClientDiagnostics {
                 responder: responder.to_string(),
                 checked_at_ms: now_ms(),
             };
+            let (quality, suspected_issue) = summarize_path(snapshot);
+            snapshot.path_quality = quality;
+            snapshot.suspected_issue = suspected_issue;
         });
     }
 
@@ -209,6 +231,30 @@ impl ClientDiagnostics {
                 reason: reason.into(),
                 checked_at_ms: now_ms(),
             };
+            let (quality, suspected_issue) = summarize_path(snapshot);
+            snapshot.path_quality = quality;
+            snapshot.suspected_issue = suspected_issue;
+        });
+    }
+
+    pub fn update_path_metrics(
+        &self,
+        loss_ratio: f64,
+        arq_rtt_ms: u64,
+        padding_budget: usize,
+        redundancy_extra: usize,
+    ) {
+        self.with_snapshot(|snapshot| {
+            let loss_ratio = loss_ratio.clamp(0.0, 1.0);
+            snapshot.estimated_rx_loss_ratio = loss_ratio;
+            snapshot.estimated_rx_loss_percent = loss_ratio * 100.0;
+            snapshot.arq_rtt_ms = arq_rtt_ms;
+            snapshot.active_padding_budget = padding_budget;
+            snapshot.active_redundancy_extra = redundancy_extra.min(u8::MAX as usize) as u8;
+
+            let (quality, suspected_issue) = summarize_path(snapshot);
+            snapshot.path_quality = quality;
+            snapshot.suspected_issue = suspected_issue;
         });
     }
 
@@ -220,6 +266,59 @@ impl ClientDiagnostics {
         f(&mut guard);
         guard.updated_at_ms = now_ms();
     }
+}
+
+fn summarize_path(snapshot: &ClientDiagnosticsSnapshot) -> (String, Option<String>) {
+    let loss_percent = snapshot.estimated_rx_loss_percent;
+    let handshake_rtt_ms = snapshot.handshake_rtt_ms.unwrap_or(snapshot.arq_rtt_ms);
+    let udp_diag_failed = matches!(snapshot.udp_dns_check, UdpCheckStatus::Failed { .. });
+
+    if udp_diag_failed {
+        return (
+            "critical".to_string(),
+            Some(
+                "generic UDP inside the tunnel is failing; check server NAT, outbound UDP rules, or upstream filtering"
+                    .to_string(),
+            ),
+        );
+    }
+
+    if loss_percent >= 15.0 {
+        return (
+            "critical".to_string(),
+            Some(
+                "VPN server is reachable, but the active UDP path is very lossy or rate-limited after the handshake"
+                    .to_string(),
+            ),
+        );
+    }
+
+    if loss_percent >= 5.0 {
+        return (
+            "poor".to_string(),
+            Some(
+                "latency spikes are likely caused by packet loss/retransmits rather than pure server distance"
+                    .to_string(),
+            ),
+        );
+    }
+
+    if handshake_rtt_ms >= 350 {
+        return (
+            "fair".to_string(),
+            Some(
+                "base RTT to the VPN server is already high; server location or route length is the likely bottleneck"
+                    .to_string(),
+            ),
+        );
+    }
+
+    if handshake_rtt_ms >= 220 || snapshot.arq_rtt_ms >= 300 || snapshot.active_redundancy_extra > 0
+    {
+        return ("fair".to_string(), None);
+    }
+
+    ("good".to_string(), None)
 }
 
 fn now_ms() -> u64 {

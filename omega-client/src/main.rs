@@ -9,7 +9,7 @@ use anyhow::Context;
 use bytes::BytesMut;
 use kem::Decapsulate;
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
-use omega_core::arq::{GapDetector, RetransmitQueue};
+use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
 use omega_core::chaos::ChaosPrng;
 use omega_core::crypto::{derive_flow_id, SessionKeys};
 use omega_core::protocol::*;
@@ -17,7 +17,7 @@ use omega_core::replay::ReplayFilter;
 use tokio::net::UdpSocket;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{ClientConfig, TunnelMode};
+use crate::config::{ClientConfig, MorphingPolicy, TunnelMode};
 use crate::diagnostics::ClientDiagnostics;
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
@@ -26,7 +26,6 @@ const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
 const MAX_RETRANSMIT_BURST: usize = 24;
 const RETRANSMIT_PACING_US: u64 = 500;
 const PADDING_BUDGET_MIN: usize = 0;
-const PADDING_BUDGET_MAX: usize = 256;
 const PADDING_RECOVERY_STEP: usize = 24;
 const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
 const REDUNDANCY_EXTRA_MAX: u8 = 2;
@@ -36,46 +35,57 @@ const REDUNDANCY_PACING_US: u64 = 200;
 struct ClientState {
     retransmit_queue: RetransmitQueue,
     gap_detector: GapDetector,
+    loss_estimator: LossEstimator,
     send_seq: u32,
     rtp_seq: u16,
     rtp_timestamp: u32,
     ssrc: u32,
     chaos: ChaosPrng,
+    morphing_policy: MorphingPolicy,
     padding_budget: usize,
     last_padding_adjust: Instant,
     redundancy_extra: u8,
     last_redundancy_adjust: Instant,
+    loss_est_seq: u32,
+    loss_est_init: bool,
 }
 
 impl ClientState {
-    fn new(ssrc: u32, chaos_seed: u64) -> Self {
+    fn new(ssrc: u32, chaos_seed: u64, morphing_policy: MorphingPolicy) -> Self {
         Self {
             retransmit_queue: RetransmitQueue::with_initial_rtt(DEFAULT_INITIAL_ARQ_RTT_MS),
             gap_detector: GapDetector::new(),
+            loss_estimator: LossEstimator::new(),
             send_seq: 0,
             rtp_seq: 0,
             rtp_timestamp: 0,
             ssrc,
             chaos: ChaosPrng::new(chaos_seed),
-            padding_budget: PADDING_BUDGET_MAX,
+            morphing_policy,
+            padding_budget: morphing_policy.padding_budget_cap(),
             last_padding_adjust: Instant::now(),
             redundancy_extra: 0,
             last_redundancy_adjust: Instant::now(),
+            loss_est_seq: 0,
+            loss_est_init: false,
         }
     }
 
     fn current_padding_budget(&mut self) -> usize {
+        let padding_cap = self.morphing_policy.padding_budget_cap();
+        if padding_cap == 0 {
+            self.padding_budget = 0;
+            return 0;
+        }
+
         let elapsed = self.last_padding_adjust.elapsed().as_secs();
         let ticks = elapsed / PADDING_RECOVERY_INTERVAL_SECS;
         if ticks > 0 {
             let growth = (ticks as usize).saturating_mul(PADDING_RECOVERY_STEP);
-            self.padding_budget = self
-                .padding_budget
-                .saturating_add(growth)
-                .min(PADDING_BUDGET_MAX);
+            self.padding_budget = self.padding_budget.saturating_add(growth).min(padding_cap);
             self.last_padding_adjust = Instant::now();
         }
-        self.padding_budget
+        self.padding_budget.min(padding_cap)
     }
 
     fn on_remote_nack(&mut self, nack: &NackMessage) {
@@ -107,6 +117,35 @@ impl ClientState {
             self.last_redundancy_adjust = Instant::now();
         }
         self.redundancy_extra as usize
+    }
+
+    fn update_loss_stats(&mut self, received_seq: u32) {
+        if !self.loss_est_init {
+            self.loss_est_seq = received_seq;
+            self.loss_est_init = true;
+            self.loss_estimator.record(true);
+            return;
+        }
+
+        let diff = received_seq.wrapping_sub(self.loss_est_seq);
+        if diff == 0 {
+            return;
+        }
+
+        if diff < 0x8000_0000 {
+            let lost_count = diff - 1;
+            let to_record_lost = lost_count.min(256);
+
+            for _ in 0..to_record_lost {
+                self.loss_estimator.record(false);
+            }
+            self.loss_estimator.record(true);
+            self.loss_est_seq = received_seq;
+        }
+    }
+
+    fn loss_ratio(&self) -> f64 {
+        self.loss_estimator.loss_ratio()
     }
 }
 
@@ -862,6 +901,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(%tun_ip, server_mtu = server_hello.server_mtu, "handshake complete");
     }
     diagnostics.set_handshake(tun_ip, server_hello.server_mtu, handshake.rtt_ms);
+    diagnostics.update_path_metrics(
+        0.0,
+        DEFAULT_INITIAL_ARQ_RTT_MS,
+        client_config.morphing_policy.padding_budget_cap(),
+        0,
+    );
 
     #[cfg(target_os = "windows")]
     let windows_state = if let std::net::SocketAddr::V4(v4) = server_addr {
@@ -877,7 +922,11 @@ async fn main() -> anyhow::Result<()> {
         run_udp_dns_diagnostic(diag_dns_servers, diag_enabled, diag_handle).await;
     });
 
-    let state = Arc::new(Mutex::new(ClientState::new(ssrc, chaos_seed)));
+    let state = Arc::new(Mutex::new(ClientState::new(
+        ssrc,
+        chaos_seed,
+        client_config.morphing_policy,
+    )));
     let ss_owned = ss_bytes.to_vec();
 
     let tun_r = tun.clone();
@@ -1108,10 +1157,30 @@ async fn main() -> anyhow::Result<()> {
 
                             match omega.packet_type {
                                 PacketType::Data => {
-                                    let nack_opt = {
+                                    let (
+                                        nack_opt,
+                                        loss_ratio,
+                                        arq_rtt_ms,
+                                        padding_budget,
+                                        redundancy_extra,
+                                    ) = {
                                         let mut s = state_recv.lock().unwrap();
-                                        s.gap_detector.record_received(omega.seq)
+                                        let nack_opt = s.gap_detector.record_received(omega.seq);
+                                        s.update_loss_stats(omega.seq);
+                                        (
+                                            nack_opt,
+                                            s.loss_ratio(),
+                                            s.retransmit_queue.rtt_ms(),
+                                            s.padding_budget,
+                                            s.redundancy_extra as usize,
+                                        )
                                     };
+                                    diagnostics_recv.update_path_metrics(
+                                        loss_ratio,
+                                        arq_rtt_ms,
+                                        padding_budget,
+                                        redundancy_extra,
+                                    );
                                     if let Some(nack) = nack_opt {
                                         let _ = nack_tx.send(nack).await;
                                     }
@@ -1131,17 +1200,37 @@ async fn main() -> anyhow::Result<()> {
                                 PacketType::Nack => {
                                     if let Some(nack) = NackMessage::read_from(plaintext) {
                                         diagnostics_recv.record_nack_received();
-                                        let packets = {
+                                        let (
+                                            packets,
+                                            loss_ratio,
+                                            arq_rtt_ms,
+                                            padding_budget,
+                                            redundancy_extra,
+                                        ) = {
                                             let mut s = state_recv.lock().unwrap();
                                             s.on_remote_nack(&nack);
                                             s.retransmit_queue.observe_nack(&nack, current_ms());
-                                            s.retransmit_queue
+                                            let packets = s
+                                                .retransmit_queue
                                                 .process_nack(&nack)
                                                 .into_iter()
                                                 .take(MAX_RETRANSMIT_BURST)
                                                 .map(|p| p.data.clone())
-                                                .collect::<Vec<_>>()
+                                                .collect::<Vec<_>>();
+                                            (
+                                                packets,
+                                                s.loss_ratio(),
+                                                s.retransmit_queue.rtt_ms(),
+                                                s.padding_budget,
+                                                s.redundancy_extra as usize,
+                                            )
                                         };
+                                        diagnostics_recv.update_path_metrics(
+                                            loss_ratio,
+                                            arq_rtt_ms,
+                                            padding_budget,
+                                            redundancy_extra,
+                                        );
 
                                         let packets_len = packets.len();
                                         diagnostics_recv.record_retransmits(packets_len);

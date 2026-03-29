@@ -54,6 +54,43 @@ impl ConnectionProfile {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MorphingPolicy {
+    Full,
+    Balanced,
+    Off,
+}
+
+impl MorphingPolicy {
+    fn default_for_profile(profile: ConnectionProfile) -> Self {
+        match profile {
+            ConnectionProfile::RestrictedFallback => Self::Full,
+            ConnectionProfile::Gaming | ConnectionProfile::GeneralInternet => Self::Balanced,
+        }
+    }
+
+    fn from_env(default: Self) -> Self {
+        match std::env::var("OMEGA_MORPHING") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "full" | "aggressive" => Self::Full,
+                "balanced" | "auto" | "reduced" => Self::Balanced,
+                "off" | "disabled" | "low_latency" | "low-latency" => Self::Off,
+                _ => default,
+            },
+            Err(_) => default,
+        }
+    }
+
+    pub fn padding_budget_cap(self) -> usize {
+        match self {
+            Self::Full => 256,
+            Self::Balanced => 96,
+            Self::Off => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TunnelMode {
     Full,
     Split,
@@ -169,6 +206,7 @@ impl Ipv4Route {
 #[derive(Debug, Clone, Serialize)]
 pub struct ClientConfig {
     pub profile: ConnectionProfile,
+    pub morphing_policy: MorphingPolicy,
     pub tunnel_mode: TunnelMode,
     pub dns_policy: DnsPolicy,
     pub ipv6_policy: Ipv6Policy,
@@ -186,6 +224,8 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn from_env() -> Self {
         let profile = ConnectionProfile::from_env();
+        let morphing_policy =
+            MorphingPolicy::from_env(MorphingPolicy::default_for_profile(profile));
 
         let mut tunnel_mode = TunnelMode::from_env();
         let split_routes = std::env::var("OMEGA_SPLIT_ROUTES")
@@ -240,6 +280,7 @@ impl ClientConfig {
 
         Self {
             profile,
+            morphing_policy,
             tunnel_mode,
             dns_policy: DnsPolicy::from_env(dns_policy_default),
             ipv6_policy: Ipv6Policy::from_env(ipv6_policy_default),
