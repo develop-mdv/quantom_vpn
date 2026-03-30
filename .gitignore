@@ -13,3 +13,4 @@
 *.exe
 *.zip
 wintun_temp/
+omega-client/state/diagnostics.json

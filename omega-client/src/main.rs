@@ -198,6 +198,7 @@ struct WindowsNetworkState {
     interface_alias: String,
     reset_dns: bool,
     managed_routes: Vec<WindowsManagedRoute>,
+    route_conflict: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -367,6 +368,11 @@ fn configure_windows_routing(
         interface_alias: if_alias,
         reset_dns,
         managed_routes,
+        route_conflict: if matches!(config.tunnel_mode, TunnelMode::Full) {
+            verify_windows_full_tunnel_routes(&tunnel_ip_s).err()
+        } else {
+            None
+        },
     })
 }
 
@@ -455,6 +461,134 @@ fn delete_windows_route(route: &WindowsManagedRoute) {
     let _ = std::process::Command::new("route")
         .args(["delete", &route.destination, "mask", &route.mask])
         .status();
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_full_tunnel_routes(tunnel_ip: &str) -> Result<(), String> {
+    let output = std::process::Command::new("route")
+        .args(["print", "-4"])
+        .output()
+        .map_err(|err| format!("failed to inspect Windows routes: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let summary = summarize_windows_full_tunnel_routes(&stdout, tunnel_ip);
+
+    if summary.lower_half_ok && summary.upper_half_ok {
+        return Ok(());
+    }
+
+    let mut details = Vec::new();
+    if !summary.conflicting_routes.is_empty() {
+        details.push(format!(
+            "observed competing routes: {}",
+            summary.conflicting_routes.join(" | ")
+        ));
+    }
+
+    let conflicting_processes = detect_conflicting_tunnel_processes();
+    if !conflicting_processes.is_empty() {
+        details.push(format!(
+            "running tunnel processes: {}",
+            conflicting_processes.join(", ")
+        ));
+    }
+
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join("; "))
+    };
+
+    Err(format!(
+        "Windows full-tunnel routes are not owned by Omega interface {}{}",
+        tunnel_ip, suffix
+    ))
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsFullTunnelRouteSummary {
+    lower_half_ok: bool,
+    upper_half_ok: bool,
+    conflicting_routes: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+fn summarize_windows_full_tunnel_routes(
+    route_print: &str,
+    tunnel_ip: &str,
+) -> WindowsFullTunnelRouteSummary {
+    let mut lower_half_ok = false;
+    let mut upper_half_ok = false;
+    let mut conflicting_routes = Vec::new();
+
+    for line in route_print.lines() {
+        let cols = line.split_whitespace().collect::<Vec<_>>();
+        if cols.len() < 5 {
+            continue;
+        }
+
+        let is_lower_half = cols[0] == "0.0.0.0" && cols[1] == "128.0.0.0";
+        let is_upper_half = cols[0] == "128.0.0.0" && cols[1] == "128.0.0.0";
+        if !is_lower_half && !is_upper_half {
+            continue;
+        }
+
+        let interface = cols[3];
+        if interface == tunnel_ip {
+            if is_lower_half {
+                lower_half_ok = true;
+            } else {
+                upper_half_ok = true;
+            }
+        } else {
+            conflicting_routes.push(line.trim().to_string());
+        }
+    }
+
+    WindowsFullTunnelRouteSummary {
+        lower_half_ok,
+        upper_half_ok,
+        conflicting_routes,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn detect_conflicting_tunnel_processes() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/FO", "CSV", "/NH"])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let needles = [
+        "tun2socks.exe",
+        "xray.exe",
+        "v2ray.exe",
+        "sing-box.exe",
+        "clash.exe",
+        "clash-verge.exe",
+        "mihomo.exe",
+        "nekoray.exe",
+        "hysteria.exe",
+        "amneziavpn.exe",
+    ];
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let name = line
+                .trim()
+                .trim_matches('"')
+                .split("\",\"")
+                .next()
+                .map(str::to_ascii_lowercase)?;
+            if needles.iter().any(|needle| name == *needle) {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -898,6 +1032,13 @@ async fn main() -> anyhow::Result<()> {
         tun_rs::DeviceBuilder::new()
             .ipv4(tun_ip_s.clone(), DEFAULT_TUN_PREFIX, None)
             .mtu(server_hello.server_mtu)
+            .with(|builder| {
+                #[cfg(target_os = "windows")]
+                {
+                    let ring_capacity = client_config.udp_rcvbuf.clamp(0x2_0000, 0x400_0000) as u32;
+                    builder.ring_capacity(ring_capacity);
+                }
+            })
             .build_async()?,
     );
     if let Ok(interface_name) = tun.name() {
@@ -916,7 +1057,28 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(target_os = "windows")]
     let windows_state = if let std::net::SocketAddr::V4(v4) = server_addr {
-        configure_windows_routing(*v4.ip(), tun_ip, server_hello.server_mtu, &client_config)
+        let state =
+            configure_windows_routing(*v4.ip(), tun_ip, server_hello.server_mtu, &client_config);
+        if matches!(client_config.tunnel_mode, TunnelMode::Full) {
+            match state.as_ref() {
+                Some(state) if state.route_conflict.is_none() => {}
+                Some(state) => {
+                    let err = state.route_conflict.clone().unwrap_or_else(|| {
+                        "Windows full-tunnel routing verification failed".to_string()
+                    });
+                    diagnostics.set_status("routing_failed");
+                    cleanup_windows_routing(*v4.ip(), Some(state));
+                    return Err(anyhow::anyhow!(err));
+                }
+                None => {
+                    diagnostics.set_status("routing_failed");
+                    return Err(anyhow::anyhow!(
+                        "failed to configure Windows full-tunnel routes; stop other VPN/tun2socks adapters and retry"
+                    ));
+                }
+            }
+        }
+        state
     } else {
         None
     };
@@ -1326,5 +1488,37 @@ mod tests {
         }
         assert!(emitted_nack, "gap should eventually trigger a nack");
         assert!(state.loss_ratio() > 0.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn full_tunnel_route_summary_accepts_omega_owned_routes() {
+        let summary = summarize_windows_full_tunnel_routes(
+            "\
+Network Destination        Netmask          Gateway       Interface  Metric\n\
+          0.0.0.0        128.0.0.0         On-link         10.7.0.2      6\n\
+        128.0.0.0        128.0.0.0         On-link         10.7.0.2      6\n",
+            "10.7.0.2",
+        );
+
+        assert!(summary.lower_half_ok);
+        assert!(summary.upper_half_ok);
+        assert!(summary.conflicting_routes.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn full_tunnel_route_summary_detects_competing_tunnel() {
+        let summary = summarize_windows_full_tunnel_routes(
+            "\
+Network Destination        Netmask          Gateway       Interface  Metric\n\
+          0.0.0.0        128.0.0.0         On-link        10.33.0.2      6\n\
+        128.0.0.0        128.0.0.0         On-link        10.33.0.2      6\n",
+            "10.7.0.2",
+        );
+
+        assert!(!summary.lower_half_ok);
+        assert!(!summary.upper_half_ok);
+        assert_eq!(summary.conflicting_routes.len(), 2);
     }
 }

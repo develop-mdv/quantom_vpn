@@ -51,7 +51,22 @@ if "%OMEGA_DEVICE_TOKEN%"=="" (
 if "%OMEGA_DEVICE_NAME%"=="" set "OMEGA_DEVICE_NAME=%COMPUTERNAME%"
 if "%OMEGA_PLATFORM%"=="" set "OMEGA_PLATFORM=windows"
 
-REM 4) Ensure wintun.dll exists
+REM 4) Refuse to start while another full-tunnel client owns routes
+set "OMEGA_CONFLICTING_TUNNELS="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$names=@('xray','tun2socks','v2ray','sing-box','clash','mihomo','nekoray','hysteria'); Get-Process -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.ProcessName.ToLower() } | Select-Object -ExpandProperty ProcessName -Unique"`) do (
+    if defined OMEGA_CONFLICTING_TUNNELS (
+        set "OMEGA_CONFLICTING_TUNNELS=!OMEGA_CONFLICTING_TUNNELS!, %%P"
+    ) else (
+        set "OMEGA_CONFLICTING_TUNNELS=%%P"
+    )
+)
+if defined OMEGA_CONFLICTING_TUNNELS (
+    echo [ERROR] Another tunnel client is still running: !OMEGA_CONFLICTING_TUNNELS!
+    echo [ERROR] Stop Amnezia/Xray/tun2socks/other VPN clients before starting Omega.
+    exit /b 1
+)
+
+REM 5) Ensure wintun.dll exists
 if not exist "wintun.dll" (
     echo [WARN] wintun.dll not found, downloading...
     powershell -Command "Invoke-WebRequest -Uri https://www.wintun.net/builds/wintun-0.14.1.zip -OutFile wintun.zip"
@@ -63,7 +78,7 @@ if not exist "wintun.dll" (
     del /q wintun.zip >nul 2>&1
 )
 
-REM 5) Start client
+REM 6) Start client
 echo [INFO] Starting Omega VPN client
 echo [INFO] Server: %OMEGA_SERVER%
 echo [INFO] Device ID: %OMEGA_DEVICE_ID%
