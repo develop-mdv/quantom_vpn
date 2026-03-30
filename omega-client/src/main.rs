@@ -147,6 +147,12 @@ impl ClientState {
     fn loss_ratio(&self) -> f64 {
         self.loss_estimator.loss_ratio()
     }
+
+    fn observe_inbound_seq(&mut self, seq: u32) -> Option<NackMessage> {
+        let nack = self.gap_detector.record_received(seq);
+        self.update_loss_stats(seq);
+        nack
+    }
 }
 
 fn current_ms() -> u64 {
@@ -841,8 +847,8 @@ async fn main() -> anyhow::Result<()> {
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_nonblocking(true)?;
-    let _ = socket.set_recv_buffer_size(1024 * 1024);
-    let _ = socket.set_send_buffer_size(1024 * 1024);
+    let _ = socket.set_recv_buffer_size(client_config.udp_rcvbuf);
+    let _ = socket.set_send_buffer_size(client_config.udp_sndbuf);
 
     let addr: SocketAddr = "0.0.0.0:0".parse()?;
     socket.bind(&addr.into())?;
@@ -979,13 +985,18 @@ async fn main() -> anyhow::Result<()> {
                     let mut payload = Vec::new();
                     if keys_send.encrypt_in_place(&mut payload, &aad).is_ok() {
                         out.extend_from_slice(&payload);
+                        let now = current_ms();
+                        {
+                            let mut s = state_send.lock().unwrap();
+                            s.retransmit_queue.cache_packet(seq, out.to_vec(), now);
+                            s.retransmit_queue.purge_expired(now);
+                        }
                         let _ = udp_r.send_to(&out, server_addr).await;
                     }
                 }
                 Some(nack) = nack_rx.recv() => {
                     let (nack_seq, rtp_s, rtp_ts, ssrc) = {
                         let mut s = state_send.lock().unwrap();
-                        s.on_remote_nack(&nack);
                         let seq = s.send_seq;
                         s.send_seq = s.send_seq.wrapping_add(1);
                         s.rtp_seq = s.rtp_seq.wrapping_add(1);
@@ -1010,6 +1021,12 @@ async fn main() -> anyhow::Result<()> {
                     if keys_send.encrypt_in_place(&mut payload, &aad).is_ok() {
                         out.truncate(TOTAL_HEADER_LEN);
                         out.extend_from_slice(&payload);
+                        let now = current_ms();
+                        {
+                            let mut s = state_send.lock().unwrap();
+                            s.retransmit_queue.cache_packet(nack_seq, out.to_vec(), now);
+                            s.retransmit_queue.purge_expired(now);
+                        }
                         diagnostics_send.record_nack_sent();
                         let _ = udp_r.send_to(&out, server_addr).await;
                     }
@@ -1155,36 +1172,37 @@ async fn main() -> anyhow::Result<()> {
                         Ok(plaintext) => {
                             replay_filter.update(omega.seq as u64);
 
+                            let (
+                                inbound_nack,
+                                loss_ratio,
+                                arq_rtt_ms,
+                                padding_budget,
+                                redundancy_extra,
+                            ) = {
+                                let mut s = state_recv.lock().unwrap();
+                                let inbound_nack = s.observe_inbound_seq(omega.seq);
+                                (
+                                    inbound_nack,
+                                    s.loss_ratio(),
+                                    s.retransmit_queue.rtt_ms(),
+                                    s.padding_budget,
+                                    s.redundancy_extra as usize,
+                                )
+                            };
+                            diagnostics_recv.update_path_metrics(
+                                loss_ratio,
+                                arq_rtt_ms,
+                                padding_budget,
+                                redundancy_extra,
+                            );
+                            if !matches!(omega.packet_type, PacketType::Close) {
+                                if let Some(nack) = inbound_nack {
+                                    let _ = nack_tx.send(nack).await;
+                                }
+                            }
+
                             match omega.packet_type {
                                 PacketType::Data => {
-                                    let (
-                                        nack_opt,
-                                        loss_ratio,
-                                        arq_rtt_ms,
-                                        padding_budget,
-                                        redundancy_extra,
-                                    ) = {
-                                        let mut s = state_recv.lock().unwrap();
-                                        let nack_opt = s.gap_detector.record_received(omega.seq);
-                                        s.update_loss_stats(omega.seq);
-                                        (
-                                            nack_opt,
-                                            s.loss_ratio(),
-                                            s.retransmit_queue.rtt_ms(),
-                                            s.padding_budget,
-                                            s.redundancy_extra as usize,
-                                        )
-                                    };
-                                    diagnostics_recv.update_path_metrics(
-                                        loss_ratio,
-                                        arq_rtt_ms,
-                                        padding_budget,
-                                        redundancy_extra,
-                                    );
-                                    if let Some(nack) = nack_opt {
-                                        let _ = nack_tx.send(nack).await;
-                                    }
-
                                     let final_len =
                                         if let Some(ip_len) = get_ip_packet_len(plaintext) {
                                             plaintext.len().min(ip_len)
@@ -1276,4 +1294,37 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observed_control_seq_does_not_create_false_gap() {
+        let mut state = ClientState::new(0xDEADBEEF, 7, MorphingPolicy::Balanced);
+
+        assert!(state.observe_inbound_seq(100).is_none());
+        assert!(state.observe_inbound_seq(101).is_none()); // keepalive/nack seq
+        assert!(state.observe_inbound_seq(102).is_none());
+        assert_eq!(state.loss_ratio(), 0.0);
+    }
+
+    #[test]
+    fn missing_seq_is_still_reported_after_control_packet() {
+        let mut state = ClientState::new(0xDEADBEEF, 7, MorphingPolicy::Balanced);
+
+        assert!(state.observe_inbound_seq(10).is_none());
+        assert!(state.observe_inbound_seq(11).is_none()); // observed control seq
+        assert!(state.observe_inbound_seq(13).is_none());
+        let mut emitted_nack = false;
+        for seq in 14..30 {
+            if state.observe_inbound_seq(seq).is_some() {
+                emitted_nack = true;
+                break;
+            }
+        }
+        assert!(emitted_nack, "gap should eventually trigger a nack");
+        assert!(state.loss_ratio() > 0.0);
+    }
 }

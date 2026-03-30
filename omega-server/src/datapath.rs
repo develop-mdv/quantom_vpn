@@ -215,50 +215,55 @@ pub async fn udp_to_tun_loop(
                             session.client_addr = src_addr;
                         }
 
+                        let inbound_nack = session.observe_inbound_seq(omega.seq);
+                        if !matches!(omega.packet_type, PacketType::Close) {
+                            if let Some(nack) = inbound_nack {
+                                metrics::record_nack_sent(nack.bitmap.count_ones());
+                                let nack_seq = session.next_send_seq();
+                                let nack_omega = OmegaHeader {
+                                    flow_id: omega.flow_id,
+                                    seq: nack_seq,
+                                    packet_type: PacketType::Nack,
+                                };
+                                let rtp_seq = session.next_rtp_seq();
+                                let rtp_ts = session.rtp_timestamp;
+                                let rtp = RtpHeader::opus(rtp_seq, rtp_ts, session.ssrc);
+
+                                let mut out =
+                                    BytesMut::with_capacity(TOTAL_HEADER_LEN + 12 + AEAD_TAG_LEN);
+                                out.resize(TOTAL_HEADER_LEN + 12, 0);
+                                rtp.write_to(&mut out[..RTP_HEADER_LEN]);
+                                nack_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
+                                nack.write_to(&mut out[TOTAL_HEADER_LEN..]);
+
+                                let nack_aad = out[..TOTAL_HEADER_LEN].to_vec();
+                                let mut nack_payload = out[TOTAL_HEADER_LEN..].to_vec();
+                                if session
+                                    .keys
+                                    .encrypt_in_place(&mut nack_payload, &nack_aad)
+                                    .is_ok()
+                                {
+                                    out.truncate(TOTAL_HEADER_LEN);
+                                    out.extend_from_slice(&nack_payload);
+                                    let addr = session.client_addr;
+                                    let data = out.to_vec();
+                                    let now_ms = now_ms();
+                                    session.retransmit_queue.cache_packet(
+                                        nack_seq,
+                                        data.clone(),
+                                        now_ms,
+                                    );
+                                    session.retransmit_queue.purge_expired(now_ms);
+                                    let udp_clone = udp.clone();
+                                    tokio::spawn(async move {
+                                        let _ = udp_clone.send_to(&data, addr).await;
+                                    });
+                                }
+                            }
+                        }
+
                         match omega.packet_type {
                             PacketType::Data => {
-                                if let Some(nack) = session.gap_detector.record_received(omega.seq)
-                                {
-                                    session.on_remote_nack(&nack);
-                                    metrics::record_nack_sent(nack.bitmap.count_ones());
-                                    let nack_seq = session.next_send_seq();
-                                    let nack_omega = OmegaHeader {
-                                        flow_id: omega.flow_id,
-                                        seq: nack_seq,
-                                        packet_type: PacketType::Nack,
-                                    };
-                                    let rtp_seq = session.next_rtp_seq();
-                                    let rtp_ts = session.rtp_timestamp;
-                                    let rtp = RtpHeader::opus(rtp_seq, rtp_ts, session.ssrc);
-
-                                    let mut out = BytesMut::with_capacity(
-                                        TOTAL_HEADER_LEN + 12 + AEAD_TAG_LEN,
-                                    );
-                                    out.resize(TOTAL_HEADER_LEN + 12, 0);
-                                    rtp.write_to(&mut out[..RTP_HEADER_LEN]);
-                                    nack_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
-                                    nack.write_to(&mut out[TOTAL_HEADER_LEN..]);
-
-                                    let nack_aad = out[..TOTAL_HEADER_LEN].to_vec();
-                                    let mut nack_payload = out[TOTAL_HEADER_LEN..].to_vec();
-                                    if session
-                                        .keys
-                                        .encrypt_in_place(&mut nack_payload, &nack_aad)
-                                        .is_ok()
-                                    {
-                                        out.truncate(TOTAL_HEADER_LEN);
-                                        out.extend_from_slice(&nack_payload);
-                                        let addr = session.client_addr;
-                                        let data = out.to_vec();
-                                        let udp_clone = udp.clone();
-                                        tokio::spawn(async move {
-                                            let _ = udp_clone.send_to(&data, addr).await;
-                                        });
-                                    }
-                                }
-
-                                session.update_loss_stats(omega.seq);
-
                                 let final_len = if let Some(ip_len) = get_ip_packet_len(plaintext) {
                                     plaintext.len().min(ip_len)
                                 } else {
@@ -397,4 +402,11 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
         }
         _ => None,
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

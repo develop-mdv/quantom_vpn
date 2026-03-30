@@ -165,6 +165,12 @@ impl SessionState {
         self.loss_estimator.loss_ratio()
     }
 
+    pub fn observe_inbound_seq(&mut self, seq: u32) -> Option<NackMessage> {
+        let nack = self.gap_detector.record_received(seq);
+        self.update_loss_stats(seq);
+        nack
+    }
+
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
     }
@@ -515,5 +521,55 @@ fn hex_to_nibble(ch: u8) -> Option<u8> {
         b'a'..=b'f' => Some(ch - b'a' + 10),
         b'A'..=b'F' => Some(ch - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omega_core::crypto::SessionKeys;
+
+    fn session_state() -> SessionState {
+        let shared_secret = [0x42u8; 32];
+        let keys = SessionKeys::from_shared_secret(&shared_secret, true).unwrap();
+        SessionState::new(
+            keys,
+            "127.0.0.1:5000".parse().unwrap(),
+            Ipv4Addr::new(10, 7, 0, 2),
+            "user".to_string(),
+            "device".to_string(),
+            7,
+            false,
+            crate::runtime::MorphingPolicy::Balanced,
+            0xDEADBEEF,
+        )
+    }
+
+    #[test]
+    fn observed_control_seq_does_not_create_false_gap() {
+        let mut session = session_state();
+
+        assert!(session.observe_inbound_seq(100).is_none());
+        assert!(session.observe_inbound_seq(101).is_none());
+        assert!(session.observe_inbound_seq(102).is_none());
+        assert_eq!(session.loss_ratio(), 0.0);
+    }
+
+    #[test]
+    fn missing_seq_is_still_reported_after_control_packet() {
+        let mut session = session_state();
+
+        assert!(session.observe_inbound_seq(10).is_none());
+        assert!(session.observe_inbound_seq(11).is_none());
+        assert!(session.observe_inbound_seq(13).is_none());
+        let mut emitted_nack = false;
+        for seq in 14..30 {
+            if session.observe_inbound_seq(seq).is_some() {
+                emitted_nack = true;
+                break;
+            }
+        }
+        assert!(emitted_nack, "gap should eventually trigger a nack");
+        assert!(session.loss_ratio() > 0.0);
     }
 }

@@ -38,6 +38,8 @@ pub struct ClientDiagnosticsSnapshot {
     pub requested_mtu: u16,
     pub negotiated_mtu: Option<u16>,
     pub keepalive_secs: u64,
+    pub udp_rcvbuf: usize,
+    pub udp_sndbuf: usize,
     pub dns_servers: Vec<String>,
     pub split_routes: Vec<String>,
     pub handshake_attempts: u32,
@@ -93,6 +95,8 @@ impl ClientDiagnostics {
                 requested_mtu: config.requested_mtu,
                 negotiated_mtu: None,
                 keepalive_secs: config.keepalive_secs,
+                udp_rcvbuf: config.udp_rcvbuf,
+                udp_sndbuf: config.udp_sndbuf,
                 dns_servers: config.dns_servers.clone(),
                 split_routes: config
                     .split_routes

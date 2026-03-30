@@ -1,11 +1,12 @@
 {
-  "status": "connected",
-  "started_at_ms": 1774453861335,
-  "updated_at_ms": 1774453966346,
+  "status": "stopping",
+  "started_at_ms": 1774862239475,
+  "updated_at_ms": 1774862449510,
   "server_endpoint": "72.56.88.224:443",
   "device_name": "laptop",
   "platform": "windows",
   "profile": "gaming",
+  "morphing_policy": "balanced",
   "tunnel_mode": "full",
   "dns_policy": "tunnel",
   "ipv6_policy": "disabled",
@@ -20,19 +21,26 @@
   "handshake_attempts": 5,
   "handshake_timeout_ms": 1500,
   "handshake_backoff_ms": 500,
-  "handshake_rtt_ms": 136,
+  "handshake_rtt_ms": 76,
   "interface_name": "tun0",
   "tunnel_ip": "10.7.0.2",
   "udp_dns_check": {
     "passed": {
       "target": "1.1.1.1:53",
       "responder": "1.1.1.1:53",
-      "checked_at_ms": 1774453879704
+      "checked_at_ms": 1774862256772
     }
   },
-  "last_server_packet_ms": 1774453966002,
-  "last_tun_packet_ms": 1774453966316,
-  "nacks_sent": 1710,
-  "nacks_received": 1182,
-  "retransmits_sent": 7
+  "estimated_rx_loss_ratio": 0.1171875,
+  "estimated_rx_loss_percent": 11.71875,
+  "arq_rtt_ms": 396,
+  "active_padding_budget": 0,
+  "active_redundancy_extra": 2,
+  "path_quality": "poor",
+  "suspected_issue": "latency spikes are likely caused by packet loss/retransmits rather than pure server distance",
+  "last_server_packet_ms": 1774862449510,
+  "last_tun_packet_ms": 1774862449509,
+  "nacks_sent": 9096,
+  "nacks_received": 5747,
+  "retransmits_sent": 12
 }

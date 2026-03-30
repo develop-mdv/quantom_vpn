@@ -7,6 +7,8 @@ const DEFAULT_DIAGNOSTICS_PATH: &str = "omega-client/state/diagnostics.json";
 const DEFAULT_GAMING_MTU: u16 = 1380;
 const DEFAULT_GENERAL_MTU: u16 = 1360;
 const DEFAULT_RESTRICTED_MTU: u16 = 1280;
+const DEFAULT_UDP_RCVBUF: usize = 8 * 1024 * 1024;
+const DEFAULT_UDP_SNDBUF: usize = 8 * 1024 * 1024;
 const DEFAULT_HANDSHAKE_ATTEMPTS: u32 = 5;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 1500;
 const DEFAULT_HANDSHAKE_BACKOFF_MS: u64 = 500;
@@ -212,6 +214,8 @@ pub struct ClientConfig {
     pub ipv6_policy: Ipv6Policy,
     pub requested_mtu: u16,
     pub keepalive_secs: u64,
+    pub udp_rcvbuf: usize,
+    pub udp_sndbuf: usize,
     pub dns_servers: Vec<String>,
     pub split_routes: Vec<Ipv4Route>,
     pub network_diag: bool,
@@ -257,6 +261,8 @@ impl ClientConfig {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or_else(|| profile.default_keepalive_secs())
             .max(5);
+        let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF).max(262_144);
+        let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF).max(262_144);
         let handshake_attempts = std::env::var("OMEGA_HANDSHAKE_ATTEMPTS")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
@@ -286,6 +292,8 @@ impl ClientConfig {
             ipv6_policy: Ipv6Policy::from_env(ipv6_policy_default),
             requested_mtu,
             keepalive_secs,
+            udp_rcvbuf,
+            udp_sndbuf,
             dns_servers,
             split_routes,
             network_diag: env_bool("OMEGA_NETWORK_DIAG", true),
@@ -314,6 +322,13 @@ fn env_bool(name: &str, default: bool) -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
 }
 
