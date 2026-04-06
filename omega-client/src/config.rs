@@ -65,8 +65,9 @@ pub enum MorphingPolicy {
 impl MorphingPolicy {
     fn default_for_profile(profile: ConnectionProfile) -> Self {
         match profile {
+            ConnectionProfile::Gaming => Self::Off,
+            ConnectionProfile::GeneralInternet => Self::Balanced,
             ConnectionProfile::RestrictedFallback => Self::Full,
-            ConnectionProfile::Gaming | ConnectionProfile::GeneralInternet => Self::Balanced,
         }
     }
 

@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 
 use omega_core::protocol::{
@@ -86,7 +86,7 @@ pub async fn tun_to_udp_loop(
         rtp.write_to(&mut out[..RTP_HEADER_LEN]);
         omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
 
-        let aad = out[..TOTAL_HEADER_LEN].to_vec();
+        let aad = &out[..TOTAL_HEADER_LEN];
 
         let mut payload = buf[..n].to_vec();
         if padding_len > 0 {
@@ -99,6 +99,7 @@ pub async fn tun_to_udp_loop(
         }
 
         out.extend_from_slice(&payload);
+        let packet = out.freeze();
 
         let client_addr = session.client_addr;
         let now_ms = std::time::SystemTime::now()
@@ -107,23 +108,23 @@ pub async fn tun_to_udp_loop(
             .as_millis() as u64;
         session
             .retransmit_queue
-            .cache_packet(omega_seq, out.to_vec(), now_ms);
+            .cache_packet(omega_seq, packet.clone(), now_ms);
         session.retransmit_queue.purge_expired(now_ms);
 
         drop(session);
 
-        if let Err(e) = udp.send_to(&out, client_addr).await {
+        if let Err(e) = udp.send_to(packet.as_ref(), client_addr).await {
             tracing::error!(error = %e, "UDP send error");
             continue;
         } else {
-            metrics::record_packet_out(out.len());
+            metrics::record_packet_out(packet.len());
             for _ in 0..redundancy_extra {
                 tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
-                if let Err(e) = udp.send_to(&out, client_addr).await {
+                if let Err(e) = udp.send_to(packet.as_ref(), client_addr).await {
                     tracing::trace!(error = %e, "UDP redundant send error");
                     break;
                 }
-                metrics::record_packet_out(out.len());
+                metrics::record_packet_out(packet.len());
             }
         }
     }
@@ -195,12 +196,11 @@ pub async fn udp_to_tun_loop(
                     continue;
                 }
 
-                let aad = buf[..TOTAL_HEADER_LEN].to_vec();
-                let mut ciphertext = buf[TOTAL_HEADER_LEN..n].to_vec();
+                let (aad, ciphertext) = buf[..n].split_at_mut(TOTAL_HEADER_LEN);
 
                 match session
                     .keys
-                    .decrypt_in_place(&mut ciphertext, omega.seq as u64, &aad)
+                    .decrypt_in_place(ciphertext, omega.seq as u64, aad)
                 {
                     Ok(plaintext) => {
                         session.replay_filter.update(omega.seq as u64);
@@ -236,7 +236,7 @@ pub async fn udp_to_tun_loop(
                                 nack_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
                                 nack.write_to(&mut out[TOTAL_HEADER_LEN..]);
 
-                                let nack_aad = out[..TOTAL_HEADER_LEN].to_vec();
+                                let nack_aad = &out[..TOTAL_HEADER_LEN];
                                 let mut nack_payload = out[TOTAL_HEADER_LEN..].to_vec();
                                 if session
                                     .keys
@@ -246,7 +246,7 @@ pub async fn udp_to_tun_loop(
                                     out.truncate(TOTAL_HEADER_LEN);
                                     out.extend_from_slice(&nack_payload);
                                     let addr = session.client_addr;
-                                    let data = out.to_vec();
+                                    let data = out.freeze();
                                     let now_ms = now_ms();
                                     session.retransmit_queue.cache_packet(
                                         nack_seq,
@@ -256,7 +256,7 @@ pub async fn udp_to_tun_loop(
                                     session.retransmit_queue.purge_expired(now_ms);
                                     let udp_clone = udp.clone();
                                     tokio::spawn(async move {
-                                        let _ = udp_clone.send_to(&data, addr).await;
+                                        let _ = udp_clone.send_to(data.as_ref(), addr).await;
                                     });
                                 }
                             }
@@ -269,13 +269,12 @@ pub async fn udp_to_tun_loop(
                                 } else {
                                     plaintext.len()
                                 };
-                                let plain_owned = plaintext[..final_len].to_vec();
                                 drop(session);
 
-                                if let Err(e) = tun.send(&plain_owned).await {
+                                if let Err(e) = tun.send(&plaintext[..final_len]).await {
                                     tracing::error!(error = %e, "TUN write error");
                                 } else {
-                                    metrics::record_packet_in(plain_owned.len());
+                                    metrics::record_packet_in(final_len);
                                 }
                             }
                             PacketType::Nack => {
@@ -292,7 +291,7 @@ pub async fn udp_to_tun_loop(
                                     if !packets.is_empty() {
                                         let addr = session.client_addr;
                                         let udp_clone = udp.clone();
-                                        let to_send: Vec<Vec<u8>> = packets
+                                        let to_send: Vec<Bytes> = packets
                                             .iter()
                                             .take(MAX_RETRANSMIT_BURST)
                                             .map(|p| p.data.clone())
@@ -302,7 +301,7 @@ pub async fn udp_to_tun_loop(
                                         tokio::spawn(async move {
                                             let total = to_send.len();
                                             for (idx, pkt) in to_send.into_iter().enumerate() {
-                                                let _ = udp_clone.send_to(&pkt, addr).await;
+                                                let _ = udp_clone.send_to(pkt.as_ref(), addr).await;
                                                 if idx + 1 < total {
                                                     tokio::time::sleep(Duration::from_micros(
                                                         RETRANSMIT_PACING_US,

@@ -198,6 +198,14 @@ impl SessionState {
             return;
         }
 
+        if matches!(self.morphing_policy, crate::runtime::MorphingPolicy::Off) {
+            self.padding_budget = 0;
+            self.redundancy_extra = 0;
+            self.last_padding_adjust = Instant::now();
+            self.last_redundancy_adjust = Instant::now();
+            return;
+        }
+
         let penalty = 16 + missing.saturating_mul(8);
         self.padding_budget = self
             .padding_budget
@@ -214,6 +222,11 @@ impl SessionState {
     }
 
     pub fn current_redundancy_extra(&mut self) -> usize {
+        if matches!(self.morphing_policy, crate::runtime::MorphingPolicy::Off) {
+            self.redundancy_extra = 0;
+            return 0;
+        }
+
         let elapsed = self.last_redundancy_adjust.elapsed().as_secs();
         let ticks = elapsed / REDUNDANCY_DECAY_SECS;
         if ticks > 0 {

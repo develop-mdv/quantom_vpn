@@ -1170,6 +1170,7 @@ name = "omega-core"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "bytes",
  "criterion",
  "hkdf",
  "raptorq",

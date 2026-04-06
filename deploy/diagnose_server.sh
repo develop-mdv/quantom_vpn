@@ -233,7 +233,7 @@ if [[ -f "$RUNTIME_SNAPSHOT" ]]; then
     morphing_policy="$(grep -oE '"morphing_policy": "[^"]+"' "$RUNTIME_SNAPSHOT" | head -n1 | sed -E 's/.*"([^"]+)"/\1/')"
     if [[ -n "$morphing_policy" ]]; then
         if [[ "$morphing_policy" == "off" ]]; then
-            warn "Runtime snapshot shows OMEGA_MORPHING=off; latency is prioritized over traffic morphing."
+            pass "Runtime snapshot shows OMEGA_MORPHING=off; throughput/latency are prioritized over traffic morphing."
         else
             pass "Runtime snapshot reports morphing policy ${morphing_policy}."
         fi

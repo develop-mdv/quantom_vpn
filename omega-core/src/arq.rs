@@ -12,6 +12,8 @@ extern crate alloc;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use bytes::Bytes;
+
 use crate::protocol::NackMessage;
 
 // ── Sender: Retransmit Queue ───────────────────────────────────────
@@ -25,7 +27,7 @@ pub struct CachedPacket {
     /// Omega sequence number.
     pub seq: u32,
     /// The fully-formed encrypted packet (ready to send again).
-    pub data: Vec<u8>,
+    pub data: Bytes,
     /// Monotonic timestamp (in ms since session start).
     pub sent_at_ms: u64,
 }
@@ -52,7 +54,7 @@ impl RetransmitQueue {
     }
 
     /// Cache a sent packet for possible retransmission.
-    pub fn cache_packet(&mut self, seq: u32, data: Vec<u8>, now_ms: u64) {
+    pub fn cache_packet(&mut self, seq: u32, data: Bytes, now_ms: u64) {
         if self.cache.len() >= RETRANSMIT_CACHE_SIZE {
             self.cache.pop_front();
         }
@@ -280,9 +282,9 @@ mod tests {
     #[test]
     fn test_retransmit_queue_basic() {
         let mut q = RetransmitQueue::new();
-        q.cache_packet(0, vec![1, 2, 3], 0);
-        q.cache_packet(1, vec![4, 5, 6], 10);
-        q.cache_packet(2, vec![7, 8, 9], 20);
+        q.cache_packet(0, Bytes::from_static(&[1, 2, 3]), 0);
+        q.cache_packet(1, Bytes::from_static(&[4, 5, 6]), 10);
+        q.cache_packet(2, Bytes::from_static(&[7, 8, 9]), 20);
         assert_eq!(q.len(), 3);
 
         let nack = NackMessage {
@@ -299,7 +301,7 @@ mod tests {
     fn test_retransmit_queue_eviction() {
         let mut q = RetransmitQueue::new();
         for i in 0..RETRANSMIT_CACHE_SIZE + 10 {
-            q.cache_packet(i as u32, vec![0], i as u64);
+            q.cache_packet(i as u32, Bytes::from_static(&[0]), i as u64);
         }
         assert_eq!(q.len(), RETRANSMIT_CACHE_SIZE);
     }
@@ -307,9 +309,9 @@ mod tests {
     #[test]
     fn test_retransmit_queue_purge() {
         let mut q = RetransmitQueue::new();
-        q.cache_packet(0, vec![1], 0);
-        q.cache_packet(1, vec![2], 50);
-        q.cache_packet(2, vec![3], 200);
+        q.cache_packet(0, Bytes::from_static(&[1]), 0);
+        q.cache_packet(1, Bytes::from_static(&[2]), 50);
+        q.cache_packet(2, Bytes::from_static(&[3]), 200);
         q.update_rtt(100);
         q.purge_expired(400);
         assert_eq!(q.len(), 1);

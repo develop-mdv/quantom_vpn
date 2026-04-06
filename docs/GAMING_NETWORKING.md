@@ -23,7 +23,7 @@ Client:
 
 ```env
 OMEGA_PROFILE=gaming
-OMEGA_MORPHING=balanced
+OMEGA_MORPHING=off
 OMEGA_TUNNEL_MODE=full
 OMEGA_TUN_MTU=1380
 OMEGA_KEEPALIVE_SECS=25
@@ -36,7 +36,7 @@ Server:
 
 ```env
 OMEGA_PROFILE=gaming
-OMEGA_MORPHING=balanced
+OMEGA_MORPHING=off
 OMEGA_TUN_MTU=1380
 OMEGA_BIND=0.0.0.0:443
 OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
@@ -73,8 +73,9 @@ far away". That pattern more often points to one of these issues:
 - provider/security-group egress filtering for game UDP traffic;
 - an MTU/path issue that causes bursts of loss and recovery.
 
-In those cases, try `OMEGA_MORPHING=balanced` first, and if the line is still unstable, test
-`OMEGA_MORPHING=off` plus a smaller `OMEGA_TUN_MTU` such as `1320` or `1280`.
+For maximum throughput, keep `OMEGA_MORPHING=off` first. If the line is still unstable, test
+a smaller `OMEGA_TUN_MTU` such as `1320` or `1280`. If you explicitly need more traffic cover,
+step back up to `OMEGA_MORPHING=balanced`.
 
 ## Important Current Limitations
 

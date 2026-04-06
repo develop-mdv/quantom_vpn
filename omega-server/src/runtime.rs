@@ -58,8 +58,9 @@ pub enum MorphingPolicy {
 impl MorphingPolicy {
     pub fn from_env(profile: ServerProfile) -> Self {
         let default = match profile {
+            ServerProfile::Gaming => Self::Off,
+            ServerProfile::GeneralInternet => Self::Balanced,
             ServerProfile::RestrictedFallback => Self::Full,
-            ServerProfile::Gaming | ServerProfile::GeneralInternet => Self::Balanced,
         };
 
         match std::env::var("OMEGA_MORPHING") {

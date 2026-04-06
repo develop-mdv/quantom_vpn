@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use kem::Decapsulate;
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
@@ -94,6 +94,14 @@ impl ClientState {
             return;
         }
 
+        if matches!(self.morphing_policy, MorphingPolicy::Off) {
+            self.padding_budget = 0;
+            self.redundancy_extra = 0;
+            self.last_padding_adjust = Instant::now();
+            self.last_redundancy_adjust = Instant::now();
+            return;
+        }
+
         let penalty = 16 + missing.saturating_mul(8);
         self.padding_budget = self
             .padding_budget
@@ -110,6 +118,11 @@ impl ClientState {
     }
 
     fn current_redundancy_extra(&mut self) -> usize {
+        if matches!(self.morphing_policy, MorphingPolicy::Off) {
+            self.redundancy_extra = 0;
+            return 0;
+        }
+
         let elapsed = self.last_redundancy_adjust.elapsed().as_secs();
         let ticks = elapsed / REDUNDANCY_DECAY_SECS;
         if ticks > 0 {
@@ -1143,17 +1156,18 @@ async fn main() -> anyhow::Result<()> {
                     rtp.write_to(&mut out[..RTP_HEADER_LEN]);
                     ka_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
 
-                    let aad = out[..TOTAL_HEADER_LEN].to_vec();
+                    let aad = &out[..TOTAL_HEADER_LEN];
                     let mut payload = Vec::new();
                     if keys_send.encrypt_in_place(&mut payload, &aad).is_ok() {
                         out.extend_from_slice(&payload);
+                        let packet = out.freeze();
                         let now = current_ms();
                         {
                             let mut s = state_send.lock().unwrap();
-                            s.retransmit_queue.cache_packet(seq, out.to_vec(), now);
+                            s.retransmit_queue.cache_packet(seq, packet.clone(), now);
                             s.retransmit_queue.purge_expired(now);
                         }
-                        let _ = udp_r.send_to(&out, server_addr).await;
+                        let _ = udp_r.send_to(packet.as_ref(), server_addr).await;
                     }
                 }
                 Some(nack) = nack_rx.recv() => {
@@ -1178,19 +1192,20 @@ async fn main() -> anyhow::Result<()> {
                     nack_omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
                     nack.write_to(&mut out[TOTAL_HEADER_LEN..]);
 
-                    let aad = out[..TOTAL_HEADER_LEN].to_vec();
+                    let aad = &out[..TOTAL_HEADER_LEN];
                     let mut payload = out[TOTAL_HEADER_LEN..].to_vec();
                     if keys_send.encrypt_in_place(&mut payload, &aad).is_ok() {
                         out.truncate(TOTAL_HEADER_LEN);
                         out.extend_from_slice(&payload);
+                        let packet = out.freeze();
                         let now = current_ms();
                         {
                             let mut s = state_send.lock().unwrap();
-                            s.retransmit_queue.cache_packet(nack_seq, out.to_vec(), now);
+                            s.retransmit_queue.cache_packet(nack_seq, packet.clone(), now);
                             s.retransmit_queue.purge_expired(now);
                         }
                         diagnostics_send.record_nack_sent();
-                        let _ = udp_r.send_to(&out, server_addr).await;
+                        let _ = udp_r.send_to(packet.as_ref(), server_addr).await;
                     }
                 }
                 res = tun_r.recv(&mut buf) => {
@@ -1249,7 +1264,7 @@ async fn main() -> anyhow::Result<()> {
                     rtp.write_to(&mut out[..RTP_HEADER_LEN]);
                     omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
 
-                    let aad = out[..TOTAL_HEADER_LEN].to_vec();
+                    let aad = &out[..TOTAL_HEADER_LEN];
                     let mut payload = buf[..n].to_vec();
                     if padding_len > 0 {
                         payload.extend(std::iter::repeat(0).take(padding_len));
@@ -1260,20 +1275,21 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
                     out.extend_from_slice(&payload);
+                    let packet = out.freeze();
 
                     {
                         let mut s = state_send.lock().unwrap();
                         let now = current_ms();
-                        s.retransmit_queue.cache_packet(seq, out.to_vec(), now);
+                        s.retransmit_queue.cache_packet(seq, packet.clone(), now);
                         s.retransmit_queue.purge_expired(now);
                     }
 
-                    if let Err(e) = udp_r.send_to(&out, server_addr).await {
+                    if let Err(e) = udp_r.send_to(packet.as_ref(), server_addr).await {
                         tracing::error!(error = %e, "UDP send failed");
                     } else {
                         for _ in 0..redundancy_extra {
                             tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
-                            if let Err(e) = udp_r.send_to(&out, server_addr).await {
+                            if let Err(e) = udp_r.send_to(packet.as_ref(), server_addr).await {
                                 tracing::trace!(error = %e, "UDP redundant send failed");
                                 break;
                             }
@@ -1327,10 +1343,9 @@ async fn main() -> anyhow::Result<()> {
                         continue;
                     }
 
-                    let aad = buf[..TOTAL_HEADER_LEN].to_vec();
-                    let mut ciphertext = buf[TOTAL_HEADER_LEN..n].to_vec();
+                    let (aad, ciphertext) = buf[..n].split_at_mut(TOTAL_HEADER_LEN);
 
-                    match keys_recv.decrypt_in_place(&mut ciphertext, omega.seq as u64, &aad) {
+                    match keys_recv.decrypt_in_place(ciphertext, omega.seq as u64, aad) {
                         Ok(plaintext) => {
                             replay_filter.update(omega.seq as u64);
 
@@ -1372,8 +1387,7 @@ async fn main() -> anyhow::Result<()> {
                                             plaintext.len()
                                         };
 
-                                    let plain_owned = plaintext[..final_len].to_vec();
-                                    if let Err(e) = tun_w.send(&plain_owned).await {
+                                    if let Err(e) = tun_w.send(&plaintext[..final_len]).await {
                                         tracing::error!(error = %e, "TUN write failed");
                                     }
                                 }
@@ -1390,7 +1404,7 @@ async fn main() -> anyhow::Result<()> {
                                             let mut s = state_recv.lock().unwrap();
                                             s.on_remote_nack(&nack);
                                             s.retransmit_queue.observe_nack(&nack, current_ms());
-                                            let packets = s
+                                            let packets: Vec<Bytes> = s
                                                 .retransmit_queue
                                                 .process_nack(&nack)
                                                 .into_iter()
@@ -1415,7 +1429,7 @@ async fn main() -> anyhow::Result<()> {
                                         let packets_len = packets.len();
                                         diagnostics_recv.record_retransmits(packets_len);
                                         for (idx, pkt) in packets.into_iter().enumerate() {
-                                            let _ = udp_w.send_to(&pkt, server_addr).await;
+                                            let _ = udp_w.send_to(pkt.as_ref(), server_addr).await;
                                             if idx + 1 < packets_len {
                                                 tokio::time::sleep(Duration::from_micros(
                                                     RETRANSMIT_PACING_US,

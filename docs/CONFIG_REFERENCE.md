@@ -30,7 +30,7 @@
 | Переменная | Default | Значение |
 | --- | --- | --- |
 | `OMEGA_PROFILE` | `gaming` | Профиль соединения: `gaming`, `general`, `restricted`. |
-| `OMEGA_MORPHING` | profile-based | `full`, `balanced`, `off`. Для `restricted` default = `full`, для `gaming/general` = `balanced`. |
+| `OMEGA_MORPHING` | profile-based | `full`, `balanced`, `off`. Для `restricted` default = `full`, для `general` = `balanced`, для `gaming` = `off`. |
 | `OMEGA_TUNNEL_MODE` | `full` | `full` или `split`. |
 | `OMEGA_SPLIT_ROUTES` | пусто | Список CIDR через запятую для split tunnel. Без него `split` откатится обратно в `full`. |
 
@@ -129,5 +129,6 @@
 
 - Самый важный production override на сервере - это `OMEGA_TOKEN_PEPPER`.
 - Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`.
-- Если `OMEGA_MORPHING=off`, latency может стать лучше, но traffic cover будет слабее.
+- `OMEGA_PROFILE=gaming` теперь по умолчанию выбирает `OMEGA_MORPHING=off`, чтобы не тратить throughput на padding и лишнюю избыточность.
+- Если `OMEGA_MORPHING=off`, latency и throughput обычно становятся лучше, но traffic cover будет слабее.
 - `OMEGA_ALLOW_LEGACY_V1` не стоит считать полноценной backward compatibility feature.
