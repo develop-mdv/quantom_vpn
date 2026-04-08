@@ -1,22 +1,20 @@
-[package]
+﻿[package]
 name = "omega-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Core primitives for Omega VPN: ChaosPrng, ReplayFilter, protocol, crypto"
+description = "Compatibility facade over Omega v2 domain crates"
 
 [features]
 default = []
 std = []
-fec = ["dep:raptorq"]
+fec = ["omega-transport/fec"]
 
 [dependencies]
-ring = { workspace = true }
-hkdf = { workspace = true }
-sha2 = { workspace = true }
-byteorder = { workspace = true }
-bytes = { workspace = true }
-raptorq = { workspace = true, optional = true }
+omega-core-crypto = { path = "../omega-core-crypto" }
+omega-core-wire = { path = "../omega-core-wire" }
+omega-transport = { path = "../omega-transport", default-features = false }
+omega-stealth = { path = "../omega-stealth" }
 
 [dev-dependencies]
 criterion = { workspace = true }

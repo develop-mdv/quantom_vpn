@@ -2,69 +2,83 @@
 
 ## Что это за проект
 
-`Omega VPN` - Rust workspace из трех крейтов:
+`Omega VPN` - это Rust workspace c собственным VPN-протоколом `Omega v2`, который строится вокруг:
 
-- `omega-core` - протокол, криптография, anti-replay, ARQ, chaos-based traffic morphing, FEC primitives.
-- `omega-server` - серверный runtime: UDP listener, TUN, identity store, session manager, web admin, metrics и snapshots.
-- `omega-client` - клиентский runtime: handshake, TUN, Windows routing/DNS/IPv6 guard, diagnostics.
+- custom UDP transport вместо WireGuard/OpenVPN;
+- handshake v2 с `X25519 + ML-KEM-768`;
+- device-based authentication через `device_id + device_token`;
+- transport v2 с frame layer, ACK ranges, pacing и congestion control;
+- path intelligence, stealth personas, relay fabric и typed control plane;
+- отдельного desktop launcher и background runtime;
+- встроенных observability и security hardening surface-ов.
 
-Проект ориентирован на собственный UDP-туннель с маскировкой под STUN/RTP и управлением устройствами на сервере.
+Проект уже не выглядит как один монолитный "VPN-клиент и VPN-сервер". Сейчас это набор связанных подсистем, из которых можно собирать управляемую VPN-платформу с relay/control plane/launcher/ops/security контуром.
 
-## Текущая правда по реализации
+## Из чего состоит текущий workspace
 
-- Это не WireGuard и не OpenVPN. В проекте используется собственный `Omega` wire protocol поверх UDP.
-- Handshake заворачивается в `STUN Binding Request/Response`.
-- Handshake v2 использует `ML-KEM-768` и device auth (`device_id` + `device_token`).
-- Data plane использует `RTP header + Omega header + ChaCha20-Poly1305`.
-- Реально работающая надежность в текущем datapath - это `ARQ/NACK`, retransmit cache и adaptive extra redundancy.
-- `ChaosPrng` используется для выбора целевых размеров пакетов и управления padding budget.
-- Сервер ведет multi-user / multi-device identity store с audit trail.
-- Клиент пишет runtime diagnostics в JSON, сервер пишет session/runtime snapshots и Prometheus metrics.
+- `omega-core-wire` - wire format handshake и transport v2.
+- `omega-core-crypto` - ключевая криптография, hybrid handshake secrets, key update derivation.
+- `omega-transport` - transport v2, replay protection, scheduler, reliability и FEC primitives.
+- `omega-stealth` - personas, anti-probing и morphing policy.
+- `omega-control` - typed control plane, policy engine, tickets, audit chain.
+- `omega-edge` - серверный edge runtime: handshake, datapath, sessions, metrics, observability.
+- `omega-relay` - relay fabric graph, routing и failover model.
+- `omega-client-runtime` - privileged runtime клиента.
+- `omega-client-app` - launcher UX, lifecycle, diagnostics, signed update path.
+- `omega-core`, `omega-client` - compatibility shims/legacy entrypoints.
+
+## Что реально уже достигнуто
+
+По итогам Phase 00 - Phase 11 проект получил цельный каркас:
+
+- формализован protocol vision, threat model, product modes и KPI;
+- workspace разделен на доменные crates с более чистыми границами;
+- реализован handshake v2 с hybrid `X25519 + ML-KEM-768`, retry/cookie и resumption;
+- live runtime переведен на transport v2 с ACK ranges, pacing, congestion control и CID rotation;
+- добавлены path intelligence, DPLPMTUD, adaptive packet sizing и blackhole recovery;
+- reliability выросла до adaptive retransmit/FEC-модели;
+- stealth layer оформлен через production personas и anti-probing policy;
+- relay fabric и failover path встроены в runtime;
+- control plane стал typed и policy-driven;
+- клиент разделен на launcher и background runtime;
+- observability/SRE слой получил rollout guard, alerts, trace journal и runbooks;
+- security beta phase добавила audit package, proof docs, updater hardening, handshake anti-abuse и secure local resumption storage.
+
+## Текущая правда по системе
+
+- это собственный `Omega` protocol, а не обертка над чужим VPN-протоколом;
+- основной datapath сейчас `UDP-only`;
+- tunnel family сейчас `IPv4-only`;
+- handshake маскируется через `STUN Binding Request/Response` surface;
+- transport надежность строится вокруг `transport v2`, а legacy `ARQ/NACK` остается compatibility/reference слоем;
+- small control/interactive traffic уже может использовать live repair-oriented FEC path;
+- сервер и клиент уже имеют product-facing diagnostics/admin surfaces, а не только сетевой код.
 
 ## Что важно не перепутать
 
-- Туннель сейчас IPv4-only.
-- Серверный TUN по умолчанию поднимается как `10.7.0.1/16`.
-- Лизы для клиентов выдаются из диапазона `10.7.0.2 - 10.7.255.254`.
-- Plain device token показывается только в момент `register_device`; в identity store хранится только hash.
-- `OMEGA_ALLOW_LEGACY_V1` сейчас только ослабляет проверку версии handshake. Полноценный "старый режим без auth" он не включает.
+- проект уже сильно ушел от ранней трехкрейтовой схемы; актуальная карта модулей лежит в `docs/REPO_MAP_V2.md`;
+- source of truth для control plane теперь `state/control_plane.json`, а не старый `identity.json`;
+- launcher `omega-client-app` и privileged runtime `omega-client-runtime` - это разные слои с разными обязанностями;
+- security и formal work в проекте теперь связаны с кодом и тестами, а не живут отдельно как research-only документы.
 
-## Важные ограничения текущей версии
+## Ключевые ограничения на текущий момент
 
-- Проект в alpha-stage и не скрывает этого.
-- Реального TCP fallback в клиенте/сервере нет.
-- Полноценной IPv6-туннелизации нет, только explicit disable/passthrough policies.
-- В `omega-core` есть `RaptorQ/FEC` примитивы и флаги handshake, но живой datapath их пока не использует как полноценный FEC packet path.
-- Split tunnel ограничен route selection на клиенте; полноценного split-DNS orchestration нет.
+- полноценного TCP fallback все еще нет;
+- полноценной IPv6-туннелизации все еще нет;
+- updater пока без transparency log и без TUF timestamp/snapshot role separation;
+- local secret storage на клиенте пока не вынесен в OS-native keystore;
+- formal models глубже всего покрывают handshake и trust assumptions вокруг него, а не весь runtime one-to-one.
 
-## Основные сущности
+Эти ограничения не делают репозиторий пустым или "игрушечным", но их важно честно держать в голове при планировании beta и production rollout.
 
-- `UserRecord` - пользователь с лимитами `max_devices` и `max_concurrent_sessions`.
-- `DeviceRecord` - зарегистрированное устройство пользователя.
-- `SessionState` - активная tunnel session c `flow_id`, `client_addr`, `tunnel_ip`, ARQ state и morphing state.
-- `AuditEvent` - журнал административных и auth-событий.
+## Куда смотреть в первую очередь
 
-## Куда смотреть в коде
+- Хочу быстро понять проект: `docs/PROJECT_CONTEXT.md`
+- Хочу понять архитектуру целиком: `docs/ARCHITECTURE.md`
+- Хочу понять protocol/security basis: `docs/PROTOCOL_V2_FORMAL_SPEC.md`, `docs/DOLEV_YAO_THREAT_MODEL.md`, `docs/PROTOCOL_PROOFS.md`
+- Хочу понять code layout: `docs/REPO_MAP_V2.md`, `docs/DEPENDENCY_DAG.md`
+- Хочу понять rollout/ops/security readiness: `docs/OPERATIONS.md`, `docs/OBSERVABILITY_DASHBOARDS.md`, `docs/INDEPENDENT_AUDIT_PACKAGE.md`, `docs/BETA_READINESS_CHECKLIST.md`
 
-- Server entrypoint: `omega-server/src/main.rs`
-- Client entrypoint: `omega-client/src/main.rs`
-- Wire format: `omega-core/src/protocol.rs`
-- Handshake: `omega-server/src/handshake.rs`
-- Server datapath: `omega-server/src/datapath.rs`
-- Client config: `omega-client/src/config.rs`
-- Identity model: `omega-server/src/identity/mod.rs`
-- Session lifecycle: `omega-server/src/session.rs`
+## Короткая формула проекта
 
-## Runtime-файлы, которые часто нужны в разговоре
-
-- `state/identity.json` или путь из `OMEGA_IDENTITY_DB`
-- `state/sessions.json` или путь из `OMEGA_SESSION_SNAPSHOT`
-- `state/runtime.json` или путь из `OMEGA_RUNTIME_SNAPSHOT`
-- `state/admin_commands.ndjson` или путь из `OMEGA_ADMIN_COMMANDS`
-- `omega-client/state/diagnostics.json` или путь из `OMEGA_DIAGNOSTICS_PATH`
-
-## Для быстрых обсуждений
-
-Если нужен максимально короткий summary проекта, держи в голове такую формулу:
-
-`Omega VPN = custom UDP tunnel + STUN/RTP cover + PQ handshake + device-based auth + ARQ-based reliability + JSON snapshots + built-in admin surfaces`
+`Omega VPN = custom VPN platform on top of hybrid handshake + transport v2 + stealth personas + relay/control plane + launcher/runtime split + observability/security package`

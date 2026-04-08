@@ -1,0 +1,10 @@
+﻿[package]
+name = "omega-exit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Omega exit role contracts and egress policy types"
+
+[dependencies]
+omega-control = { path = "../omega-control" }
+serde = { workspace = true }

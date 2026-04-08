@@ -1,251 +1,117 @@
-﻿# Architecture
+# Architecture
 
-## Состав системы
+## Что это за система сейчас
+
+`Omega VPN` - это Rust workspace с собственным `Omega v2` протоколом, hybrid handshake, transport v2, stealth/persona слоем, relay fabric, typed control plane, desktop launcher и встроенной SRE/security обвязкой.
+
+Проект состоит не из одного монолита, а из нескольких четко разделенных слоев.
+
+## Архитектурная схема
 
 ```mermaid
 flowchart LR
-  ClientHost["Client host network stack"] --> ClientTun["Client TUN"]
-  ClientTun --> Client["omega-client"]
-  Client --> Wire["UDP with STUN/RTP cover"]
-  Wire --> Server["omega-server"]
-  Server --> ServerTun["Server TUN 10.7.0.1/16"]
-  ServerTun --> Upstream["Internet / upstream network"]
-  Admin["CLI / Web Admin"] --> Server
-  Server --> State["identity.json / sessions.json / runtime.json / metrics"]
+  User["User / Operator"] --> Launcher["omega-client-app"]
+  Launcher --> Runtime["omega-client-runtime"]
+  Runtime --> Handshake["Handshake v2"]
+  Handshake --> Transport["Transport v2"]
+  Transport --> Edge["omega-edge"]
+  Edge --> Fabric["omega-relay / omega-exit"]
+  Edge --> Control["omega-control"]
+  Edge --> State["state/control_plane.json\nstate/sessions.json\nstate/runtime.json\nstate/observability.json\nstate/trace.ndjson"]
+  Fabric --> Internet["Upstream Internet"]
+  Operator["Admin CLI / CI/CD / Runbooks"] --> Edge
+  Operator --> State
 ```
 
-## Workspace responsibilities
+## Workspace по слоям
 
-### `omega-core`
+### Foundations
 
-Отвечает за низкоуровневые примитивы:
+- `omega-core-wire` - wire format, handshake messages, transport v2 frames.
+- `omega-core-crypto` - hybrid handshake secrets, key schedule, key update derivation.
+- `omega-transport` - transport v2 core, replay protection, retransmit/FEC/reliability logic.
+- `omega-stealth` - personas, detectability budgets, morphing and cover policy.
 
-- `protocol.rs` - wire format, STUN wrapper, `ClientHello`, `ServerHello`, `NackMessage`, packet types.
-- `crypto.rs` - `SessionKeys`, HKDF key derivation, `FlowId` derivation, AEAD encrypt/decrypt.
-- `replay.rs` - sliding anti-replay window.
-- `arq.rs` - retransmit queue, gap detector, loss estimator.
-- `chaos.rs` - lightweight PRNG для целевых размеров пакетов.
-- `raptorq_mgr.rs` - FEC primitives и state machine, пока не доведенные до живого packet path.
+### Control and fabric
 
-### `omega-server`
+- `omega-control` - users, devices, tickets, sessions, policies, audit chain, control-plane store.
+- `omega-relay` - relay graph, route scoring, failover simulation and handoff concepts.
+- `omega-exit` - exit-role contracts и egress policy surface.
 
-Собирает runtime вокруг `omega-core`:
+### Runtime
 
-- принимает UDP-пакеты;
-- обслуживает handshake;
-- создает и поддерживает TUN;
-- ведет identity store пользователей и устройств;
-- управляет активными сессиями и IP-лизами;
-- пишет session/runtime snapshots;
-- публикует Prometheus metrics;
-- поднимает встроенную web admin панель.
+- `omega-edge` - серверный runtime: handshake, session manager, datapath, metrics, observability, fabric coupling.
+- `omega-client-runtime` - привилегированный клиентский runtime: handshake, transport, TUN, routing, diagnostics.
 
-### `omega-client`
+### App and compatibility
 
-Поднимает локальный tunnel endpoint:
+- `omega-client-app` - launcher UX, lifecycle, profile management, secure update path.
+- `omega-server` - server app entrypoint и admin CLI.
+- `omega-client` - compatibility shim для legacy env-driven запуска.
+- `omega-core` - compatibility facade поверх foundation crates.
 
-- читает env-конфиг и runtime profile;
-- выполняет handshake;
-- создает TUN;
-- шифрует/дешифрует datapath;
-- на Windows настраивает маршруты, MTU, DNS и временно отключает IPv6 на физических адаптерах;
-- пишет diagnostics JSON.
+## Ключевые runtime flows
 
-## Wire format
+### Provisioning
 
-Обычный data packet внутри UDP выглядит так:
+1. Оператор создает пользователя через `omega-server admin create_user`.
+2. Для устройства выдается `device_id` и `device_token` через `register_device`.
+3. Эти данные попадают в control plane и дальше используются клиентом при первичной настройке.
 
-```text
-[RTP Header 12B][FlowId 16B][Seq 4B][PacketType 1B][Encrypted payload][Poly1305 tag 16B]
-```
+### Client connect
 
-Идея такая:
+1. `omega-client-app` читает `omega-client/state/app-config.json`.
+2. Launcher запускает `omega-client-runtime` как foreground или background process.
+3. Runtime идет в `handshake v2`: `Init -> Retry -> Validated -> Established/Resumed`.
+4. Сервер в `omega-edge` валидирует устройство, policy и fabric context через `omega-control`.
+5. После handshake соединение переходит на `transport v2` и начинает передавать `data/ack/control/path/fec/padding` frames.
 
-- `RTP Header` дает cover traffic под WebRTC-like профиль.
-- `FlowId` идентифицирует tunnel session.
-- `Seq` используется для nonce/replay/ARQ.
-- `PacketType` различает `Data`, `KeepAlive`, `Close`, `Nack`, `FecControl`.
-- Payload шифруется через `ChaCha20-Poly1305`.
+### Steady-state datapath
 
-Handshake не идет в этом формате. Он передается как `STUN Binding Request/Response`, внутри которого лежат `ClientHello` и `ServerHello`.
+- Клиент и сервер работают через `transport v2`, а не через старый packet-only path.
+- Path manager следит за `RTT`, `jitter`, `loss`, reordering и MTU.
+- Reliability engine выбирает retransmit/FEC/duplicate strategy под текущие условия.
+- Stealth engine накладывает persona-aware timing и cover budget поверх transport decisions.
+- Fabric слой может рекомендовать failover или route handoff без полного переписывания control plane.
 
-## Handshake flow
+### Operations and rollout
 
-1. Клиент генерирует `ML-KEM-768` keypair.
-2. Клиент отправляет `ClientHello` в STUN request.
-3. В `ClientHello` уже лежат:
-   - версия протокола;
-   - желаемый MTU;
-   - флаг `fec_support`;
-   - ML-KEM encapsulation key;
-   - `device_id`, `device_token`, `platform`, `device_name`.
-4. Сервер:
-   - парсит STUN;
-   - проверяет версию;
-   - аутентифицирует устройство через `IdentityStore`;
-   - завершает существующие сессии этого устройства;
-   - проверяет лимит concurrent sessions пользователя;
-   - выделяет tunnel IP;
-   - делает encapsulate и получает shared secret;
-   - derives `SessionKeys`, `FlowId`, `chaos_seed`, `ssrc`;
-   - создает `SessionState`;
-   - отвечает `ServerHello` в STUN response.
-5. Клиент decapsulate, derives те же ключи и поднимает локальный TUN.
+- `deploy-server.yml` собирает `omega-server`, загружает bundle на VPS и запускает `deploy/update_server.sh`.
+- `update_server.sh` обновляет бинарник, systemd unit и alert rules, затем проверяет rollout guard.
+- После deploy workflow повторно применяет `deploy/setup_nat.sh` и прогоняет `deploy/diagnose_server.sh`.
+- `bootstrap-network.yml` используется отдельно, когда нужно вручную переподнять сетевой bootstrap или починить firewall/NAT.
 
-### Что сервер реально проверяет
+## Источники истины
 
-- `device_id` должен существовать.
-- `device_token` должен совпадать по hash.
-- устройство не должно быть revoked.
-- пользователь должен быть `active`.
-- лимит сессий пользователя не должен быть превышен.
+### Server state
 
-### Что происходит при reconnect одного и того же устройства
+- `state/control_plane.json` - source of truth для users/devices/sessions/tickets/policies/fabric nodes.
+- `state/sessions.json` - текущие активные сессии и session views.
+- `state/runtime.json` - runtime snapshot сервера.
+- `state/observability.json` - rollout guard, alerts, SRE signals.
+- `state/trace.ndjson` - correlation-aware trace journal.
 
-Сервер вызывает `terminate_device_sessions(device_id)` еще на handshake. Это делает reconnect idempotent: старые активные сессии устройства вычищаются, новая сессия занимает их место.
+### Client state
 
-## Data path
+- `omega-client/state/app-config.json` - launcher config.
+- `omega-client/state/lifecycle.json` - статус runtime для launcher/UI.
+- `omega-client/state/diagnostics.json` - client diagnostics snapshot.
+- `omega-client/state/runtime-control.json` - launcher -> runtime control file.
+- `omega-client/state/resumption_ticket.hex` - локально сохраненный opaque resumption ticket.
 
-### Из TUN в UDP
+## Что важно не перепутать
 
-И клиент, и сервер делают почти симметричную работу:
+- `omega-client-app` и `omega-client-runtime` - это разные слои. Первый отвечает за UX и orchestration, второй - за сеть и привилегированные операции.
+- `omega-server` - это thin entrypoint, а не место основной серверной логики. Большая часть server runtime находится в `omega-edge`.
+- `omega-control` - фактический control-plane слой. Старый `identity.json` нужен только для migration/compatibility сценариев.
+- `REPO_MAP_V2.md` описывает crate boundaries точнее, чем старые monolithic mental models.
 
-- читают IP packet из TUN;
-- определяют профиль RTP cover:
-  - маленькие пакеты ближе к audio/Opus;
-  - большие ближе к video/VP8;
-- берут `target_size` из `ChaosPrng`;
-- добивают payload padding-ом в рамках `padding_budget`;
-- шифруют payload с `aad = RTP + Omega headers`;
-- кешируют отправленный пакет в `RetransmitQueue`;
-- отправляют пакет по UDP;
-- при повышенной потере делают несколько redundant sends.
+## Текущие ограничения
 
-### Из UDP в TUN
+- datapath сейчас `UDP-only`;
+- tunnel family сейчас `IPv4-only`;
+- полного TCP fallback нет;
+- updater пока без transparency log и без полного TUF timestamp/snapshot role separation;
+- local client secret storage пока не вынесен в OS-native keystore.
 
-На приеме:
-
-- проверяется `FlowId`;
-- проходит anti-replay check;
-- пакет дешифруется;
-- обновляется `last_seen`;
-- при необходимости фиксируется roam клиента на новый `src_addr`;
-- `GapDetector` ищет пропуски и, если нужно, отправляет `NackMessage`;
-- `RetransmitQueue` обслуживает входящие NACK и повторно шлет кешированные пакеты;
-- полезная IP-нагрузка уходит обратно в TUN.
-
-## Надежность канала
-
-### Что реально работает сейчас
-
-- `RetransmitQueue` кеширует до 256 пакетов.
-- `GapDetector` строит 64-битную карту пропусков.
-- `LossEstimator` держит sliding window на 256 событий.
-- `padding_budget` и `redundancy_extra` динамически меняются после NACK.
-
-### Что пока только подготовлено
-
-- В кодовой базе есть `FecEncoder`, `FecDecoder`, `FecState`, `PacketType::FecControl`.
-- Но текущие loops клиента и сервера не кодируют и не декодируют FEC-пакеты как часть живого datapath.
-- Поэтому в документации проекта FEC надо считать "заготовкой/примитивом", а не завершенной runtime-фичей.
-
-## Session model
-
-`SessionManager` хранит:
-
-- `FlowId -> SessionState`
-- `tunnel_ip -> flow`
-- `user_id -> flows`
-- `device_id -> flows`
-- `device_id -> leased tunnel IP`
-
-Поведение:
-
-- TTL сессии: `120` секунд без активности.
-- Период cleanup: `30` секунд.
-- Max sessions in memory: `10_000`.
-- IP pool: `10.7.0.2 - 10.7.255.254`.
-
-`ActiveSessionView` в snapshots содержит:
-
-- `flow_id`
-- `user_id`
-- `device_id`
-- `tunnel_ip`
-- `client_addr`
-- `age_secs`
-- `idle_secs`
-- `loss_ratio`
-- `fec_enabled`
-
-## Identity model
-
-`IdentityStore` хранит три группы данных:
-
-- `users`
-- `devices`
-- `audit_events`
-
-Особенности:
-
-- revoked devices и deleted users при загрузке не возвращаются в живую память.
-- device token не хранится открытым видом; сохраняется только SHA-256 hash с `OMEGA_TOKEN_PEPPER`.
-- каждое важное действие дописывает `AuditEvent`.
-- `register_device` показывает token только один раз.
-
-## Observability
-
-### Клиент
-
-`ClientDiagnostics` пишет JSON каждые 5 секунд:
-
-- активный профиль;
-- tunnel mode;
-- DNS/IPv6 policy;
-- requested/negotiated MTU;
-- handshake RTT;
-- path quality;
-- UDP DNS diagnostic;
-- счетчики NACK/retransmit;
-- последние timestamps пакетов.
-
-### Сервер
-
-Сервер пишет два отдельных JSON snapshot-а:
-
-- `sessions.json` - список активных сессий;
-- `runtime.json` - runtime config + summary + sessions.
-
-Также сервер публикует Prometheus metrics, например:
-
-- `omega_active_sessions`
-- `omega_packets_in_total`
-- `omega_packets_out_total`
-- `omega_handshake_success_total`
-- `omega_handshake_failures_total`
-- `omega_nack_sent_total`
-- `omega_retransmit_sent_total`
-
-## Admin surfaces
-
-### CLI
-
-Через `omega-server admin ...` можно:
-
-- создавать и блокировать пользователей;
-- регистрировать и отзывать устройства;
-- смотреть активные сессии;
-- смотреть runtime snapshot;
-- смотреть audit;
-- завершать сессию через командную очередь.
-
-### Built-in web admin
-
-`web_admin.rs` поднимает минимальный HTTP UI без внешнего фреймворка. Он позволяет:
-
-- создать пользователя;
-- зарегистрировать устройство;
-- block/unblock/delete пользователя;
-- revoke устройство;
-- terminate активную сессию;
-- скопировать шаблон `.env` для клиента.
+Эти ограничения не отменяют текущую зрелость проекта, но их важно учитывать при beta rollout и production planning.

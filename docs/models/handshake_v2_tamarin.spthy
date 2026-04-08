@@ -1,0 +1,55 @@
+theory OmegaHandshakeV2 begin
+
+builtins: hashing
+
+functions:
+  Cookie/3,
+  Ticket/2,
+  WrapCred/2,
+  HKDF/2,
+  Pair/2
+
+facts:
+  Init/2,
+  Retry/2,
+  Validated/2,
+  Established/2,
+  Resumed/1,
+  Secret/1,
+  TicketUsed/1
+
+rule ClientInit:
+  [ Fr(~conn), Fr(~x25519) ]
+  -->
+  [ Init(~conn, ~x25519), Out(<~conn, ~x25519>) ]
+
+rule ServerRetry:
+  [ Init(conn, x25519), Fr(~cookie) ]
+  -->
+  [ Retry(conn, ~cookie), Out(<conn, Cookie(conn, x25519, ~cookie)>) ]
+
+rule ClientValidated:
+  [ Retry(conn, cookie), Fr(~cred) ]
+  -->
+  [ Validated(conn, cookie), Out(<conn, cookie, WrapCred(HKDF(cookie, conn), ~cred)>) ]
+
+rule ServerEstablished:
+  [ Validated(conn, cookie), Fr(~mlkem), Fr(~app) ]
+  -->
+  [ Established(conn, ~app), Secret(~app), Out(<conn, ~mlkem, Ticket(conn, ~app)>) ]
+
+rule ClientResume:
+  [ Retry(conn, cookie), Fr(~ticket) ]
+  -->
+  [ Resumed(conn), Out(<conn, cookie, ~ticket>) ]
+
+lemma secrecy_app_secret:
+  "All s #i. Secret(s) @ i ==> not(Ex #j. K(s) @ j)"
+
+lemma established_requires_validated:
+  "All conn app #i. Established(conn, app) @ i ==> Ex cookie #j. Validated(conn, cookie) @ j & j < i"
+
+lemma resumed_after_retry:
+  "All conn #i. Resumed(conn) @ i ==> Ex cookie #j. Retry(conn, cookie) @ j & j < i"
+
+end

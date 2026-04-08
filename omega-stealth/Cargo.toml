@@ -1,0 +1,10 @@
+[package]
+name = "omega-stealth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Omega stealth policies, modes and traffic morphing primitives"
+
+[dependencies]
+omega-transport = { path = "../omega-transport" }
+serde = { workspace = true }

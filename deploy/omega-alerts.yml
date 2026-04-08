@@ -1,0 +1,56 @@
+﻿groups:
+  - name: omega-rollout
+    rules:
+      - alert: OmegaLossBudgetExceeded
+        expr: omega_runtime_avg_loss_ratio > 0.08
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Omega loss budget exceeded
+          description: Average runtime loss ratio is above the rollout guard budget.
+
+      - alert: OmegaBlackholeSuspected
+        expr: omega_runtime_blackhole_sessions > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Omega blackhole suspicion detected
+          description: At least one session is in blackhole suspicion state.
+
+      - alert: OmegaHandshakeBacklog
+        expr: omega_handshake_pending > 32
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Omega handshake backlog growing
+          description: Pending handshake backlog suggests abuse, overload, or auth path regression.
+
+      - alert: OmegaPolicyConflicts
+        expr: omega_control_plane_policy_conflicts > 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Omega control-plane policy conflict detected
+          description: Rollout must be frozen until deterministic policy conflicts are resolved.
+
+      - alert: OmegaFabricHealthyNodesLow
+        expr: omega_fabric_healthy_nodes < 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Omega fabric healthy node floor violated
+          description: Healthy node count is below the minimum rollout guard requirement.
+
+      - alert: OmegaFailoverStorm
+        expr: increase(omega_fabric_failover_total[5m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Omega fabric failover storm
+          description: Fabric failovers are accumulating too quickly and may indicate route instability.

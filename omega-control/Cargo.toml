@@ -1,0 +1,16 @@
+﻿[package]
+name = "omega-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Omega control-plane state, identity and policy model"
+
+[dependencies]
+omega-core-wire = { path = "../omega-core-wire" }
+omega-stealth = { path = "../omega-stealth" }
+anyhow = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
