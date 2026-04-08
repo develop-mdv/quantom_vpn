@@ -290,7 +290,7 @@ fn failure_summary(scope: ClientFailureScope, error: &str) -> String {
             format!("client could not complete the secure handshake: {error}")
         }
         ClientFailureScope::Routing => {
-            format!("local tunnel routing failed after handshake: {error}")
+            format!("local tunnel routing failed: {error}")
         }
         ClientFailureScope::Transport => {
             format!("connected session stopped unexpectedly: {error}")
@@ -318,7 +318,7 @@ fn suggest_action(scope: ClientFailureScope, error: &str) -> String {
         || lower.contains("route")
         || lower.contains("adapter")
     {
-        return "close other VPN adapters, then reconnect so the client can rebuild local tunnel routes cleanly".to_string();
+        return "close other VPN adapters, or run the client from an elevated PowerShell so it can rebuild local tunnel routes cleanly".to_string();
     }
 
     if matches!(scope, ClientFailureScope::Handshake)

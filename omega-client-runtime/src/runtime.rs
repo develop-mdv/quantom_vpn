@@ -642,7 +642,50 @@ fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, state: Option<&Windows
 }
 
 #[cfg(target_os = "windows")]
-fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientConfig) {
+fn read_windows_route_table() -> Result<String, String> {
+    use std::process::Command;
+
+    let output = Command::new("route")
+        .args(["print", "-4"])
+        .output()
+        .map_err(|err| format!("failed to inspect Windows routes: {err}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(format!("failed to inspect Windows routes: {detail}"));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn detect_competing_windows_full_tunnel_routes(route_print: &str) -> Vec<String> {
+    route_print
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let cols = trimmed.split_whitespace().collect::<Vec<_>>();
+            if cols.len() < 5 {
+                return None;
+            }
+            let is_lower_half = cols[0] == "0.0.0.0" && cols[1] == "128.0.0.0";
+            let is_upper_half = cols[0] == "128.0.0.0" && cols[1] == "128.0.0.0";
+            if is_lower_half || is_upper_half {
+                Some(trimmed.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientConfig) -> Result<(), String> {
     let mut routes = vec![WindowsManagedRoute {
         destination: server_ip.to_string(),
         mask: "255.255.255.255".to_string(),
@@ -669,15 +712,34 @@ fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientCo
         }
     }
 
+    let before = read_windows_route_table()?;
+    let before_conflicts = detect_competing_windows_full_tunnel_routes(&before);
+
     for route in &routes {
         delete_windows_route(route);
     }
 
+    let after = read_windows_route_table()?;
+    let after_conflicts = detect_competing_windows_full_tunnel_routes(&after);
+
+    if !after_conflicts.is_empty() {
+        let conflict_lines = after_conflicts.join(" | ");
+        if !before_conflicts.is_empty() {
+            return Err(format!(
+                "detected competing full-tunnel Windows routes: {conflict_lines}. They still remain after cleanup attempt, which usually means this terminal is not elevated. Run PowerShell as Administrator and remove/disable the other VPN or tun2socks adapter before reconnecting"
+            ));
+        }
+        return Err(format!(
+            "detected conflicting full-tunnel Windows routes after cleanup: {conflict_lines}. Remove the competing VPN routes before reconnecting"
+        ));
+    }
+
     tracing::info!(server_ip = %server_ip, routes = routes.len(), "cleared stale Windows Omega routes before handshake");
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cleanup_stale_windows_routes(_: std::net::Ipv4Addr, _: &ClientConfig) {}
+fn cleanup_stale_windows_routes(_: std::net::Ipv4Addr, _: &ClientConfig) -> Result<(), String> { Ok(()) }
 
 #[cfg(not(target_os = "windows"))]
 fn configure_windows_routing(
@@ -1519,7 +1581,11 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 
         #[cfg(target_os = "windows")]
         let mut windows_route_guard = if let std::net::SocketAddr::V4(v4) = server_addr {
-            cleanup_stale_windows_routes(*v4.ip(), &client_config);
+            failure_scope = ClientFailureScope::Routing;
+            if let Err(err) = cleanup_stale_windows_routes(*v4.ip(), &client_config) {
+                diagnostics.set_status("routing_conflict");
+                return Err(anyhow::anyhow!(err));
+            }
             Some(WindowsRouteGuard::new(*v4.ip()))
         } else {
             None

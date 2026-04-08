@@ -120,8 +120,12 @@ pub async fn reconnect(config: &DesktopAppConfig) -> anyhow::Result<DesktopStatu
 }
 
 pub fn status(config: &DesktopAppConfig) -> anyhow::Result<DesktopStatus> {
-    let pid = read_pid(&config.pid_path)?;
+    let mut pid = read_pid(&config.pid_path)?;
     let runtime_running = pid.map(is_process_running).unwrap_or(false);
+    if pid.is_some() && !runtime_running {
+        clear_pid(&config.pid_path)?;
+        pid = None;
+    }
     let lifecycle = load_lifecycle_snapshot(&config.lifecycle_path)?;
     let diagnostics = load_diagnostics_snapshot(&config.diagnostics_path)?;
     Ok(DesktopStatus {
