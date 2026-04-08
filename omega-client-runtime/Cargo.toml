@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "omega-client-runtime"
 version.workspace = true
 edition.workspace = true

@@ -205,7 +205,7 @@ jobs:
              OMEGA_SSH_PORT='$SSH_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/setup_nat.sh'"
+             sudo bash '$REMOTE_DIR/setup_nat.sh'"
 
       - name: Run post-bootstrap diagnostics
         env:
@@ -251,7 +251,7 @@ jobs:
              OMEGA_SSH_PORT='$SSH_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/diagnose_server.sh'"
+             sudo bash '$REMOTE_DIR/diagnose_server.sh'"
 
       - name: Verify omega-server status
         run: |

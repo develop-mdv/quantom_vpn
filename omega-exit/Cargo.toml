@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "omega-exit"
 version.workspace = true
 edition.workspace = true

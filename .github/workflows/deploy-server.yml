@@ -182,7 +182,7 @@ jobs:
              OMEGA_ALERTS_DEST='${DEPLOY_ALERTS_DEST:-/opt/omega/omega-alerts.yml}' \
              OMEGA_PROMETHEUS_SERVICE_NAME='${DEPLOY_PROMETHEUS_SERVICE_NAME:-}' \
              OMEGA_RELEASE_ID='$GITHUB_SHA' \
-             sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service' '$REMOTE_DIR/omega-alerts.yml'"
+             sudo bash '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service' '$REMOTE_DIR/omega-alerts.yml'"
 
       - name: Re-apply network rules
         env:
@@ -211,7 +211,7 @@ jobs:
              OMEGA_SSH_PORT='${PORT}' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/setup_nat.sh'"
+             sudo bash '$REMOTE_DIR/setup_nat.sh'"
 
       - name: Run post-deploy diagnostics
         env:
@@ -258,7 +258,7 @@ jobs:
              OMEGA_SSH_PORT='${PORT}' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/diagnose_server.sh'"
+             sudo bash '$REMOTE_DIR/diagnose_server.sh'"
 
 
 
