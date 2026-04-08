@@ -50,6 +50,11 @@ SERVER_BIN="${OMEGA_SERVER_BIN:-/opt/omega/omega-server}"
 NFT_INET_TABLE="omega_vpn"
 NFT_NAT_TABLE="omega_vpn_nat"
 
+export_runtime_env_defaults() {
+    export OMEGA_RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-$RUNTIME_SNAPSHOT}"
+    export OMEGA_OBSERVABILITY_SNAPSHOT="${OMEGA_OBSERVABILITY_SNAPSHOT:-$OBSERVABILITY_SNAPSHOT}"
+}
+
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
 fi
@@ -272,6 +277,7 @@ if [[ -f "$OBSERVABILITY_SNAPSHOT" ]]; then
     fi
 
     if [[ -x "$SERVER_BIN" ]]; then
+        export_runtime_env_defaults
         if "$SERVER_BIN" admin assert_rollout_guard >/dev/null 2>&1; then
             pass "Admin rollout guard check passed."
         else
@@ -287,7 +293,7 @@ fi
 if (( fail_count == 0 )); then
     pass "Server path looks Steam/Dota-ready for UDP relay traffic from the VPN side."
 else
-    fail "Server path is not yet healthy enough for a reliable gaming profile."
+    echo "[FAIL] Server path is not yet healthy enough for a reliable gaming profile."
 fi
 
 warn "Cloud security groups and provider ACLs are outside this script; verify outbound UDP is open."
@@ -299,7 +305,6 @@ echo "[INFO] Summary: ${pass_count} passed, ${warn_count} warnings, ${fail_count
 if (( fail_count > 0 )); then
     exit 1
 fi
-
 
 
 
