@@ -23,6 +23,15 @@ UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
 PREVIOUS_UNIT=""
 PREVIOUS_ALERTS=""
 
+export_runtime_env_defaults() {
+  export OMEGA_IDENTITY_DB="${OMEGA_IDENTITY_DB:-$INSTALL_DIR/state/identity.json}"
+  export OMEGA_SESSION_SNAPSHOT="${OMEGA_SESSION_SNAPSHOT:-$INSTALL_DIR/state/sessions.json}"
+  export OMEGA_RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-$INSTALL_DIR/state/runtime.json}"
+  export OMEGA_OBSERVABILITY_SNAPSHOT="${OMEGA_OBSERVABILITY_SNAPSHOT:-$INSTALL_DIR/state/observability.json}"
+  export OMEGA_TRACE_JOURNAL="${OMEGA_TRACE_JOURNAL:-$INSTALL_DIR/state/trace.ndjson}"
+  export OMEGA_ADMIN_COMMANDS="${OMEGA_ADMIN_COMMANDS:-$INSTALL_DIR/state/admin_commands.ndjson}"
+}
+
 cleanup() {
   if [[ -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
     rm -f "$PREVIOUS_UNIT"
@@ -167,6 +176,8 @@ run_canary_guard() {
   local attempts="${1:-$CANARY_ATTEMPTS}"
   local delay="${2:-$CANARY_DELAY_SECS}"
 
+  export_runtime_env_defaults
+  echo "[INFO] Expecting observability snapshot at $OMEGA_OBSERVABILITY_SNAPSHOT"
   echo "[INFO] Running rollout guard canary checks"
   for ((i = 1; i <= attempts; i++)); do
     if "$TARGET_LINK" admin assert_rollout_guard; then

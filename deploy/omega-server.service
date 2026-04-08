@@ -20,6 +20,8 @@ Environment=OMEGA_UDP_SNDBUF=8388608
 Environment=OMEGA_IDENTITY_DB=/opt/omega/state/identity.json
 Environment=OMEGA_SESSION_SNAPSHOT=/opt/omega/state/sessions.json
 Environment=OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
+Environment=OMEGA_OBSERVABILITY_SNAPSHOT=/opt/omega/state/observability.json
+Environment=OMEGA_TRACE_JOURNAL=/opt/omega/state/trace.ndjson
 Environment=OMEGA_ADMIN_COMMANDS=/opt/omega/state/admin_commands.ndjson
 EnvironmentFile=-/etc/default/omega-server
 Restart=always
