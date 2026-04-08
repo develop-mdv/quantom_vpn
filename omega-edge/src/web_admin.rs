@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,12 +52,14 @@ async fn handle_connection(
     let request = read_request(&mut stream).await?;
 
     let response = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/healthz") => text_response(200, "OK", "ok"),
         ("GET", "/") => {
-            let html = render_page(
-                &identity_store,
-                &session_manager,
-                request.query.get("msg").cloned(),
-            );
+            let identity = identity_store.clone();
+            let sessions = session_manager.clone();
+            let message = request.query.get("msg").cloned();
+            let html = tokio::task::spawn_blocking(move || render_page(&identity, &sessions, message))
+                .await
+                .context("web admin renderer task failed")?;
             html_response(200, "OK", html)
         }
         ("POST", "/users/create") => {
@@ -179,7 +182,9 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     let mut content_len = 0usize;
 
     loop {
-        let n = stream.read(&mut tmp).await?;
+        let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut tmp))
+            .await
+            .context("timed out while reading HTTP request")??;
         if n == 0 {
             break;
         }
@@ -237,9 +242,11 @@ fn render_page(
     session_manager: &SessionManager,
     message: Option<String>,
 ) -> String {
-    let users = identity_store.list_users();
+    let inventory = identity_store.admin_inventory();
     let sessions = session_manager.snapshot();
     let client_server = client_server_hint();
+    let users = inventory.users;
+    let devices_by_user = inventory.devices_by_user;
 
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Omega Admin</title>");
@@ -304,7 +311,6 @@ fn render_page(
     out.push_str("<thead><tr><th>User</th><th>Status/Limits</th><th>Devices</th><th>Actions</th></tr></thead><tbody>");
 
     for user in users {
-        let devices = identity_store.list_user_devices(&user.user_id);
         out.push_str("<tr><td>");
         out.push_str(&escape_html(&user.user_id));
         out.push_str("</td><td>");
@@ -314,9 +320,7 @@ fn render_page(
         ));
         out.push_str("</td><td>");
 
-        if devices.is_empty() {
-            out.push_str("-");
-        } else {
+        if let Some(devices) = devices_by_user.get(&user.user_id) {
             for device in devices {
                 out.push_str("<div style=\"margin-bottom:8px;padding:6px;border:1px solid #e5e7eb;border-radius:8px\">");
                 out.push_str(&format!(
@@ -351,6 +355,8 @@ fn render_page(
                 }
                 out.push_str("</div>");
             }
+        } else {
+            out.push_str("-");
         }
 
         out.push_str("</td><td>");

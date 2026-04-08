@@ -203,6 +203,12 @@ pub struct ControlPlaneSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct AdminInventory {
+    pub users: Vec<UserRecord>,
+    pub devices_by_user: HashMap<String, Vec<DeviceRecord>>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionActivation {
     pub flow_id: String,
     pub user_id: String,
@@ -372,6 +378,35 @@ impl ControlPlaneStore {
             .collect::<Vec<_>>();
         users.sort_by(|a, b| a.user_id.cmp(&b.user_id));
         users
+    }
+
+    pub fn admin_inventory(&self) -> AdminInventory {
+        let _ = self.refresh_from_disk();
+        let inner = self.inner.read().unwrap();
+
+        let mut users = inner
+            .users
+            .values()
+            .filter(|user| !matches!(user.status, UserStatus::Deleted))
+            .cloned()
+            .collect::<Vec<_>>();
+        users.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+
+        let mut devices_by_user: HashMap<String, Vec<DeviceRecord>> = HashMap::new();
+        for device in inner.devices.values().filter(|device| !device.revoked) {
+            devices_by_user
+                .entry(device.user_id.clone())
+                .or_default()
+                .push(device.clone());
+        }
+        for devices in devices_by_user.values_mut() {
+            devices.sort_by(|a, b| a.device_id.cmp(&b.device_id));
+        }
+
+        AdminInventory {
+            users,
+            devices_by_user,
+        }
     }
 
     pub fn register_device(

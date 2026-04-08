@@ -233,10 +233,17 @@ pub async fn wait_for_runtime_stop(path: PathBuf) -> RuntimeControlCommand {
 pub fn load_lifecycle_snapshot(path: &Path) -> anyhow::Result<Option<ClientLifecycleSnapshot>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => {
-            let snapshot = serde_json::from_str(&raw).with_context(|| {
-                format!("failed to parse lifecycle snapshot {}", path.display())
-            })?;
-            Ok(Some(snapshot))
+            match serde_json::from_str(&raw) {
+                Ok(snapshot) => Ok(Some(snapshot)),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path.display(),
+                        "failed to parse lifecycle snapshot; treating it as stale state"
+                    );
+                    Ok(None)
+                }
+            }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err)

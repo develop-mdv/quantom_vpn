@@ -404,6 +404,33 @@ struct WindowsNetworkState {
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsRouteGuard {
+    server_ip: std::net::Ipv4Addr,
+    state: Option<WindowsNetworkState>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsRouteGuard {
+    fn new(server_ip: std::net::Ipv4Addr) -> Self {
+        Self {
+            server_ip,
+            state: None,
+        }
+    }
+
+    fn install(&mut self, state: WindowsNetworkState) {
+        self.state = Some(state);
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsRouteGuard {
+    fn drop(&mut self) {
+        cleanup_windows_routing(self.server_ip, self.state.as_ref());
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn configure_windows_routing(
     server_ip: std::net::Ipv4Addr,
     tunnel_ip: std::net::Ipv4Addr,
@@ -613,6 +640,44 @@ fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, state: Option<&Windows
         mask: "255.255.255.255".to_string(),
     });
 }
+
+#[cfg(target_os = "windows")]
+fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientConfig) {
+    let mut routes = vec![WindowsManagedRoute {
+        destination: server_ip.to_string(),
+        mask: "255.255.255.255".to_string(),
+    }];
+
+    match config.tunnel_mode {
+        TunnelMode::Full => {
+            routes.push(WindowsManagedRoute {
+                destination: "0.0.0.0".to_string(),
+                mask: "128.0.0.0".to_string(),
+            });
+            routes.push(WindowsManagedRoute {
+                destination: "128.0.0.0".to_string(),
+                mask: "128.0.0.0".to_string(),
+            });
+        }
+        TunnelMode::Split => {
+            for route in &config.split_routes {
+                routes.push(WindowsManagedRoute {
+                    destination: route.destination.clone(),
+                    mask: route.netmask.clone(),
+                });
+            }
+        }
+    }
+
+    for route in &routes {
+        delete_windows_route(route);
+    }
+
+    tracing::info!(server_ip = %server_ip, routes = routes.len(), "cleared stale Windows Omega routes before handshake");
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cleanup_stale_windows_routes(_: std::net::Ipv4Addr, _: &ClientConfig) {}
 
 #[cfg(not(target_os = "windows"))]
 fn configure_windows_routing(
@@ -1452,6 +1517,14 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         diagnostics.spawn_writer();
         diagnostics.set_status("starting");
 
+        #[cfg(target_os = "windows")]
+        let mut windows_route_guard = if let std::net::SocketAddr::V4(v4) = server_addr {
+            cleanup_stale_windows_routes(*v4.ip(), &client_config);
+            Some(WindowsRouteGuard::new(*v4.ip()))
+        } else {
+            None
+        };
+
         use socket2::{Domain, Protocol, Socket, Type};
 
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -1519,7 +1592,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 
         failure_scope = ClientFailureScope::Routing;
         #[cfg(target_os = "windows")]
-        let windows_state = if let std::net::SocketAddr::V4(v4) = server_addr {
+        if let std::net::SocketAddr::V4(v4) = server_addr {
             let state = configure_windows_routing(
                 *v4.ip(),
                 tun_ip,
@@ -1545,10 +1618,12 @@ pub async fn run_from_env() -> anyhow::Result<()> {
                     }
                 }
             }
-            state
-        } else {
-            None
-        };
+            if let Some(state) = state {
+                if let Some(guard) = windows_route_guard.as_mut() {
+                    guard.install(state);
+                }
+            }
+        }
 
         let diag_dns_servers = client_config.dns_servers.clone();
         let diag_enabled = client_config.network_diag;
@@ -1647,13 +1722,6 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             format!("stopping runtime: {stop_reason}"),
         );
         tracing::info!(reason = %stop_reason, "shutting down");
-
-        #[cfg(target_os = "windows")]
-        {
-            if let std::net::SocketAddr::V4(v4) = server_addr {
-                cleanup_windows_routing(*v4.ip(), windows_state.as_ref());
-            }
-        }
 
         diagnostics.set_status("stopped");
         lifecycle.mark_stopped("desktop runtime stopped cleanly");

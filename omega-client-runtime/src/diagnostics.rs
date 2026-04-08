@@ -508,15 +508,17 @@ fn recovery_strategy_label(strategy: RecoveryStrategy) -> &'static str {
 pub fn load_snapshot(path: &Path) -> anyhow::Result<Option<ClientDiagnosticsSnapshot>> {
     match std::fs::read_to_string(path) {
         Ok(raw) => {
-            let snapshot = serde_json::from_str(&raw)
-                .map_err(anyhow::Error::from)
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "failed to parse diagnostics snapshot {}: {err}",
-                        path.display()
-                    )
-                })?;
-            Ok(Some(snapshot))
+            match serde_json::from_str(&raw) {
+                Ok(snapshot) => Ok(Some(snapshot)),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %path.display(),
+                        "failed to parse diagnostics snapshot; treating it as stale state"
+                    );
+                    Ok(None)
+                }
+            }
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(anyhow::anyhow!(

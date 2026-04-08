@@ -33,7 +33,7 @@ impl ConnectionProfile {
             .to_ascii_lowercase()
             .as_str()
         {
-            "general" | "internet" | "default" => Self::GeneralInternet,
+            "general" | "internet" | "default" | "general_internet" => Self::GeneralInternet,
             "restricted" | "fallback" | "restricted_fallback" | "tcp-fallback" => {
                 Self::RestrictedFallback
             }
