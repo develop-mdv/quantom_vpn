@@ -1,4 +1,4 @@
-﻿# Omega VPN
+# Omega VPN
 
 `Omega VPN` - это Rust workspace с собственным `Omega v2` VPN-протоколом, hybrid post-quantum handshake, transport v2, typed control plane, relay fabric, desktop launcher/runtime split и встроенным observability/security контуром.
 
@@ -78,9 +78,12 @@ cargo run -p omega-server
 
 ### 4. Настроить desktop client
 
+Если сервер развернут через deploy/omega-server.service, клиенту нужно указывать server_ip:443. 51820 остается только кодовым дефолтом для локального запуска без systemd unit и без OMEGA_BIND.
+
+
 ```bash
 cargo run -p omega-client-app -- setup \
-  --server <server_ip>:51820 \
+  --server <server_ip>:443 \
   --device-id <device_uuid> \
   --device-token <device_token_hex> \
   --device-name laptop \
@@ -98,7 +101,7 @@ cargo run -p omega-client-app -- status --advanced
 Legacy compatibility path по-прежнему доступен:
 
 ```bash
-OMEGA_SERVER=<server_ip>:51820 \
+OMEGA_SERVER=<server_ip>:443 \
 OMEGA_DEVICE_ID=<device_uuid> \
 OMEGA_DEVICE_TOKEN=<device_token_hex> \
 OMEGA_DEVICE_NAME=laptop \

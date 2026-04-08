@@ -14,7 +14,7 @@
 
 | Переменная | Default | Значение |
 | --- | --- | --- |
-| `OMEGA_SERVER` | `127.0.0.1:51820` | Адрес сервера. Для реального подключения почти всегда задается явно. |
+| `OMEGA_SERVER` | `127.0.0.1:51820` | Адрес сервера. Для production deployment из `deploy/omega-server.service` фактический endpoint обычно `server_ip:443`. |
 | `OMEGA_DEVICE_ID` | нет | UUID устройства из `register_device`. |
 | `OMEGA_DEVICE_TOKEN` | нет | Hex token устройства из `register_device`. |
 
@@ -65,7 +65,7 @@
 
 | Поле | Default | Значение |
 | --- | --- | --- |
-| `server_endpoint` | `127.0.0.1:51820` | Что launcher передаст в `OMEGA_SERVER`. |
+| `server_endpoint` | `127.0.0.1:51820` | Что launcher передаст в `OMEGA_SERVER`. Для production deployment обычно меняется на `server_ip:443`. |
 | `device_id` | пусто | Сохраненный device id. |
 | `device_token` | пусто | Сохраненный device token. |
 | `device_name` | hostname fallback | Имя устройства для launcher/runtime. |
@@ -80,7 +80,7 @@
 
 | Переменная | Default | Значение |
 | --- | --- | --- |
-| `OMEGA_BIND` | `0.0.0.0:51820` | UDP bind address сервера. |
+| `OMEGA_BIND` | `0.0.0.0:51820` | UDP bind address сервера. В production unit сейчас явно переопределен на `0.0.0.0:443`. |
 | `OMEGA_PROFILE` | `gaming` | Профиль сервера: `gaming`, `general`, `restricted`. |
 | `OMEGA_MORPHING` | profile-based | `full`, `balanced`, `off`. |
 | `OMEGA_PERSONA` | profile-based | Persona override: `randomized`, `quic_like`, `hostile_network`, `off`. |
@@ -98,7 +98,7 @@
 | Переменная | Default | Значение |
 | --- | --- | --- |
 | `OMEGA_METRICS_BIND` | `127.0.0.1:9090` | HTTP listener Prometheus exporter. |
-| `OMEGA_ADMIN_WEB_BIND` | `127.0.0.1:8081` | Built-in web admin bind address. |
+| `OMEGA_ADMIN_WEB_BIND` | `127.0.0.1:8081` | Built-in web admin bind address. Production unit сейчас переопределяет это значение на `0.0.0.0:8081`, то есть UI доступен публично. |
 | `OMEGA_ADMIN_WEB_DISABLE` | `false` | Полностью отключает web admin. |
 | `OMEGA_CLIENT_SERVER` | не задан | Только UI hint: какой `OMEGA_SERVER` показывать в web admin. |
 | `OMEGA_IDENTITY_DB` | `state/identity.json` | Legacy identity snapshot для migration/import path. |
@@ -157,7 +157,7 @@
 | `OMEGA_VPN_PROTO` | `udp` | Ожидаемый transport протокол. |
 | `OMEGA_VPN_IPV6_MODE` | `disabled` | Текущий datapath ожидает IPv4-only tunnel mode. |
 | `OMEGA_SSH_PORT` | `22` | SSH port, который нельзя потерять при bootstrap. |
-| `OMEGA_ADMIN_WEB_PUBLIC` | `0` | Публиковать ли built-in admin UI наружу. |
+| `OMEGA_ADMIN_WEB_PUBLIC` | `0` | Публиковать ли built-in admin UI наружу. В production deploy workflow сейчас явно включает `1`. |
 | `OMEGA_ADMIN_WEB_PORT` | `8081` | TCP port built-in admin UI. |
 | `OMEGA_METRICS_PUBLIC` | `0` | Публиковать ли Prometheus metrics наружу. |
 | `OMEGA_METRICS_PORT` | `9090` | TCP port Prometheus metrics. |

@@ -47,9 +47,11 @@ cargo run -p omega-server
 
 ### 4. Настроить desktop client
 
+Если используешь production deployment через deploy/omega-server.service, указывай server_ip:443. Порт 51820 относится только к локальному дефолту при запуске bare cargo run -p omega-server без переопределения OMEGA_BIND.
+
 ```bash
 cargo run -p omega-client-app -- setup \
-  --server <server_ip>:51820 \
+  --server <server_ip>:443 \
   --device-id <device_uuid> \
   --device-token <device_token_hex> \
   --device-name laptop \
@@ -67,7 +69,7 @@ cargo run -p omega-client-app -- status --advanced
 ### Legacy env-driven запуск
 
 ```bash
-OMEGA_SERVER=<server_ip>:51820 \
+OMEGA_SERVER=<server_ip>:443 \
 OMEGA_DEVICE_ID=<device_uuid> \
 OMEGA_DEVICE_TOKEN=<device_token_hex> \
 OMEGA_DEVICE_NAME="laptop" \
@@ -103,7 +105,7 @@ cargo run -p omega-server -- admin show_audit --limit 50
 
 ### Built-in admin
 
-По умолчанию сервер поднимает built-in web admin на `127.0.0.1:8081`, если не задан `OMEGA_ADMIN_WEB_DISABLE=true`.
+По текущему production deploy built-in web admin поднят публично на `0.0.0.0:8081`, если не задан `OMEGA_ADMIN_WEB_DISABLE=true`. Это временно удобно для первичной настройки, но без authentication такой доступ небезопасен.
 
 ### Основные server files
 
