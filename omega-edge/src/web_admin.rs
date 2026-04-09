@@ -57,10 +57,30 @@ async fn handle_connection(
             let identity = identity_store.clone();
             let sessions = session_manager.clone();
             let message = request.query.get("msg").cloned();
-            let html = tokio::task::spawn_blocking(move || render_page(&identity, &sessions, message))
-                .await
-                .context("web admin renderer task failed")?;
-            html_response(200, "OK", html)
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(move || render_page(&identity, &sessions, message)),
+            )
+            .await
+            {
+                Ok(Ok(html)) => html_response(200, "OK", html),
+                Ok(Err(err)) => {
+                    tracing::error!(error = %err, "web admin renderer task failed");
+                    text_response(
+                        500,
+                        "Internal Server Error",
+                        "admin page render failed; try /healthz and refresh",
+                    )
+                }
+                Err(_) => {
+                    tracing::error!("web admin root render timed out");
+                    text_response(
+                        503,
+                        "Service Unavailable",
+                        "admin page render timed out; try /healthz and refresh",
+                    )
+                }
+            }
         }
         ("POST", "/users/create") => {
             let form = parse_form(&request.body);

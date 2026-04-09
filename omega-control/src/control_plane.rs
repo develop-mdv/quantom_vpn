@@ -381,7 +381,6 @@ impl ControlPlaneStore {
     }
 
     pub fn admin_inventory(&self) -> AdminInventory {
-        let _ = self.refresh_from_disk();
         let inner = self.inner.read().unwrap();
 
         let mut users = inner
