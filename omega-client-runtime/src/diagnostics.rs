@@ -10,6 +10,7 @@ use omega_transport::reliability::{RecoveryStrategy, ReliabilitySnapshot};
 use omega_transport::transport_v2::{PathBelief, PathMode, TransportSnapshot};
 
 use crate::config::ClientConfig;
+use crate::handshake::HandshakeDebugInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +52,24 @@ pub struct ClientDiagnosticsSnapshot {
     pub handshake_timeout_ms: u64,
     pub handshake_backoff_ms: u64,
     pub handshake_rtt_ms: Option<u64>,
+    #[serde(default = "default_handshake_phase")]
+    pub handshake_phase: String,
+    #[serde(default)]
+    pub handshake_local_addr: Option<String>,
+    #[serde(default)]
+    pub handshake_packets_sent: u32,
+    #[serde(default)]
+    pub handshake_packets_received: u32,
+    #[serde(default)]
+    pub handshake_stun_packets_received: u32,
+    #[serde(default)]
+    pub handshake_unmatched_packets_received: u32,
+    #[serde(default)]
+    pub handshake_last_responder: Option<String>,
+    #[serde(default)]
+    pub handshake_vpn_tcp_hint: Option<String>,
+    #[serde(default)]
+    pub handshake_admin_tcp_hint: Option<String>,
     pub interface_name: Option<String>,
     pub tunnel_ip: Option<String>,
     pub udp_dns_check: UdpCheckStatus,
@@ -145,6 +164,15 @@ impl ClientDiagnostics {
                 handshake_timeout_ms: config.handshake_timeout_ms,
                 handshake_backoff_ms: config.handshake_backoff_ms,
                 handshake_rtt_ms: None,
+                handshake_phase: "waiting_retry".to_string(),
+                handshake_local_addr: None,
+                handshake_packets_sent: 0,
+                handshake_packets_received: 0,
+                handshake_stun_packets_received: 0,
+                handshake_unmatched_packets_received: 0,
+                handshake_last_responder: None,
+                handshake_vpn_tcp_hint: None,
+                handshake_admin_tcp_hint: None,
                 interface_name: None,
                 tunnel_ip: None,
                 udp_dns_check: UdpCheckStatus::Pending,
@@ -232,6 +260,26 @@ impl ClientDiagnostics {
             let (quality, suspected_issue) = summarize_path(snapshot);
             snapshot.path_quality = quality;
             snapshot.suspected_issue = suspected_issue;
+        });
+        self.flush();
+    }
+
+    pub fn record_handshake_debug(&self, debug: &HandshakeDebugInfo, failure: Option<&str>) {
+        self.with_snapshot(|snapshot| {
+            snapshot.handshake_phase = debug.phase.label().to_string();
+            snapshot.handshake_local_addr = debug.local_addr.map(|addr| addr.to_string());
+            snapshot.handshake_packets_sent = debug.packets_sent;
+            snapshot.handshake_packets_received = debug.packets_received;
+            snapshot.handshake_stun_packets_received = debug.stun_packets_received;
+            snapshot.handshake_unmatched_packets_received = debug.unmatched_packets_received;
+            snapshot.handshake_last_responder = debug.last_responder.map(|addr| addr.to_string());
+            snapshot.handshake_vpn_tcp_hint = debug.vpn_tcp_hint.clone();
+            snapshot.handshake_admin_tcp_hint = debug.admin_tcp_hint.clone();
+
+            if failure.is_some() {
+                snapshot.status = "handshake_failed".to_string();
+                snapshot.suspected_issue = classify_handshake_issue(snapshot);
+            }
         });
         self.flush();
     }
@@ -397,6 +445,10 @@ impl ClientDiagnostics {
 }
 
 fn summarize_path(snapshot: &ClientDiagnosticsSnapshot) -> (String, Option<String>) {
+    if snapshot.status == "handshake_failed" {
+        return ("critical".to_string(), classify_handshake_issue(snapshot));
+    }
+
     let udp_diag_failed = matches!(snapshot.udp_dns_check, UdpCheckStatus::Failed { .. });
 
     if udp_diag_failed {
@@ -470,6 +522,37 @@ fn summarize_path(snapshot: &ClientDiagnosticsSnapshot) -> (String, Option<Strin
     ("good".to_string(), None)
 }
 
+fn classify_handshake_issue(snapshot: &ClientDiagnosticsSnapshot) -> Option<String> {
+    if snapshot.handshake_packets_received == 0 {
+        let mut details =
+            vec!["the VPN server did not answer any initial UDP handshake packets".to_string()];
+        if let Some(hint) = snapshot.handshake_vpn_tcp_hint.as_deref() {
+            details.push(format!("tcp 443 probe={hint}"));
+        }
+        if let Some(hint) = snapshot.handshake_admin_tcp_hint.as_deref() {
+            details.push(format!("admin 8081 probe={hint}"));
+        }
+        return Some(format!(
+            "{}; this usually means the server service, UDP 443, NAT, or upstream firewall is down",
+            details.join(", ")
+        ));
+    }
+
+    if snapshot.handshake_stun_packets_received == 0 {
+        return Some(
+            "some network packets were received during handshake, but none decoded as Omega/STUN; check whether another service or middlebox is answering on the same endpoint".to_string(),
+        );
+    }
+
+    if snapshot.handshake_unmatched_packets_received > 0 {
+        return Some(
+            "the client received STUN-like packets during handshake, but they did not match the active transaction; delayed packets, NAT rebinding, or another responder may be interfering".to_string(),
+        );
+    }
+
+    None
+}
+
 fn mode_label(mode: PathMode) -> &'static str {
     match mode {
         PathMode::Stable => "stable",
@@ -499,6 +582,10 @@ fn recovery_strategy_label(strategy: RecoveryStrategy) -> &'static str {
         RecoveryStrategy::FecMedium => "fec_medium",
         RecoveryStrategy::FecHigh => "fec_high",
     }
+}
+
+fn default_handshake_phase() -> String {
+    "waiting_retry".to_string()
 }
 
 pub fn load_snapshot(path: &Path) -> anyhow::Result<Option<ClientDiagnosticsSnapshot>> {
@@ -588,6 +675,53 @@ mod tests {
             .expect("diagnostics file should be readable")
             .expect("diagnostics file should exist");
         assert_eq!(snapshot.status, "routing_conflict");
+    }
+
+    #[test]
+    fn load_snapshot_defaults_missing_handshake_debug_fields() {
+        let dir = temp_test_dir("load_snapshot_defaults_missing_handshake_debug_fields");
+        let path = dir.join("diagnostics.json");
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &test_config(&path),
+            "127.0.0.1:443".parse().unwrap(),
+            "laptop",
+            "windows",
+        );
+
+        diagnostics.flush();
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let object = value
+            .as_object_mut()
+            .expect("diagnostics should be an object");
+        for field in [
+            "handshake_phase",
+            "handshake_local_addr",
+            "handshake_packets_sent",
+            "handshake_packets_received",
+            "handshake_stun_packets_received",
+            "handshake_unmatched_packets_received",
+            "handshake_last_responder",
+            "handshake_vpn_tcp_hint",
+            "handshake_admin_tcp_hint",
+        ] {
+            object.remove(field);
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let snapshot = load_snapshot(&path)
+            .expect("legacy diagnostics file should be readable")
+            .expect("legacy diagnostics file should exist");
+
+        assert_eq!(snapshot.handshake_phase, "waiting_retry");
+        assert_eq!(snapshot.handshake_packets_sent, 0);
+        assert_eq!(snapshot.handshake_packets_received, 0);
+        assert!(snapshot.handshake_local_addr.is_none());
+        assert!(snapshot.handshake_last_responder.is_none());
+        assert!(snapshot.handshake_vpn_tcp_hint.is_none());
+        assert!(snapshot.handshake_admin_tcp_hint.is_none());
     }
 
     fn test_config(diagnostics_path: &Path) -> ClientConfig {

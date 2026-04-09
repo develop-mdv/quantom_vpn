@@ -265,7 +265,9 @@ fn prompt(label: &str) -> anyhow::Result<String> {
 fn parse_profile(value: &str) -> anyhow::Result<ConnectionProfile> {
     match value.trim().to_ascii_lowercase().as_str() {
         "gaming" => Ok(ConnectionProfile::Gaming),
-        "general" | "internet" | "default" | "general_internet" => Ok(ConnectionProfile::GeneralInternet),
+        "general" | "internet" | "default" | "general_internet" => {
+            Ok(ConnectionProfile::GeneralInternet)
+        }
         "restricted" | "fallback" | "restricted_fallback" => {
             Ok(ConnectionProfile::RestrictedFallback)
         }

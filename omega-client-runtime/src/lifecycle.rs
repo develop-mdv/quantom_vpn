@@ -232,19 +232,17 @@ pub async fn wait_for_runtime_stop(path: PathBuf) -> RuntimeControlCommand {
 
 pub fn load_lifecycle_snapshot(path: &Path) -> anyhow::Result<Option<ClientLifecycleSnapshot>> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            match serde_json::from_str(&raw) {
-                Ok(snapshot) => Ok(Some(snapshot)),
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "failed to parse lifecycle snapshot; treating it as stale state"
-                    );
-                    Ok(None)
-                }
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to parse lifecycle snapshot; treating it as stale state"
+                );
+                Ok(None)
             }
-        }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err)
             .with_context(|| format!("failed to read lifecycle snapshot {}", path.display())),
@@ -327,6 +325,9 @@ fn suggest_action(scope: ClientFailureScope, error: &str) -> String {
         || lower.contains("cookie")
         || lower.contains("udp")
     {
+        if lower.contains("no udp response packets were observed") {
+            return "the server did not answer the initial UDP handshake; verify that the omega-server service is up, UDP 443 is open, and NAT/firewall rules still forward traffic to it".to_string();
+        }
         return "check server reachability and local firewall rules, or retry with the restricted fallback profile".to_string();
     }
 

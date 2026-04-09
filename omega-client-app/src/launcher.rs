@@ -169,6 +169,11 @@ pub fn render_status(status: &DesktopStatus, config: &DesktopAppConfig, advanced
             if let Some(action) = &lifecycle.suggested_action {
                 lines.push(format!("Suggested action: {action}"));
             }
+            if let Some(diag) = &status.diagnostics {
+                if let Some(issue) = &diag.suspected_issue {
+                    lines.push(format!("Attention: {issue}"));
+                }
+            }
         } else {
             lines.push(
                 "Runtime is not running. Use `omega-client-app connect` to start it.".to_string(),
@@ -196,6 +201,29 @@ pub fn render_status(status: &DesktopStatus, config: &DesktopAppConfig, advanced
             }
         }
         if let Some(diag) = &status.diagnostics {
+            lines.push(format!(
+                "Handshake debug: phase={} sent={} recv={} stun={} unmatched={}",
+                diag.handshake_phase,
+                diag.handshake_packets_sent,
+                diag.handshake_packets_received,
+                diag.handshake_stun_packets_received,
+                diag.handshake_unmatched_packets_received
+            ));
+            if let Some(local_addr) = &diag.handshake_local_addr {
+                lines.push(format!("Handshake local addr: {local_addr}"));
+            }
+            if let Some(last_responder) = &diag.handshake_last_responder {
+                lines.push(format!("Handshake last responder: {last_responder}"));
+            }
+            if diag.handshake_vpn_tcp_hint.is_some() || diag.handshake_admin_tcp_hint.is_some() {
+                lines.push(format!(
+                    "Endpoint hints: vpn tcp 443={} | admin tcp 8081={} (heuristic only)",
+                    diag.handshake_vpn_tcp_hint.as_deref().unwrap_or("not_run"),
+                    diag.handshake_admin_tcp_hint
+                        .as_deref()
+                        .unwrap_or("not_run")
+                ));
+            }
             lines.push(format!("Path mode: {}", diag.path_mode));
             lines.push(format!(
                 "Path belief: {} ({:.1}% confidence)",
