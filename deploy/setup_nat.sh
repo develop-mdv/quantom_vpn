@@ -138,12 +138,22 @@ persist_sysctl() {
 ensure_nft_include() {
     mkdir -p "$NFT_DIR"
     if [[ ! -f "$NFT_MAIN" ]]; then
+        # Do NOT use "flush ruleset" here — it destroys rules from Docker,
+        # hosting panels, and other services that use iptables-nft or nftables.
+        # Omega tables are self-contained: each .nft file deletes and recreates
+        # only its own tables, leaving everything else untouched.
         cat >"$NFT_MAIN" <<'EOF'
 #!/usr/sbin/nft -f
-flush ruleset
 include "/etc/nftables.d/*.nft"
 EOF
         return
+    fi
+
+    # If the existing nftables.conf has "flush ruleset", remove it to prevent
+    # wiping out Docker / hosting-panel / provider firewall rules on restart.
+    if grep -Fq 'flush ruleset' "$NFT_MAIN"; then
+        sed -i '/^[[:space:]]*flush ruleset/d' "$NFT_MAIN"
+        echo "[INFO] Removed 'flush ruleset' from $NFT_MAIN to preserve other services' rules"
     fi
 
     if ! grep -Fq 'include "/etc/nftables.d/*.nft"' "$NFT_MAIN"; then
@@ -169,6 +179,14 @@ render_nft_config() {
     fi
 
     cat >"$NFT_CONF" <<EOF
+# Omega VPN nftables rules.
+# This file only manages Omega-specific tables and never touches rules
+# owned by Docker, hosting panels, or other services.
+#
+# Tables are pre-deleted before loading (see setup_nat.sh), so this file
+# only contains the table definitions — safe to include at boot time
+# even if the tables don't exist yet.
+
 table inet ${NFT_INET_TABLE} {
     chain input {
         type filter hook input priority filter; policy accept;
@@ -232,13 +250,20 @@ echo "[INFO] Writing nftables rules to ${NFT_CONF}"
 ensure_nft_include
 render_nft_config
 
+# Delete existing Omega tables before loading (ignore errors on first run
+# when tables don't exist yet). Only Omega's own tables are touched —
+# Docker, hosting panel, and provider rules remain intact.
 nft delete table inet "$NFT_INET_TABLE" >/dev/null 2>&1 || true
 nft delete table ip "$NFT_NAT_TABLE" >/dev/null 2>&1 || true
 nft -f "$NFT_CONF"
 
+# Enable nftables for boot persistence, but do NOT restart the service.
+# The nft -f command above already applied the rules atomically.
+# Restarting nftables would re-run /etc/nftables.conf, which on many systems
+# contains "flush ruleset" that destroys Docker, hosting panel, and provider
+# firewall rules — causing admin panels and other services to break.
 if systemctl list-unit-files nftables.service >/dev/null 2>&1; then
     systemctl enable nftables >/dev/null 2>&1 || true
-    systemctl restart nftables >/dev/null 2>&1 || true
 fi
 
 echo
