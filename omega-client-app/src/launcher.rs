@@ -287,7 +287,10 @@ async fn wait_for_runtime_ready(
                         lifecycle
                             .suggested_action
                             .as_ref()
-                            .map(|action| format!(". Suggested action: {action}"))
+                            .map(|action| format_suggested_action_suffix(
+                                &lifecycle.message,
+                                action
+                            ))
                             .unwrap_or_default()
                     );
                 }
@@ -322,6 +325,14 @@ fn human_state(status: &DesktopStatus) -> &'static str {
         _ if status.runtime_running => "Running",
         _ => "Stopped",
     }
+}
+
+fn format_suggested_action_suffix(message: &str, action: &str) -> String {
+    let separator = match message.trim_end().chars().last() {
+        Some('.') | Some('!') | Some('?') => " ",
+        _ => ". ",
+    };
+    format!("{separator}Suggested action: {action}")
 }
 
 fn read_pid(path: &Path) -> anyhow::Result<Option<u32>> {

@@ -297,7 +297,6 @@ impl TransportEndpoint {
         if probe_target.is_some() && !ack_eliciting {
             let path_frame = self.build_path_frame(0x02);
             if path_frame.encoded_len() <= remaining {
-                remaining -= path_frame.encoded_len();
                 frames.push(path_frame);
                 ack_eliciting = true;
             }

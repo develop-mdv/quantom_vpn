@@ -203,31 +203,15 @@ impl ClientDiagnostics {
         let path = self.path.clone();
         let snapshot = self.snapshot.clone();
         tokio::spawn(async move {
-            if let Some(parent) = path.parent() {
-                if let Err(err) = tokio::fs::create_dir_all(parent).await {
-                    tracing::warn!(error = %err, path = %path.display(), "failed to create diagnostics directory");
-                    return;
-                }
-            }
-
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 interval.tick().await;
-                let payload = {
+                let serialized = {
                     let mut guard = snapshot.lock().unwrap();
                     guard.updated_at_ms = now_ms();
-                    match serde_json::to_string_pretty(&*guard) {
-                        Ok(json) => json,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "failed to serialize client diagnostics");
-                            continue;
-                        }
-                    }
+                    guard.clone()
                 };
-
-                if let Err(err) = tokio::fs::write(&path, payload).await {
-                    tracing::warn!(error = %err, path = %path.display(), "failed to write client diagnostics");
-                }
+                persist_snapshot(&path, &serialized);
             }
         });
     }
@@ -236,6 +220,7 @@ impl ClientDiagnostics {
         self.with_snapshot(|snapshot| {
             snapshot.status = status.into();
         });
+        self.flush();
     }
 
     pub fn set_handshake(&self, tunnel_ip: std::net::Ipv4Addr, negotiated_mtu: u16, rtt_ms: u64) {
@@ -248,12 +233,14 @@ impl ClientDiagnostics {
             snapshot.path_quality = quality;
             snapshot.suspected_issue = suspected_issue;
         });
+        self.flush();
     }
 
     pub fn set_interface_name(&self, interface_name: String) {
         self.with_snapshot(|snapshot| {
             snapshot.interface_name = Some(interface_name);
         });
+        self.flush();
     }
 
     pub fn note_server_packet(&self) {
@@ -398,6 +385,15 @@ impl ClientDiagnostics {
         f(&mut guard);
         guard.updated_at_ms = now_ms();
     }
+
+    pub fn flush(&self) {
+        let serialized = {
+            let mut guard = self.snapshot.lock().unwrap();
+            guard.updated_at_ms = now_ms();
+            guard.clone()
+        };
+        persist_snapshot(&self.path, &serialized);
+    }
 }
 
 fn summarize_path(snapshot: &ClientDiagnosticsSnapshot) -> (String, Option<String>) {
@@ -507,19 +503,17 @@ fn recovery_strategy_label(strategy: RecoveryStrategy) -> &'static str {
 
 pub fn load_snapshot(path: &Path) -> anyhow::Result<Option<ClientDiagnosticsSnapshot>> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            match serde_json::from_str(&raw) {
-                Ok(snapshot) => Ok(Some(snapshot)),
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "failed to parse diagnostics snapshot; treating it as stale state"
-                    );
-                    Ok(None)
-                }
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to parse diagnostics snapshot; treating it as stale state"
+                );
+                Ok(None)
             }
-        }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(anyhow::anyhow!(
             "failed to read diagnostics snapshot {}: {err}",
@@ -527,9 +521,107 @@ pub fn load_snapshot(path: &Path) -> anyhow::Result<Option<ClientDiagnosticsSnap
         )),
     }
 }
+
+fn persist_snapshot(path: &Path, snapshot: &ClientDiagnosticsSnapshot) {
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "failed to create diagnostics directory"
+            );
+            return;
+        }
+    }
+
+    match serde_json::to_string_pretty(snapshot) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(path, json) {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to write client diagnostics"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "failed to serialize client diagnostics"
+            );
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::config::{
+        ClientConfig, ConnectionProfile, DnsPolicy, Ipv6Policy, MorphingPolicy, PersonaId,
+        TunnelMode,
+    };
+
+    #[test]
+    fn set_status_flushes_snapshot_immediately() {
+        let dir = temp_test_dir("set_status_flushes_snapshot_immediately");
+        let path = dir.join("diagnostics.json");
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &test_config(&path),
+            "127.0.0.1:443".parse().unwrap(),
+            "laptop",
+            "windows",
+        );
+
+        diagnostics.set_status("routing_conflict");
+
+        let snapshot = load_snapshot(&path)
+            .expect("diagnostics file should be readable")
+            .expect("diagnostics file should exist");
+        assert_eq!(snapshot.status, "routing_conflict");
+    }
+
+    fn test_config(diagnostics_path: &Path) -> ClientConfig {
+        ClientConfig {
+            profile: ConnectionProfile::Gaming,
+            morphing_policy: MorphingPolicy::Off,
+            persona: PersonaId::Randomized,
+            tunnel_mode: TunnelMode::Full,
+            dns_policy: DnsPolicy::Tunnel,
+            ipv6_policy: Ipv6Policy::Disabled,
+            requested_mtu: 1380,
+            keepalive_secs: 25,
+            udp_rcvbuf: 262_144,
+            udp_sndbuf: 262_144,
+            dns_servers: vec!["1.1.1.1".to_string()],
+            split_routes: Vec::new(),
+            network_diag: false,
+            diagnostics_path: diagnostics_path.to_path_buf(),
+            lifecycle_path: diagnostics_path.with_file_name("lifecycle.json"),
+            control_path: diagnostics_path.with_file_name("runtime-control.json"),
+            handshake_attempts: 1,
+            handshake_timeout_ms: 1_500,
+            handshake_backoff_ms: 500,
+        }
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "omega-client-diagnostics-tests-{}-{}-{:016x}",
+            name,
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 }

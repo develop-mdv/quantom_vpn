@@ -400,7 +400,7 @@ struct WindowsNetworkState {
     interface_alias: String,
     reset_dns: bool,
     managed_routes: Vec<WindowsManagedRoute>,
-    route_conflict: Option<String>,
+    routing_error: Option<String>,
 }
 
 #[cfg(target_os = "windows")]
@@ -541,6 +541,7 @@ fn configure_windows_routing(
     );
 
     let mut managed_routes = Vec::new();
+    let mut routing_error = None;
     let server_route = WindowsManagedRoute {
         destination: server_ip.to_string(),
         mask: "255.255.255.255".to_string(),
@@ -558,7 +559,14 @@ fn configure_windows_routing(
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
-            add_windows_gateway_route(&server_route, gateway);
+            if let Err(err) = add_windows_gateway_route(&server_route, gateway) {
+                routing_error.get_or_insert(err);
+            }
+        } else {
+            tracing::warn!(
+                %server_ip,
+                "could not determine the active default gateway before installing Windows tunnel routes"
+            );
         }
     }
 
@@ -574,8 +582,12 @@ fn configure_windows_routing(
             };
             delete_windows_route(&lower_half);
             delete_windows_route(&upper_half);
-            add_windows_interface_route(&lower_half, &if_index);
-            add_windows_interface_route(&upper_half, &if_index);
+            if let Err(err) = add_windows_interface_route(&lower_half, &if_index) {
+                routing_error.get_or_insert(err);
+            }
+            if let Err(err) = add_windows_interface_route(&upper_half, &if_index) {
+                routing_error.get_or_insert(err);
+            }
             managed_routes.push(lower_half);
             managed_routes.push(upper_half);
         }
@@ -586,10 +598,16 @@ fn configure_windows_routing(
                     mask: route.netmask.clone(),
                 };
                 delete_windows_route(&managed);
-                add_windows_interface_route(&managed, &if_index);
+                if let Err(err) = add_windows_interface_route(&managed, &if_index) {
+                    routing_error.get_or_insert(err);
+                }
                 managed_routes.push(managed);
             }
         }
+    }
+
+    if routing_error.is_none() && matches!(config.tunnel_mode, TunnelMode::Full) {
+        routing_error = verify_windows_full_tunnel_routes(&tunnel_ip_s).err();
     }
 
     Some(WindowsNetworkState {
@@ -597,11 +615,7 @@ fn configure_windows_routing(
         interface_alias: if_alias,
         reset_dns,
         managed_routes,
-        route_conflict: if matches!(config.tunnel_mode, TunnelMode::Full) {
-            verify_windows_full_tunnel_routes(&tunnel_ip_s).err()
-        } else {
-            None
-        },
+        routing_error,
     })
 }
 
@@ -685,7 +699,10 @@ fn detect_competing_windows_full_tunnel_routes(route_print: &str) -> Vec<String>
 }
 
 #[cfg(target_os = "windows")]
-fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientConfig) -> Result<(), String> {
+fn cleanup_stale_windows_routes(
+    server_ip: std::net::Ipv4Addr,
+    config: &ClientConfig,
+) -> Result<(), String> {
     let mut routes = vec![WindowsManagedRoute {
         destination: server_ip.to_string(),
         mask: "255.255.255.255".to_string(),
@@ -723,14 +740,11 @@ fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientCo
     let after_conflicts = detect_competing_windows_full_tunnel_routes(&after);
 
     if !after_conflicts.is_empty() {
-        let conflict_lines = after_conflicts.join(" | ");
-        if !before_conflicts.is_empty() {
-            return Err(format!(
-                "detected competing full-tunnel Windows routes: {conflict_lines}. They still remain after cleanup attempt, which usually means this terminal is not elevated. Run PowerShell as Administrator and remove/disable the other VPN or tun2socks adapter before reconnecting"
-            ));
-        }
-        return Err(format!(
-            "detected conflicting full-tunnel Windows routes after cleanup: {conflict_lines}. Remove the competing VPN routes before reconnecting"
+        let conflicting_processes = detect_conflicting_tunnel_processes();
+        return Err(format_full_tunnel_conflict_error(
+            &after_conflicts,
+            !before_conflicts.is_empty(),
+            &conflicting_processes,
         ));
     }
 
@@ -739,7 +753,9 @@ fn cleanup_stale_windows_routes(server_ip: std::net::Ipv4Addr, config: &ClientCo
 }
 
 #[cfg(not(target_os = "windows"))]
-fn cleanup_stale_windows_routes(_: std::net::Ipv4Addr, _: &ClientConfig) -> Result<(), String> { Ok(()) }
+fn cleanup_stale_windows_routes(_: std::net::Ipv4Addr, _: &ClientConfig) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(not(target_os = "windows"))]
 fn configure_windows_routing(
@@ -754,42 +770,61 @@ fn configure_windows_routing(
 fn cleanup_windows_routing(_: std::net::Ipv4Addr, _: Option<&()>) {}
 
 #[cfg(target_os = "windows")]
-fn add_windows_gateway_route(route: &WindowsManagedRoute, gateway: &str) {
-    let _ = std::process::Command::new("route")
-        .args([
-            "add",
-            &route.destination,
-            "mask",
-            &route.mask,
-            gateway,
-            "metric",
-            "1",
-        ])
-        .status();
+fn add_windows_gateway_route(route: &WindowsManagedRoute, gateway: &str) -> Result<(), String> {
+    let args = [
+        "add",
+        route.destination.as_str(),
+        "mask",
+        route.mask.as_str(),
+        gateway,
+        "metric",
+        "1",
+    ];
+    run_windows_route_command(&args).map_err(|detail| {
+        format!(
+            "failed to pin VPN server route {} mask {} via {}: {}",
+            route.destination, route.mask, gateway, detail
+        )
+    })
 }
 
 #[cfg(target_os = "windows")]
-fn add_windows_interface_route(route: &WindowsManagedRoute, if_index: &str) {
-    let _ = std::process::Command::new("route")
-        .args([
-            "add",
-            &route.destination,
-            "mask",
-            &route.mask,
-            "0.0.0.0",
-            "IF",
-            if_index,
-            "metric",
-            "1",
-        ])
-        .status();
+fn add_windows_interface_route(route: &WindowsManagedRoute, if_index: &str) -> Result<(), String> {
+    let args = [
+        "add",
+        route.destination.as_str(),
+        "mask",
+        route.mask.as_str(),
+        "0.0.0.0",
+        "IF",
+        if_index,
+        "metric",
+        "1",
+    ];
+    run_windows_route_command(&args).map_err(|detail| {
+        format!(
+            "failed to install Windows tunnel route {} mask {} on interface {}: {}",
+            route.destination, route.mask, if_index, detail
+        )
+    })
 }
 
 #[cfg(target_os = "windows")]
 fn delete_windows_route(route: &WindowsManagedRoute) {
-    let _ = std::process::Command::new("route")
-        .args(["delete", &route.destination, "mask", &route.mask])
-        .status();
+    let args = [
+        "delete",
+        route.destination.as_str(),
+        "mask",
+        route.mask.as_str(),
+    ];
+    if let Err(detail) = run_windows_route_command(&args) {
+        tracing::debug!(
+            destination = %route.destination,
+            mask = %route.mask,
+            %detail,
+            "ignoring Windows route delete failure during cleanup"
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -831,6 +866,70 @@ fn verify_windows_full_tunnel_routes(tunnel_ip: &str) -> Result<(), String> {
         "Windows full-tunnel routes are not owned by Omega interface {}{}",
         tunnel_ip, suffix
     ))
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_route_command(args: &[&str]) -> Result<(), String> {
+    let output = std::process::Command::new("route")
+        .args(args)
+        .output()
+        .map_err(|err| format!("failed to execute `route {}`: {err}", args.join(" ")))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let detail = windows_command_output_summary(&output).unwrap_or_else(|| {
+        output
+            .status
+            .code()
+            .map(|code| format!("exit code {code}"))
+            .unwrap_or_else(|| "terminated by signal".to_string())
+    });
+    Err(format!("`route {}` failed: {detail}", args.join(" ")))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_command_output_summary(output: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return Some(stderr.lines().next().unwrap_or_default().trim().to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout.lines().next().unwrap_or_default().trim().to_string());
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn format_full_tunnel_conflict_error(
+    conflict_lines: &[String],
+    cleanup_failed: bool,
+    conflicting_processes: &[String],
+) -> String {
+    let mut message = if cleanup_failed {
+        format!(
+            "detected competing full-tunnel Windows routes: {}. They still remain after cleanup attempt, which usually means this terminal is not elevated. Run PowerShell as Administrator and remove/disable the other VPN or tun2socks adapter before reconnecting",
+            conflict_lines.join(" | ")
+        )
+    } else {
+        format!(
+            "detected conflicting full-tunnel Windows routes after cleanup: {}. Remove the competing VPN routes before reconnecting",
+            conflict_lines.join(" | ")
+        )
+    };
+
+    if !conflicting_processes.is_empty() {
+        message.push_str(&format!(
+            ". Active tunnel processes: {}",
+            conflicting_processes.join(", ")
+        ));
+    }
+
+    message
 }
 
 #[cfg(target_os = "windows")]
@@ -882,37 +981,36 @@ fn summarize_windows_full_tunnel_routes(
 
 #[cfg(target_os = "windows")]
 fn detect_conflicting_tunnel_processes() -> Vec<String> {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
+    let Ok(output) = std::process::Command::new("powershell")
+        .args([
+            "-Command",
+            "Get-Process | Select-Object -ExpandProperty ProcessName",
+        ])
         .output()
     else {
         return Vec::new();
     };
 
     let needles = [
-        "tun2socks.exe",
-        "xray.exe",
-        "v2ray.exe",
-        "sing-box.exe",
-        "clash.exe",
-        "clash-verge.exe",
-        "mihomo.exe",
-        "nekoray.exe",
-        "hysteria.exe",
-        "amneziavpn.exe",
+        "tun2socks",
+        "xray",
+        "v2ray",
+        "sing-box",
+        "clash",
+        "clash-verge",
+        "mihomo",
+        "nekoray",
+        "hysteria",
+        "amneziavpn",
     ];
 
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let name = line
-                .trim()
-                .trim_matches('"')
-                .split("\",\"")
-                .next()
-                .map(str::to_ascii_lowercase)?;
+            let display_name = line.trim().to_string();
+            let name = display_name.to_ascii_lowercase();
             if needles.iter().any(|needle| name == *needle) {
-                Some(name)
+                Some(display_name)
             } else {
                 None
             }
@@ -1665,23 +1763,21 @@ pub async fn run_from_env() -> anyhow::Result<()> {
                 server_hello.server_mtu,
                 &client_config,
             );
-            if matches!(client_config.tunnel_mode, TunnelMode::Full) {
-                match state.as_ref() {
-                    Some(state) if state.route_conflict.is_none() => {}
-                    Some(state) => {
-                        let err = state.route_conflict.clone().unwrap_or_else(|| {
-                            "Windows full-tunnel routing verification failed".to_string()
-                        });
-                        diagnostics.set_status("routing_failed");
-                        cleanup_windows_routing(*v4.ip(), Some(state));
-                        return Err(anyhow::anyhow!(err));
-                    }
-                    None => {
-                        diagnostics.set_status("routing_failed");
-                        return Err(anyhow::anyhow!(
-                            "failed to configure Windows full-tunnel routes; stop other VPN/tun2socks adapters and retry"
-                        ));
-                    }
+            match state.as_ref() {
+                Some(state) if state.routing_error.is_none() => {}
+                Some(state) => {
+                    let err = state.routing_error.clone().unwrap_or_else(|| {
+                        "Windows tunnel routing verification failed".to_string()
+                    });
+                    diagnostics.set_status("routing_failed");
+                    cleanup_windows_routing(*v4.ip(), Some(state));
+                    return Err(anyhow::anyhow!(err));
+                }
+                None => {
+                    diagnostics.set_status("routing_failed");
+                    return Err(anyhow::anyhow!(
+                        "failed to configure Windows tunnel routes; stop other VPN/tun2socks adapters and retry"
+                    ));
                 }
             }
             if let Some(state) = state {
@@ -1867,5 +1963,22 @@ Network Destination        Netmask          Gateway       Interface  Metric\n\
         assert!(!summary.lower_half_ok);
         assert!(!summary.upper_half_ok);
         assert_eq!(summary.conflicting_routes.len(), 2);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn route_conflict_message_mentions_processes() {
+        let message = format_full_tunnel_conflict_error(
+            &[
+                "0.0.0.0 128.0.0.0 On-link 10.33.0.2 6".to_string(),
+                "128.0.0.0 128.0.0.0 On-link 10.33.0.2 6".to_string(),
+            ],
+            true,
+            &["AmneziaVPN.exe".to_string(), "tun2socks.exe".to_string()],
+        );
+
+        assert!(message.contains("Active tunnel processes"));
+        assert!(message.contains("AmneziaVPN.exe"));
+        assert!(message.contains("tun2socks.exe"));
     }
 }
