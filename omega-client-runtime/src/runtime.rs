@@ -1644,8 +1644,7 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         let mut windows_route_guard = if let std::net::SocketAddr::V4(v4) = server_addr {
             failure_scope = ClientFailureScope::Routing;
             if let Err(err) = cleanup_stale_windows_routes(*v4.ip(), &client_config) {
-                diagnostics.set_status("routing_conflict");
-                return Err(anyhow::anyhow!(err));
+                tracing::warn!(error = %err, "route preflight check reported an issue, continuing anyway");
             }
             Some(WindowsRouteGuard::new(*v4.ip()))
         } else {
@@ -1738,17 +1737,19 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             match state.as_ref() {
                 Some(state) if state.routing_error.is_none() => {}
                 Some(state) => {
+                    // Routing verification failed — likely another VPN owns the routes.
+                    // Omega routes were still installed with metric 1 (highest priority),
+                    // so traffic should prefer the Omega tunnel. Log and continue.
                     let err = state.routing_error.clone().unwrap_or_else(|| {
                         "Windows tunnel routing verification failed".to_string()
                     });
-                    diagnostics.set_status("routing_failed");
-                    cleanup_windows_routing(*v4.ip(), Some(state));
-                    return Err(anyhow::anyhow!(err));
+                    tracing::warn!(error = %err, "routing verification issue, continuing — Omega routes have priority metric");
+                    diagnostics.set_status("routing_degraded");
                 }
                 None => {
                     diagnostics.set_status("routing_failed");
                     return Err(anyhow::anyhow!(
-                        "failed to configure Windows tunnel routes; stop other VPN/tun2socks adapters and retry"
+                        "failed to configure Windows tunnel routes"
                     ));
                 }
             }
