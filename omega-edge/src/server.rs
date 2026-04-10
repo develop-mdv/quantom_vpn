@@ -235,7 +235,23 @@ pub async fn run_server() -> anyhow::Result<()> {
     let udp_r = udp.clone();
     let sessions_r = session_manager.clone();
     tokio::spawn(async move {
-        datapath::tun_to_udp_loop(tun_r, udp_r, sessions_r).await;
+        loop {
+            let tun_c = tun_r.clone();
+            let udp_c = udp_r.clone();
+            let sessions_c = sessions_r.clone();
+            let handle = tokio::spawn(async move {
+                datapath::tun_to_udp_loop(tun_c, udp_c, sessions_c).await;
+            });
+            match handle.await {
+                Ok(()) => {
+                    tracing::warn!("tun_to_udp_loop exited unexpectedly, restarting in 1s");
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "tun_to_udp_loop panicked, restarting in 1s");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     });
 
     let tun_w = tun.clone();
@@ -246,20 +262,40 @@ pub async fn run_server() -> anyhow::Result<()> {
     let fabric_w = fabric.clone();
     let admission_w = session_admission.clone();
     tokio::spawn(async move {
-        datapath::udp_to_tun_loop(
-            tun_w,
-            udp_w,
-            sessions_w,
-            identity_w,
-            handshake_w,
-            tunnel_mtu,
-            allow_legacy_v1,
-            morphing_policy,
-            persona,
-            &admission_w,
-            &fabric_w,
-        )
-        .await;
+        loop {
+            let tun_c = tun_w.clone();
+            let udp_c = udp_w.clone();
+            let sessions_c = sessions_w.clone();
+            let identity_c = identity_w.clone();
+            let handshake_c = handshake_w.clone();
+            let admission_c = admission_w.clone();
+            let fabric_c = fabric_w.clone();
+            let handle = tokio::spawn(async move {
+                datapath::udp_to_tun_loop(
+                    tun_c,
+                    udp_c,
+                    sessions_c,
+                    identity_c,
+                    handshake_c,
+                    tunnel_mtu,
+                    allow_legacy_v1,
+                    morphing_policy,
+                    persona,
+                    &admission_c,
+                    &fabric_c,
+                )
+                .await;
+            });
+            match handle.await {
+                Ok(()) => {
+                    tracing::warn!("udp_to_tun_loop exited unexpectedly, restarting in 1s");
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, "udp_to_tun_loop panicked, restarting in 1s");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
     });
 
     tracing::info!("data path running, press Ctrl+C to stop");

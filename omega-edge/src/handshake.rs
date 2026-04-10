@@ -480,38 +480,77 @@ impl HandshakeService {
             }
         };
         let key = pending_key(&chunk.connection_id, &client_addr);
-        let mut pending = match self.inner.pending.get_mut(&key) {
-            Some(v) => v,
-            None => {
-                return Ok(anti_probe_outcome(
-                    persona,
-                    txn_id,
-                    HandshakeRejectReason::Malformed,
-                ))
+
+        // Phase 1: accumulate chunk under the DashMap write guard.
+        // We must drop the guard before calling remove() or finalize_session()
+        // to avoid deadlocking on the same DashMap shard.
+        let accumulated = {
+            let mut pending = match self.inner.pending.get_mut(&key) {
+                Some(v) => v,
+                None => {
+                    return Ok(anti_probe_outcome(
+                        persona,
+                        txn_id,
+                        HandshakeRejectReason::Malformed,
+                    ))
+                }
+            };
+            if pending.client_addr != client_addr {
+                return Ok(HandshakeOutcome::NoResponse);
             }
+            if pending.kem_chunks.is_empty() {
+                pending.kem_total_len = chunk.total_len as usize;
+                pending.kem_chunks = vec![None; chunk.chunk_count as usize];
+            }
+            let idx = chunk.chunk_index as usize;
+            if idx >= pending.kem_chunks.len() {
+                return Ok(HandshakeOutcome::NoResponse);
+            }
+            pending.kem_chunks[idx] = Some(chunk.chunk.clone());
+
+            if pending.kem_chunks.iter().any(|part| part.is_none()) {
+                return Ok(HandshakeOutcome::NoResponse);
+            }
+
+            // All chunks present — extract everything we need and drop the guard.
+            let mut full_kem = Vec::with_capacity(pending.kem_total_len);
+            for part in pending.kem_chunks.iter() {
+                full_kem.extend_from_slice(part.as_ref().unwrap());
+            }
+            full_kem.truncate(pending.kem_total_len);
+
+            let extracted = (
+                full_kem,
+                pending.x25519_shared,
+                pending.init_transcript.clone(),
+                pending.retry_transcript.clone(),
+                pending.auth_transcript.clone(),
+                pending.auth_ctx.clone(),
+                pending.tunnel_ip,
+                pending.client_addr,
+                pending.client_mtu,
+                pending.fec_enabled,
+                pending.connection_id,
+            );
+            // guard dropped here
+            extracted
         };
-        if pending.client_addr != client_addr {
-            return Ok(HandshakeOutcome::NoResponse);
-        }
-        if pending.kem_chunks.is_empty() {
-            pending.kem_total_len = chunk.total_len as usize;
-            pending.kem_chunks = vec![None; chunk.chunk_count as usize];
-        }
-        let idx = chunk.chunk_index as usize;
-        if idx >= pending.kem_chunks.len() {
-            return Ok(HandshakeOutcome::NoResponse);
-        }
-        pending.kem_chunks[idx] = Some(chunk.chunk.clone());
 
-        if pending.kem_chunks.iter().any(|part| part.is_none()) {
-            return Ok(HandshakeOutcome::NoResponse);
-        }
+        let (
+            full_kem,
+            x25519_shared,
+            init_transcript,
+            retry_transcript,
+            auth_transcript,
+            auth_ctx,
+            pending_tunnel_ip,
+            _pending_client_addr,
+            pending_client_mtu,
+            pending_fec_enabled,
+            pending_connection_id,
+        ) = accumulated;
 
-        let mut full_kem = Vec::with_capacity(pending.kem_total_len);
-        for part in pending.kem_chunks.iter() {
-            full_kem.extend_from_slice(part.as_ref().unwrap());
-        }
-        full_kem.truncate(pending.kem_total_len);
+        // Phase 2: process KEM data with the guard released.
         if full_kem.len() != MLKEM768_EK_LEN {
             metrics::record_handshake_failure(HandshakeRejectReason::Malformed);
             self.inner.pending.remove(&key);
@@ -550,13 +589,13 @@ impl HandshakeService {
         };
 
         let transcript_hash = hash_transcript(&[
-            pending.init_transcript.as_slice(),
-            pending.retry_transcript.as_slice(),
-            pending.auth_transcript.as_slice(),
+            init_transcript.as_slice(),
+            retry_transcript.as_slice(),
+            auth_transcript.as_slice(),
             full_kem.as_slice(),
         ]);
         let secrets = match derive_hybrid_handshake_secrets(
-            &pending.x25519_shared,
+            &x25519_shared,
             mlkem_shared.as_ref(),
             &transcript_hash,
             true,
@@ -573,21 +612,24 @@ impl HandshakeService {
             }
         };
 
+        // Remove the pending entry before finalize (guard already dropped).
+        self.inner.pending.remove(&key);
+
         let response = self.finalize_session(
             txn_id,
             session_manager,
             identity_store,
             admission,
             fabric,
-            pending.auth_ctx.clone(),
-            pending.tunnel_ip,
-            pending.client_addr,
-            pending.client_mtu,
-            pending.fec_enabled,
+            auth_ctx,
+            pending_tunnel_ip,
+            client_addr,
+            pending_client_mtu,
+            pending_fec_enabled,
             server_mtu,
             morphing_policy,
             persona,
-            pending.connection_id,
+            pending_connection_id,
             secrets,
             {
                 let ct_bytes: &[u8] = ct.as_ref();
@@ -596,7 +638,6 @@ impl HandshakeService {
             false,
             None,
         );
-        self.inner.pending.remove(&key);
         Ok(response)
     }
 
@@ -795,7 +836,15 @@ impl HandshakeService {
 
         let flow_id = FlowId(secrets.flow_id);
         let session_id = crate::session::flow_id_to_hex(&flow_id);
-        let fabric_view = fabric.read().unwrap().runtime_view();
+        let fabric_guard = match fabric.read() {
+            Ok(v) => v,
+            Err(poisoned) => {
+                tracing::error!("fabric RwLock poisoned during finalize_session");
+                poisoned.into_inner()
+            }
+        };
+        let fabric_view = fabric_guard.runtime_view();
+        drop(fabric_guard);
         let policy_decision = identity_store.evaluate_session_admission(
             &auth_ctx.user,
             &auth_ctx.device,
@@ -816,9 +865,14 @@ impl HandshakeService {
         );
         let effective_admission = policy_decision.admission.clone();
         let session_id = crate::session::flow_id_to_hex(&flow_id);
-        let fabric_state = match fabric
-            .read()
-            .unwrap()
+        let fabric_guard = match fabric.read() {
+            Ok(v) => v,
+            Err(poisoned) => {
+                tracing::error!("fabric RwLock poisoned during plan_session");
+                poisoned.into_inner()
+            }
+        };
+        let fabric_state = match fabric_guard
             .plan_session(&session_id, &effective_admission)
         {
             Some(route) => route,
@@ -827,6 +881,7 @@ impl HandshakeService {
                 return anti_probe_outcome(persona, txn_id, HandshakeRejectReason::ServerBusy);
             }
         };
+        drop(fabric_guard);
         let activation = omega_control::control_plane::SessionActivation {
             flow_id: session_id.clone(),
             user_id: auth_ctx.user.user_id.clone(),
