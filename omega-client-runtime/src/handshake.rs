@@ -415,75 +415,98 @@ async fn complete_full_handshake(
         credential_ciphertext,
     };
 
-    let auth_request = StunWrapper::wrap_request(&rand::random(), &auth.serialize());
-    debug.mark_send(HandshakePhase::WaitingComplete);
-    udp.send_to(&auth_request, server_addr).await?;
-
     let kem_bytes = encap_key.as_bytes().to_vec();
     let chunks = ClientKemChunkV2::split(init.connection_id, &kem_bytes, DEFAULT_KEM_CHUNK_LEN);
-    for (idx, chunk) in chunks.iter().enumerate() {
-        let txn_id: [u8; 12] = rand::random();
-        let request = StunWrapper::wrap_request(&txn_id, &chunk.serialize());
+
+    // Pre-build all wire packets (auth + KEM chunks) for retransmission.
+    let auth_request = StunWrapper::wrap_request(&rand::random(), &auth.serialize());
+    let chunk_requests: Vec<Vec<u8>> = chunks
+        .iter()
+        .map(|chunk| StunWrapper::wrap_request(&rand::random(), &chunk.serialize()))
+        .collect();
+
+    // Helper: send the full auth + KEM burst.
+    async fn send_burst(
+        udp: &UdpSocket,
+        server_addr: SocketAddr,
+        auth_request: &[u8],
+        chunk_requests: &[Vec<u8>],
+        debug: &mut HandshakeDebugInfo,
+    ) -> Result<(), std::io::Error> {
         debug.mark_send(HandshakePhase::WaitingComplete);
-        udp.send_to(&request, server_addr).await?;
-        if idx + 1 == chunks.len() {
-            let complete = wait_for_complete(udp, buf, txn_id, timeout_ms, debug).await?;
-            let ct_array: &ml_kem::Ciphertext<MlKem768> = complete
-                .ciphertext
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid ML-KEM ciphertext length"))?;
-            let mlkem_shared = decapsulate(&decap_key, ct_array)?;
-            let transcript_hash = hash_transcript(&[
-                canonical_init(init).as_slice(),
-                canonical_retry(retry).as_slice(),
-                auth.serialize().as_slice(),
-                kem_bytes.as_slice(),
-            ]);
-            let secrets = derive_hybrid_handshake_secrets(
-                &x25519_shared,
-                &mlkem_shared,
-                &transcript_hash,
-                false,
-            )
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-            return Ok(HandshakeV2Result {
-                complete,
-                secrets,
-                rtt_ms: started_at.elapsed().as_millis() as u64,
-                debug: debug.clone(),
-            });
+        udp.send_to(auth_request, server_addr).await?;
+        for req in chunk_requests {
+            debug.mark_send(HandshakePhase::WaitingComplete);
+            udp.send_to(req, server_addr).await?;
         }
+        Ok(())
     }
 
-    Err(anyhow::anyhow!("no final KEM chunk sent"))
-}
+    send_burst(udp, server_addr, &auth_request, &chunk_requests, debug).await?;
 
-async fn wait_for_complete(
-    udp: &UdpSocket,
-    buf: &mut [u8],
-    txn_id: [u8; 12],
-    timeout_ms: u64,
-    debug: &mut HandshakeDebugInfo,
-) -> anyhow::Result<ServerCompleteV2> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    // Wait for ServerComplete; retransmit once after half the timeout.
+    let half_timeout = timeout_ms / 2;
+    let retransmit_at = Instant::now() + Duration::from_millis(half_timeout);
+    let final_deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut retransmitted = false;
+
     loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let now = Instant::now();
+        if now >= final_deadline {
             break;
+        }
+        let wait_until = if !retransmitted && retransmit_at > now {
+            retransmit_at
+        } else {
+            final_deadline
         };
+        let remaining = wait_until.saturating_duration_since(now);
+
         match tokio::time::timeout(remaining, udp.recv_from(buf)).await {
             Ok(Ok((n, responder))) => {
                 debug.observe_receive(responder);
-                let Some((is_request, resp_txn, payload)) = StunWrapper::parse(&buf[..n]) else {
+                let Some((is_request, _resp_txn, payload)) = StunWrapper::parse(&buf[..n])
+                else {
                     continue;
                 };
                 debug.observe_stun();
-                if is_request || resp_txn != txn_id {
+                if is_request {
                     debug.observe_unmatched();
                     continue;
                 }
+                // Accept any STUN response containing a valid ServerComplete for
+                // our connection_id. The server may respond with any KEM chunk's
+                // txn_id depending on packet arrival order.
                 if let Some(complete) = ServerCompleteV2::deserialize(payload) {
-                    return Ok(complete);
+                    if complete.connection_id == init.connection_id {
+                        let ct_array: &ml_kem::Ciphertext<MlKem768> = complete
+                            .ciphertext
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| anyhow::anyhow!("invalid ML-KEM ciphertext length"))?;
+                        let mlkem_shared = decapsulate(&decap_key, ct_array)?;
+                        let transcript_hash = hash_transcript(&[
+                            canonical_init(init).as_slice(),
+                            canonical_retry(retry).as_slice(),
+                            auth.serialize().as_slice(),
+                            kem_bytes.as_slice(),
+                        ]);
+                        let secrets = derive_hybrid_handshake_secrets(
+                            &x25519_shared,
+                            &mlkem_shared,
+                            &transcript_hash,
+                            false,
+                        )
+                        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+                        return Ok(HandshakeV2Result {
+                            complete,
+                            secrets,
+                            rtt_ms: started_at.elapsed().as_millis() as u64,
+                            debug: debug.clone(),
+                        });
+                    }
+                    debug.observe_unmatched();
+                    continue;
                 }
                 if let Some(reject) = HandshakeReject::deserialize(payload) {
                     return Err(anyhow::anyhow!(
@@ -491,12 +514,29 @@ async fn wait_for_complete(
                         reject.reason
                     ));
                 }
-                return Err(anyhow::anyhow!("malformed handshake completion payload"));
+                tracing::debug!(n, "received non-complete STUN response during handshake");
             }
             Ok(Err(err)) => return Err(err.into()),
-            Err(_) => break,
+            Err(_) => {
+                // Timeout on this wait phase.
+                if !retransmitted {
+                    tracing::debug!("retransmitting auth + KEM burst");
+                    retransmitted = true;
+                    let _ = send_burst(
+                        udp,
+                        server_addr,
+                        &auth_request,
+                        &chunk_requests,
+                        debug,
+                    )
+                    .await;
+                    continue;
+                }
+                break;
+            }
         }
     }
+
     Err(anyhow::anyhow!(
         "server did not complete handshake within {} ms",
         timeout_ms
