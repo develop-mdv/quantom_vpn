@@ -437,6 +437,7 @@ struct WindowsNetworkState {
 #[cfg(target_os = "windows")]
 struct WindowsRouteGuard {
     server_ip: std::net::Ipv4Addr,
+    bypass_route: Option<WindowsManagedRoute>,
     state: Option<WindowsNetworkState>,
 }
 
@@ -445,8 +446,13 @@ impl WindowsRouteGuard {
     fn new(server_ip: std::net::Ipv4Addr) -> Self {
         Self {
             server_ip,
+            bypass_route: None,
             state: None,
         }
+    }
+
+    fn install_bypass(&mut self, route: WindowsManagedRoute) {
+        self.bypass_route = Some(route);
     }
 
     fn install(&mut self, state: WindowsNetworkState) {
@@ -458,6 +464,10 @@ impl WindowsRouteGuard {
 impl Drop for WindowsRouteGuard {
     fn drop(&mut self) {
         cleanup_windows_routing(self.server_ip, self.state.as_ref());
+        if let Some(route) = &self.bypass_route {
+            delete_windows_route(route);
+            tracing::info!(server_ip = %self.server_ip, "cleaned up server bypass route");
+        }
     }
 }
 
@@ -739,6 +749,78 @@ fn cleanup_stale_windows_routes(
         tracing::info!(server_ip = %server_ip, "no competing full-tunnel Windows routes detected before handshake");
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn disable_windows_udp_connreset(socket: &socket2::Socket) {
+    use std::os::windows::io::AsRawSocket;
+    // SIO_UDP_CONNRESET = IOC_IN | IOC_VENDOR | 12 = 0x9800000C
+    const SIO_UDP_CONNRESET: u32 = 0x9800000Cu32;
+    let raw = socket.as_raw_socket();
+    let enable: u32 = 0; // FALSE — disable connection reset on ICMP port unreachable
+    let mut bytes_returned: u32 = 0;
+    unsafe {
+        // WSAIoctl via ioctlsocket-style call
+        extern "system" {
+            fn WSAIoctl(
+                s: usize,
+                dwIoControlCode: u32,
+                lpvInBuffer: *const u8,
+                cbInBuffer: u32,
+                lpvOutBuffer: *mut u8,
+                cbOutBuffer: u32,
+                lpcbBytesReturned: *mut u32,
+                lpOverlapped: *const u8,
+                lpCompletionRoutine: *const u8,
+            ) -> i32;
+        }
+        let ret = WSAIoctl(
+            raw as usize,
+            SIO_UDP_CONNRESET,
+            &enable as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        if ret != 0 {
+            tracing::debug!("WSAIoctl SIO_UDP_CONNRESET failed (non-critical)");
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn add_server_bypass_route(server_ip: std::net::Ipv4Addr) -> Option<WindowsManagedRoute> {
+    use std::process::Command;
+
+    let ps_cmd = "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).NextHop";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps_cmd])
+        .output()
+        .ok()?;
+    let gateway = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+
+    let route = WindowsManagedRoute::via_gateway(
+        server_ip.to_string(),
+        "255.255.255.255",
+        &gateway,
+    );
+    match add_windows_gateway_route(&route) {
+        Ok(()) => {
+            tracing::info!(%server_ip, %gateway, "installed server bypass route before handshake");
+            Some(route)
+        }
+        Err(err) => {
+            tracing::warn!(%server_ip, %gateway, %err, "failed to install server bypass route, handshake packets may be misrouted");
+            None
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -1646,7 +1728,11 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             if let Err(err) = cleanup_stale_windows_routes(*v4.ip(), &client_config) {
                 tracing::warn!(error = %err, "route preflight check reported an issue, continuing anyway");
             }
-            Some(WindowsRouteGuard::new(*v4.ip()))
+            let mut guard = WindowsRouteGuard::new(*v4.ip());
+            if let Some(bypass) = add_server_bypass_route(*v4.ip()) {
+                guard.install_bypass(bypass);
+            }
+            Some(guard)
         } else {
             None
         };
@@ -1657,6 +1743,13 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         socket.set_nonblocking(true)?;
         let _ = socket.set_recv_buffer_size(client_config.udp_rcvbuf);
         let _ = socket.set_send_buffer_size(client_config.udp_sndbuf);
+
+        // On Windows, disable SIO_UDP_CONNRESET so that ICMP Port Unreachable
+        // does not cause recv_from to return a "connection reset" error.
+        #[cfg(target_os = "windows")]
+        {
+            disable_windows_udp_connreset(&socket);
+        }
 
         let addr: SocketAddr = "0.0.0.0:0".parse()?;
         socket.bind(&addr.into())?;
