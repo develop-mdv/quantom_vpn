@@ -37,8 +37,8 @@ impl Default for TransportConfig {
             ack_delay: Duration::from_millis(0),
             initial_rtt: Duration::from_millis(120),
             min_rtt: Duration::from_millis(20),
-            initial_cwnd_packets: 10,
-            min_cwnd_packets: 2,
+            initial_cwnd_packets: 200,
+            min_cwnd_packets: 64,
             bulk_cwnd_share_num: 7,
             bulk_cwnd_share_den: 10,
             packet_threshold: 3,
@@ -635,8 +635,8 @@ impl TransportEndpoint {
                 .iter()
                 .filter_map(|(_, _, _, _, probe)| *probe)
                 .max();
-            let rtt_inflated = self.cc.smoothed_rtt > self.cc.min_rtt.mul_f32(1.20);
-            let random_loss = lost_entries.len() == 1 && !rtt_inflated && acked_bytes >= lost_bytes;
+            let random_loss =
+                lost_entries.len() <= 3 && (acked_packets as usize) > lost_entries.len() * 2;
             self.cc.on_loss(lost_bytes, random_loss);
             self.path.on_loss_batch(
                 now,
@@ -704,8 +704,7 @@ impl TransportEndpoint {
                 .iter()
                 .filter_map(|(_, _, _, _, probe)| *probe)
                 .max();
-            let rtt_inflated = self.cc.smoothed_rtt > self.cc.min_rtt.mul_f32(1.20);
-            let random_loss = lost_entries.len() == 1 && !rtt_inflated;
+            let random_loss = lost_entries.len() <= 3;
             self.cc.on_loss(lost_bytes, random_loss);
             self.path.on_loss_batch(
                 now,

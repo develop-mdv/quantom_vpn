@@ -119,16 +119,21 @@ impl CongestionController {
         }
         self.loss_events = self.loss_events.saturating_add(1);
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(lost_bytes);
+        let min_cwnd = self.max_datagram_size.saturating_mul(64);
         if random_loss {
+            // Random/isolated loss — gentle 5% reduction (was 10%).
+            // VPN packet loss is usually WiFi/mobile, not congestion.
             self.cwnd_bytes = self
                 .cwnd_bytes
-                .saturating_mul(9)
-                .checked_div(10)
+                .saturating_mul(19)
+                .checked_div(20)
                 .unwrap_or(self.cwnd_bytes)
-                .max(self.max_datagram_size.saturating_mul(2));
+                .max(min_cwnd);
         } else {
-            self.ssthresh_bytes =
-                (self.cwnd_bytes / 2).max(self.max_datagram_size.saturating_mul(2));
+            // Deterministic loss — 25% reduction (was 50%).
+            // Halving is too aggressive for a VPN tunnel where inner TCP
+            // already handles its own congestion control.
+            self.ssthresh_bytes = (self.cwnd_bytes * 3 / 4).max(min_cwnd);
             self.cwnd_bytes = self.ssthresh_bytes;
         }
         self.recompute_pacing_rate();
@@ -160,7 +165,7 @@ impl CongestionController {
 
     pub(crate) fn send_limit(&self) -> usize {
         self.cwnd_bytes
-            .max(self.max_datagram_size.saturating_mul(2))
+            .max(self.max_datagram_size.saturating_mul(64))
     }
 
     pub(crate) fn bytes_in_flight(&self) -> usize {
@@ -172,7 +177,7 @@ impl CongestionController {
     }
 
     pub(crate) fn pacing_rate_bps(&self) -> u64 {
-        self.pacing_rate_bps.max(1_000)
+        self.pacing_rate_bps.max(10_000_000)
     }
 
     fn recompute_pacing_rate(&mut self) {
@@ -210,7 +215,7 @@ impl Pacer {
     pub(crate) fn on_packet_sent(&mut self, now: Instant, bytes: usize, pacing_rate_bps: u64) {
         let interval_micros = ((bytes as u128).saturating_mul(8).saturating_mul(1_000_000)
             / pacing_rate_bps.max(1) as u128)
-            .max(200);
+            .max(50);
         self.next_send_time =
             now + Duration::from_micros(interval_micros.min(u64::MAX as u128) as u64);
     }
