@@ -2,15 +2,17 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <path_to_new_omega_server_binary> [path_to_systemd_unit_file] [path_to_alert_rules_file]"
+  echo "Usage: $0 <path_to_new_omega_server_binary> [path_to_systemd_unit_file] [path_to_alert_rules_file] [path_to_setup_nat_script]"
   exit 1
 fi
 
 NEW_BIN="$1"
 NEW_UNIT="${2:-}"
 NEW_ALERTS="${3:-}"
+NEW_NAT="${4:-}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
 INSTALL_DIR="${OMEGA_INSTALL_DIR:-/opt/omega}"
+SETUP_NAT="${OMEGA_SETUP_NAT:-$INSTALL_DIR/setup_nat.sh}"
 ALERTS_DEST="${OMEGA_ALERTS_DEST:-$INSTALL_DIR/omega-alerts.yml}"
 PROMETHEUS_SERVICE_NAME="${OMEGA_PROMETHEUS_SERVICE_NAME:-}"
 RELEASES_DIR="$INSTALL_DIR/releases"
@@ -54,6 +56,11 @@ fi
 
 if [[ -n "$NEW_ALERTS" && ! -f "$NEW_ALERTS" ]]; then
   echo "[ERROR] Alert rules file not found: $NEW_ALERTS"
+  exit 1
+fi
+
+if [[ -n "$NEW_NAT" && ! -f "$NEW_NAT" ]]; then
+  echo "[ERROR] setup_nat script not found: $NEW_NAT"
   exit 1
 fi
 
@@ -209,6 +216,22 @@ if [[ -n "$NEW_ALERTS" ]]; then
     rollback
     exit 1
   fi
+fi
+
+# Install setup_nat.sh to INSTALL_DIR if provided
+if [[ -n "$NEW_NAT" ]]; then
+  install -m 0755 "$NEW_NAT" "$INSTALL_DIR/setup_nat.sh"
+  echo "[INFO] Installed setup_nat.sh to $INSTALL_DIR/setup_nat.sh"
+fi
+
+# Ensure NAT/forwarding rules are applied (idempotent)
+if [[ -f "$SETUP_NAT" ]]; then
+  echo "[INFO] Applying NAT/forwarding rules via $SETUP_NAT"
+  if ! bash "$SETUP_NAT"; then
+    echo "[WARN] setup_nat.sh returned non-zero; continuing with deploy"
+  fi
+else
+  echo "[WARN] $SETUP_NAT not found, skipping NAT setup"
 fi
 
 echo "[INFO] Restarting $SERVICE_NAME"

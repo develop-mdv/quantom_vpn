@@ -28,7 +28,7 @@ use crate::lifecycle::{
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
 const DEFAULT_TUN_PREFIX: u8 = 16;
-const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
+const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 150;
 const MAX_RETRANSMIT_BURST: usize = 24;
 #[allow(dead_code)]
 const RETRANSMIT_PACING_US: u64 = 500;
@@ -737,17 +737,19 @@ fn cleanup_stale_windows_routes(
 
     let route_table = read_windows_route_table()?;
     let competing_routes = detect_competing_windows_full_tunnel_routes(&route_table);
-    if !competing_routes.is_empty() {
-        let conflicting_processes = detect_conflicting_tunnel_processes();
-        tracing::warn!(
-            server_ip = %server_ip,
-            routes = %competing_routes.join(" | "),
-            tunnel_processes = %conflicting_processes.join(", "),
-            "detected existing full-tunnel Windows routes before handshake; Omega will attempt to layer its own routes after the tunnel comes up"
-        );
-    } else {
+    if competing_routes.is_empty() {
         tracing::info!(server_ip = %server_ip, "no competing full-tunnel Windows routes detected before handshake");
+        return Ok(());
     }
+
+    let conflicting_processes = detect_conflicting_tunnel_processes();
+    tracing::warn!(
+        server_ip = %server_ip,
+        routes = %competing_routes.join(" | "),
+        tunnel_processes = %conflicting_processes.join(", "),
+        "detected existing full-tunnel Windows routes from another VPN; \
+         for best results, stop AmneziaVPN / other VPN clients before connecting Omega"
+    );
     Ok(())
 }
 
@@ -792,33 +794,97 @@ fn disable_windows_udp_connreset(socket: &socket2::Socket) {
 }
 
 #[cfg(target_os = "windows")]
-fn add_server_bypass_route(server_ip: std::net::Ipv4Addr) -> Option<WindowsManagedRoute> {
+struct PhysicalInterfaceInfo {
+    gateway: String,
+    local_ip: std::net::Ipv4Addr,
+    interface_index: u32,
+}
+
+#[cfg(target_os = "windows")]
+fn detect_physical_interface() -> Option<PhysicalInterfaceInfo> {
     use std::process::Command;
 
-    let ps_cmd = "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1).NextHop";
+    let ps_cmd = r#"$route = Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Sort-Object RouteMetric | Select-Object -First 1; $addr = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1; "$($route.NextHop)|$($addr.IPAddress)|$($route.InterfaceIndex)""#;
     let output = Command::new("powershell")
         .args(["-NoProfile", "-Command", ps_cmd])
         .output()
         .ok()?;
-    let gateway = String::from_utf8_lossy(&output.stdout)
+    let line = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .next()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())?;
+        .find(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string())?;
+    let parts: Vec<&str> = line.split('|').collect();
+    if parts.len() != 3 {
+        tracing::warn!(raw = %line, "unexpected physical interface detection output");
+        return None;
+    }
+    let gateway = parts[0].to_string();
+    let local_ip: std::net::Ipv4Addr = match parts[1].parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            tracing::warn!(raw = parts[1], "could not parse physical interface IP");
+            return None;
+        }
+    };
+    let interface_index: u32 = match parts[2].parse() {
+        Ok(idx) => idx,
+        Err(_) => {
+            tracing::warn!(raw = parts[2], "could not parse physical interface index");
+            return None;
+        }
+    };
+    tracing::info!(%gateway, %local_ip, interface_index, "detected physical network interface");
+    Some(PhysicalInterfaceInfo {
+        gateway,
+        local_ip,
+        interface_index,
+    })
+}
 
+#[cfg(target_os = "windows")]
+fn add_server_bypass_route(
+    server_ip: std::net::Ipv4Addr,
+    iface: &PhysicalInterfaceInfo,
+) -> Option<WindowsManagedRoute> {
     let route = WindowsManagedRoute::via_gateway(
         server_ip.to_string(),
         "255.255.255.255",
-        &gateway,
+        &iface.gateway,
     );
     match add_windows_gateway_route(&route) {
         Ok(()) => {
-            tracing::info!(%server_ip, %gateway, "installed server bypass route before handshake");
+            tracing::info!(%server_ip, gateway = %iface.gateway, "installed server bypass route before handshake");
             Some(route)
         }
         Err(err) => {
-            tracing::warn!(%server_ip, %gateway, %err, "failed to install server bypass route, handshake packets may be misrouted");
+            tracing::warn!(%server_ip, gateway = %iface.gateway, %err, "failed to install server bypass route, handshake packets may be misrouted");
             None
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_socket_unicast_if(socket: &socket2::Socket, interface_index: u32) {
+    use std::os::windows::io::AsRawSocket;
+    const IPPROTO_IP: i32 = 0;
+    const IP_UNICAST_IF: i32 = 31;
+    let raw = socket.as_raw_socket();
+    let if_index_be = interface_index.to_be();
+    unsafe {
+        extern "system" {
+            fn setsockopt(s: usize, level: i32, optname: i32, optval: *const u8, optlen: i32) -> i32;
+        }
+        let ret = setsockopt(
+            raw as usize,
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            &if_index_be as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as i32,
+        );
+        if ret != 0 {
+            tracing::warn!(interface_index, "failed to set IP_UNICAST_IF on UDP socket");
+        } else {
+            tracing::info!(interface_index, "forced UDP socket to physical interface via IP_UNICAST_IF");
         }
     }
 }
@@ -1723,19 +1789,51 @@ pub async fn run_from_env() -> anyhow::Result<()> {
         diagnostics.set_status("starting");
 
         #[cfg(target_os = "windows")]
+        let physical_iface = if let std::net::SocketAddr::V4(_) = server_addr {
+            detect_physical_interface()
+        } else {
+            None
+        };
+
+        #[cfg(target_os = "windows")]
         let mut windows_route_guard = if let std::net::SocketAddr::V4(v4) = server_addr {
             failure_scope = ClientFailureScope::Routing;
             if let Err(err) = cleanup_stale_windows_routes(*v4.ip(), &client_config) {
-                tracing::warn!(error = %err, "route preflight check reported an issue, continuing anyway");
+                tracing::warn!(error = %err, "route preflight check failed, continuing anyway");
             }
             let mut guard = WindowsRouteGuard::new(*v4.ip());
-            if let Some(bypass) = add_server_bypass_route(*v4.ip()) {
-                guard.install_bypass(bypass);
+            if let Some(ref iface) = physical_iface {
+                if let Some(bypass) = add_server_bypass_route(*v4.ip(), iface) {
+                    guard.install_bypass(bypass);
+                }
             }
             Some(guard)
         } else {
             None
         };
+
+        // Detect sandbox firewall rules that block all outbound traffic
+        // (e.g. Claude Code / Codex sandbox).  Warn early so the user knows
+        // to run the VPN from a regular terminal.
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(output) = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "Get-NetFirewallRule -DisplayName 'codex_sandbox*' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Action -eq 'Block' } | Measure-Object | Select-Object -ExpandProperty Count",
+                ])
+                .output()
+            {
+                let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if count != "0" && !count.is_empty() {
+                    tracing::error!(
+                        "a sandbox firewall rule is blocking all outbound network traffic from this process; \
+                         run the VPN from a regular terminal, not from within a sandboxed environment"
+                    );
+                }
+            }
+        }
 
         use socket2::{Domain, Protocol, Socket, Type};
 
@@ -1751,8 +1849,25 @@ pub async fn run_from_env() -> anyhow::Result<()> {
             disable_windows_udp_connreset(&socket);
         }
 
-        let addr: SocketAddr = "0.0.0.0:0".parse()?;
-        socket.bind(&addr.into())?;
+        // On Windows, bind to the physical interface IP and set IP_UNICAST_IF
+        // to bypass other VPNs' WFP traffic interception.
+        #[cfg(target_os = "windows")]
+        if let Some(ref iface) = physical_iface {
+            set_socket_unicast_if(&socket, iface.interface_index);
+        }
+
+        #[cfg(target_os = "windows")]
+        let bind_addr: SocketAddr = {
+            let bind_ip = physical_iface
+                .as_ref()
+                .map(|info| std::net::IpAddr::V4(info.local_ip))
+                .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            SocketAddr::new(bind_ip, 0)
+        };
+        #[cfg(not(target_os = "windows"))]
+        let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
+
+        socket.bind(&bind_addr.into())?;
 
         let std_socket: std::net::UdpSocket = socket.into();
         let udp = Arc::new(UdpSocket::from_std(std_socket)?);

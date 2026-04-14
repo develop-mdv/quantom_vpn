@@ -3,10 +3,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const DEFAULT_SAFE_PAYLOAD: usize = 1100;
+const DEFAULT_SAFE_PAYLOAD: usize = 1280;
 const MIN_PATH_PAYLOAD: usize = 256;
-const PROBE_STEP_BYTES: usize = 48;
-const PROBE_INTERVAL_SECS: u64 = 4;
+const PROBE_STEP_BYTES: usize = 64;
+const PROBE_INTERVAL_SECS: u64 = 2;
 const BLACKHOLE_BACKOFF_SECS: u64 = 8;
 const ROAM_HOLD_SECS: u64 = 5;
 const RECOVERY_HOLD_SECS: u64 = 6;
@@ -327,7 +327,7 @@ impl PathManager {
 
         if observation.acked_packets > 0 {
             self.last_ack_at = now;
-            self.loss_ewma = ewma(self.loss_ewma, 0.0, 0.12);
+            self.loss_ewma = ewma(self.loss_ewma, 0.0, 0.18);
         }
 
         if let Some(sample) = observation.latest_rtt {
@@ -410,7 +410,7 @@ impl PathManager {
             .saturating_add(observation.lost_packets)
             .max(1);
         let loss_sample = observation.lost_packets as f64 / total_packets as f64;
-        self.loss_ewma = ewma(self.loss_ewma, loss_sample.clamp(0.0, 1.0), 0.22);
+        self.loss_ewma = ewma(self.loss_ewma, loss_sample.clamp(0.0, 1.0), 0.20);
         self.degrade_streak = self.degrade_streak.saturating_add(1).min(8);
         self.stability_streak = self.stability_streak.saturating_sub(1);
 
@@ -585,16 +585,16 @@ impl PathManager {
         } else {
             ((smoothed_rtt_ms / min_rtt_ms) - 1.0).max(0.0)
         };
-        let loss_penalty = (self.loss_ewma * 420.0).min(42.0);
+        let loss_penalty = (self.loss_ewma * 300.0).min(36.0);
         let jitter_penalty = (self.jitter_ewma_ms / 3.5).min(18.0);
         let reorder_penalty = (self.reordering_ewma * 220.0).min(12.0);
-        let inflation_penalty = (inflation * 24.0).min(16.0);
+        let inflation_penalty = (inflation * 18.0).min(12.0);
         let roam_penalty = if self.roam_hold_until.is_some_and(|deadline| now < deadline) {
             8.0
         } else {
             0.0
         };
-        let blackhole_penalty = if self.blackhole_suspected { 24.0 } else { 0.0 };
+        let blackhole_penalty = if self.blackhole_suspected { 16.0 } else { 0.0 };
         let quality = 100.0
             - loss_penalty
             - jitter_penalty
@@ -625,10 +625,10 @@ impl PathManager {
         match self.mode {
             PathMode::Stable => 100,
             PathMode::Probing => 95,
-            PathMode::Cautious => 85,
-            PathMode::Roaming => 80,
-            PathMode::Recovering => 88,
-            PathMode::BlackholeRecovery => 70,
+            PathMode::Cautious => 90,
+            PathMode::Roaming => 85,
+            PathMode::Recovering => 90,
+            PathMode::BlackholeRecovery => 80,
         }
     }
 

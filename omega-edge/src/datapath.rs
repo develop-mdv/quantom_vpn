@@ -22,7 +22,7 @@ use omega_stealth::PersonaId;
 
 const UDP_BUF_SIZE: usize = 2048;
 const TUN_BUF_SIZE: usize = 1500;
-const MAX_DRAIN_DATAGRAMS: usize = 12;
+const MAX_DRAIN_DATAGRAMS: usize = 24;
 
 pub async fn tun_to_udp_loop(
     tun: Arc<tun_rs::AsyncDevice>,
