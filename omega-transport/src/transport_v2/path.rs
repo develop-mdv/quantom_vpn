@@ -438,7 +438,7 @@ impl PathManager {
 
         let ack_stall = now.saturating_duration_since(self.last_ack_at)
             >= scale_duration(self.smoothed_rtt, 2.0);
-        let sustained_loss = observation.lost_packets >= 2 && observation.acked_bytes == 0;
+        let sustained_loss = observation.lost_packets >= 4 && observation.acked_bytes == 0;
         let large_path = self.confirmed_payload
             > self
                 .config
@@ -768,9 +768,9 @@ mod tests {
             now,
             PathLossObservation {
                 acked_bytes: 0,
-                lost_bytes: 1280,
+                lost_bytes: 2560,
                 acked_packets: 0,
-                lost_packets: 3,
+                lost_packets: 5,
                 probe_failed_payload: None,
             },
             Duration::from_millis(110),

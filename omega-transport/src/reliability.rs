@@ -85,33 +85,27 @@ impl ReliabilityController {
         }
 
         let suggested_control =
-            if path.blackhole_suspected || path.loss_percent >= 1.5 || path.quality_score < 62 {
+            if path.loss_percent <= 15.0 && (path.loss_percent >= 1.5 || path.quality_score < 62) {
                 RecoveryStrategy::DuplicateOnce
             } else {
                 RecoveryStrategy::RetransmitOnly
             };
 
-        let suggested_interactive =
-            if path.blackhole_suspected || path.loss_percent >= 6.0 || path.quality_score < 45 {
-                RecoveryStrategy::FecHigh
-            } else if path.loss_percent >= 3.0
-                || path.jitter_ms >= 18
-                || matches!(
-                    path.mode,
-                    PathMode::Cautious
-                        | PathMode::Roaming
-                        | PathMode::Recovering
-                        | PathMode::BlackholeRecovery
-                )
-            {
+        let suggested_interactive = if path.loss_percent > 15.0 {
+                // At very high loss FEC overhead is counterproductive — it floods
+                // the path with repair packets, causing even more congestion and loss.
+                RecoveryStrategy::RetransmitOnly
+            } else if path.loss_percent >= 6.0 {
                 RecoveryStrategy::FecMedium
+            } else if path.loss_percent >= 3.0 || path.jitter_ms >= 18 {
+                RecoveryStrategy::FecLow
             } else if path.loss_percent >= 1.25 || path.reordering_percent >= 2.5 {
                 RecoveryStrategy::FecLow
             } else {
                 RecoveryStrategy::RetransmitOnly
             };
 
-        let suggested_bulk = if path.blackhole_suspected || self.last_burst_loss_percent >= 7.0 {
+        let suggested_bulk = if path.loss_percent <= 15.0 && self.last_burst_loss_percent >= 7.0 {
             RecoveryStrategy::FecLow
         } else {
             RecoveryStrategy::RetransmitOnly
@@ -315,9 +309,9 @@ mod tests {
         let plan = controller.plan_for(TrafficClass::Interactive, 320).unwrap();
         assert!(matches!(
             plan.strategy,
-            RecoveryStrategy::FecMedium | RecoveryStrategy::FecHigh
+            RecoveryStrategy::FecLow | RecoveryStrategy::FecMedium | RecoveryStrategy::FecHigh
         ));
-        assert!(plan.repair_packets >= 2);
+        assert!(plan.repair_packets >= 1);
     }
 
     #[test]

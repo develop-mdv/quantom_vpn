@@ -246,7 +246,7 @@ fn blackhole_detection_reduces_payload_budget() {
     );
     endpoint.debug_force_probe_due();
     let now = Instant::now();
-    for i in 0..3 {
+    for i in 0..6 {
         endpoint.queue_message(TrafficClass::Interactive, vec![i as u8; 900]);
         let _ = endpoint.poll_datagram(now + Duration::from_millis(i * 20), 1320);
     }
