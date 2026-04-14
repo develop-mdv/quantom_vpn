@@ -111,15 +111,19 @@ impl ReliabilityController {
             RecoveryStrategy::RetransmitOnly
         };
 
+        // When loss is very high, FEC overhead is counterproductive — force
+        // immediate de-escalation instead of waiting for good_samples hysteresis.
+        let effective_good = if path.loss_percent > 15.0 { 12 } else { self.good_samples };
+
         self.control_strategy =
-            stickier_strategy(self.control_strategy, suggested_control, self.good_samples);
+            stickier_strategy(self.control_strategy, suggested_control, effective_good);
         self.interactive_strategy = stickier_strategy(
             self.interactive_strategy,
             suggested_interactive,
-            self.good_samples,
+            effective_good,
         );
         self.bulk_strategy =
-            stickier_strategy(self.bulk_strategy, suggested_bulk, self.good_samples);
+            stickier_strategy(self.bulk_strategy, suggested_bulk, effective_good);
         self.stealth_cover_strategy = RecoveryStrategy::RetransmitOnly;
 
         self.explanation = format!(
