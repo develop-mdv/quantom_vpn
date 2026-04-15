@@ -1910,10 +1910,17 @@ pub async fn run_from_env() -> anyhow::Result<()> {
 
         let tun_ip = server_hello.tunnel_ip;
         let tun_ip_s = tun_ip.to_string();
+        // TUN MTU must fit inside a single transport datagram to avoid
+        // fragmentation. Wire overhead: TOTAL_OVERHEAD (49) + data frame
+        // header (13) = 62 bytes. Subtract from the wire MTU so inner IP
+        // packets always ship in one piece — exactly what WireGuard does.
+        let safe_tun_mtu =
+            (server_hello.server_mtu as usize).saturating_sub(TOTAL_OVERHEAD + 13).clamp(576, 1500)
+                as u16;
         let tun: Arc<tun_rs::AsyncDevice> = Arc::new(
             tun_rs::DeviceBuilder::new()
                 .ipv4(tun_ip_s.clone(), DEFAULT_TUN_PREFIX, None)
-                .mtu(server_hello.server_mtu)
+                .mtu(safe_tun_mtu)
                 .with(|builder| {
                     #[cfg(target_os = "windows")]
                     {

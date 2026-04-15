@@ -3,7 +3,11 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-const DEFAULT_SAFE_PAYLOAD: usize = 1280;
+// Start at max payload. The wire MTU is negotiated during handshake so
+// there is no need to probe from a conservative baseline.  Starting low
+// causes transport-level fragmentation whenever TUN packets exceed the
+// safe start value.
+const DEFAULT_SAFE_PAYLOAD: usize = usize::MAX;
 const MIN_PATH_PAYLOAD: usize = 256;
 const PROBE_STEP_BYTES: usize = 64;
 const PROBE_INTERVAL_SECS: u64 = 2;
@@ -730,31 +734,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn successful_probe_raises_confirmed_payload() {
-        let mut manager =
+    fn confirmed_payload_starts_at_max_and_no_probe_needed() {
+        let manager =
             PathManager::new(1320, Duration::from_millis(90), Duration::from_millis(40));
-        manager.debug_force_probe_due();
+        // With DEFAULT_SAFE_PAYLOAD = usize::MAX, confirmed starts at max
+        assert_eq!(manager.debug_confirmed_payload(), 1320);
+        // No probe target because we're already at max
         let now = Instant::now();
-        let probe = manager.maybe_probe_target(now, 1320).unwrap();
-        manager.on_probe_sent(now, probe);
-        manager.on_ack_batch(
-            now + Duration::from_millis(60),
-            PathAckObservation {
-                acked_bytes: probe,
-                acked_packets: 1,
-                reordered_packets: 0,
-                spurious_reorders: 0,
-                latest_rtt: Some(Duration::from_millis(60)),
-                probe_success_payload: Some(probe),
-            },
-            Duration::from_millis(70),
-            Duration::from_millis(40),
-        );
-        assert!(manager.debug_confirmed_payload() >= probe);
-        assert!(matches!(
-            manager.snapshot(1320, Instant::now()).mode,
-            PathMode::Recovering | PathMode::Stable
-        ));
+        assert!(manager.maybe_probe_target(now, 1320).is_none());
     }
 
     #[test]

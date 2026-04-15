@@ -9,6 +9,7 @@ use crate::{datapath, fabric, handshake, metrics, observability, runtime, sessio
 
 use omega_control::control_plane::{FabricNodeRecord, FabricNodeRole};
 use omega_control::identity::{ensure_identity_file, IdentityStore};
+use omega_core_wire::TOTAL_OVERHEAD;
 
 const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
@@ -72,9 +73,13 @@ pub async fn run_server() -> anyhow::Result<()> {
         tunnel_mtu
     );
 
+    // Reduce TUN MTU so every IP packet fits in a single transport
+    // datagram without fragmentation (wire overhead = 62 bytes).
+    let safe_tun_mtu =
+        (tunnel_mtu as usize).saturating_sub(TOTAL_OVERHEAD + 13).clamp(576, 1500) as u16;
     let tun: Arc<tun_rs::AsyncDevice> = match tun_rs::DeviceBuilder::new()
         .ipv4(DEFAULT_TUN_IP, DEFAULT_TUN_PREFIX, None)
-        .mtu(tunnel_mtu)
+        .mtu(safe_tun_mtu)
         .build_async()
     {
         Ok(dev) => Arc::new(dev),

@@ -131,7 +131,9 @@ fn interactive_traffic_preempts_bulk() {
 }
 
 #[test]
-fn packet_loss_requeues_once_for_retransmission() {
+fn packet_loss_does_not_retransmit_data() {
+    // Data frames are NOT retransmitted — inner TCP handles retransmission.
+    // Only control frames are retransmitted at the transport level.
     let mut endpoint = TransportEndpoint::new(
         ConnectionId([5u8; 8]),
         [4u8; 32],
@@ -139,28 +141,14 @@ fn packet_loss_requeues_once_for_retransmission() {
     );
     let now = Instant::now();
     endpoint.queue_message(TrafficClass::Interactive, vec![0x42; 64]);
-    let first = endpoint.poll_datagram(now, 96).unwrap();
-    let retransmit = endpoint
-        .poll_datagram(now + Duration::from_millis(200), 256)
-        .unwrap();
-    assert_ne!(retransmit.packet_number, first.packet_number);
-    let first_data = first
-        .frames
-        .iter()
-        .find_map(|frame| match frame {
-            TransportFrame::Data(data) => Some(data.payload.clone()),
-            _ => None,
-        })
-        .unwrap();
-    let retransmit_data = retransmit
-        .frames
-        .iter()
-        .find_map(|frame| match frame {
-            TransportFrame::Data(data) => Some(data.payload.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(first_data, retransmit_data);
+    let _first = endpoint.poll_datagram(now, 96).unwrap();
+    // After loss detection timeout, no retransmit should be available
+    // because data frames are dropped, not re-queued.
+    let retransmit = endpoint.poll_datagram(now + Duration::from_millis(200), 256);
+    assert!(
+        retransmit.is_none(),
+        "data frames should not be retransmitted"
+    );
 }
 
 #[test]
@@ -191,8 +179,11 @@ fn connection_id_rotates_after_interval() {
 }
 
 #[test]
-fn dplpmtud_probe_confirms_larger_payload() {
-    let mut endpoint = TransportEndpoint::new(
+fn confirmed_payload_starts_at_max() {
+    // With DEFAULT_SAFE_PAYLOAD = usize::MAX, the path starts at full
+    // max_datagram_payload immediately — no DPLPMTUD probing needed
+    // because the wire MTU is already negotiated during handshake.
+    let endpoint = TransportEndpoint::new(
         ConnectionId([7u8; 8]),
         [6u8; 32],
         TransportConfig {
@@ -200,38 +191,11 @@ fn dplpmtud_probe_confirms_larger_payload() {
             ..TransportConfig::default()
         },
     );
-    endpoint.debug_force_probe_due();
-    endpoint.queue_keepalive();
-
-    let now = Instant::now();
-    let datagram = endpoint.poll_datagram(now, 1320).unwrap();
-    assert!(
-        datagram.encoded_len > 1100,
-        "probe should exceed conservative starting payload"
-    );
-    assert!(datagram
-        .frames
-        .iter()
-        .any(|frame| matches!(frame, TransportFrame::Padding(_))));
-
-    let ack = AckFrame::normalized(
-        vec![AckRange::new(
-            datagram.packet_number,
-            datagram.packet_number,
-        )],
-        1_000,
-    );
-    endpoint.on_datagram_received(
-        now + Duration::from_millis(50),
-        50,
-        &[TransportFrame::Ack(ack)],
-    );
     let snapshot = endpoint.snapshot();
-    assert!(snapshot.path.confirmed_payload >= datagram.encoded_len);
-    assert!(matches!(
-        snapshot.path.mode,
-        PathMode::Recovering | PathMode::Stable
-    ));
+    assert_eq!(
+        snapshot.path.confirmed_payload, 1320,
+        "confirmed payload should start at max_datagram_payload"
+    );
 }
 
 #[test]

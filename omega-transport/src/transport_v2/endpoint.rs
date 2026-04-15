@@ -662,7 +662,15 @@ impl TransportEndpoint {
     fn requeue_frames_front(&mut self, frames: Vec<TransportFrame>) {
         for frame in frames.into_iter().rev() {
             match frame {
-                TransportFrame::Ack(_) | TransportFrame::Padding(_) => {}
+                // Never retransmit data frames — inner TCP handles its own
+                // retransmission.  Transport-level retransmits cause a death
+                // spiral: lost retransmits trigger more retransmits, flooding
+                // the path and amplifying congestion.  WireGuard takes the
+                // same approach: each packet is sent exactly once.
+                TransportFrame::Ack(_)
+                | TransportFrame::Padding(_)
+                | TransportFrame::Data(_)
+                | TransportFrame::Fec(_) => {}
                 other => self.retransmit_queue.push_front(other),
             }
         }
