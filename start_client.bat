@@ -51,7 +51,7 @@ if "%OMEGA_DEVICE_TOKEN%"=="" (
 if "%OMEGA_DEVICE_NAME%"=="" set "OMEGA_DEVICE_NAME=%COMPUTERNAME%"
 if "%OMEGA_PLATFORM%"=="" set "OMEGA_PLATFORM=windows"
 
-REM 4) Warn about other tunnel clients but proceed (Omega takes routing priority)
+REM 4) Refuse to start while another full-tunnel client owns routes
 set "OMEGA_CONFLICTING_TUNNELS="
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$names=@('xray','tun2socks','v2ray','sing-box','clash','mihomo','nekoray','hysteria'); Get-Process -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.ProcessName.ToLower() } | Select-Object -ExpandProperty ProcessName -Unique"`) do (
     if defined OMEGA_CONFLICTING_TUNNELS (
@@ -61,8 +61,9 @@ for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$names=@('xra
     )
 )
 if defined OMEGA_CONFLICTING_TUNNELS (
-    echo [WARN] Other tunnel clients detected: !OMEGA_CONFLICTING_TUNNELS!
-    echo [WARN] Omega will attempt to take routing priority. For best results, stop other VPNs first.
+    echo [ERROR] Another tunnel client is still running: !OMEGA_CONFLICTING_TUNNELS!
+    echo [ERROR] Stop Amnezia/Xray/tun2socks/other VPN clients before starting Omega.
+    exit /b 1
 )
 
 REM 5) Ensure wintun.dll exists

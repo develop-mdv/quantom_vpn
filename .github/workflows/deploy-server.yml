@@ -6,14 +6,6 @@ on:
       - main
     paths:
       - "omega-server/**"
-      - "omega-edge/**"
-      - "omega-control/**"
-      - "omega-core-wire/**"
-      - "omega-core-crypto/**"
-      - "omega-transport/**"
-      - "omega-stealth/**"
-      - "omega-relay/**"
-      - "omega-exit/**"
       - "omega-core/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -21,7 +13,6 @@ on:
       - "deploy/update_server.sh"
       - "deploy/diagnose_server.sh"
       - "deploy/omega-server.service"
-      - "deploy/omega-alerts.yml"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
 
@@ -54,7 +45,6 @@ jobs:
           cp deploy/update_server.sh dist/update_server.sh
           cp deploy/diagnose_server.sh dist/diagnose_server.sh
           cp deploy/omega-server.service dist/omega-server.service
-          cp deploy/omega-alerts.yml dist/omega-alerts.yml
           chmod +x dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh
 
       - name: Setup SSH key
@@ -156,7 +146,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh dist/omega-server.service dist/omega-alerts.yml "$USER@$HOST:$REMOTE_DIR/"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh dist/omega-server.service "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Deploy on server
         env:
@@ -164,8 +154,6 @@ jobs:
           DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
           DEPLOY_INSTALL_DIR: ${{ secrets.DEPLOY_INSTALL_DIR }}
           DEPLOY_KEEP_RELEASES: ${{ secrets.DEPLOY_KEEP_RELEASES }}
-          DEPLOY_ALERTS_DEST: ${{ secrets.DEPLOY_ALERTS_DEST }}
-          DEPLOY_PROMETHEUS_SERVICE_NAME: ${{ secrets.DEPLOY_PROMETHEUS_SERVICE_NAME }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
           HOST="$DEPLOY_HOST_CLEAN"
@@ -179,10 +167,8 @@ jobs:
              OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
              OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
              OMEGA_KEEP_RELEASES='${DEPLOY_KEEP_RELEASES:-5}' \
-             OMEGA_ALERTS_DEST='${DEPLOY_ALERTS_DEST:-/opt/omega/omega-alerts.yml}' \
-             OMEGA_PROMETHEUS_SERVICE_NAME='${DEPLOY_PROMETHEUS_SERVICE_NAME:-}' \
              OMEGA_RELEASE_ID='$GITHUB_SHA' \
-             sudo bash '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service' '$REMOTE_DIR/omega-alerts.yml' '$REMOTE_DIR/setup_nat.sh'"
+             sudo '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service'"
 
       - name: Re-apply network rules
         env:
@@ -190,7 +176,6 @@ jobs:
           DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
-          DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
           DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
@@ -202,7 +187,6 @@ jobs:
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
-          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
@@ -211,11 +195,9 @@ jobs:
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='${PORT}' \
-             OMEGA_ADMIN_WEB_PUBLIC='1' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo bash '$REMOTE_DIR/setup_nat.sh'"
+             sudo '$REMOTE_DIR/setup_nat.sh'"
 
       - name: Run post-deploy diagnostics
         env:
@@ -224,7 +206,6 @@ jobs:
           DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
-          DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
           DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
@@ -236,7 +217,6 @@ jobs:
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
-          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
           if [ -z "$CLIENT_CIDR" ]; then
@@ -251,10 +231,6 @@ jobs:
             VPN_PROTOCOL="udp"
           fi
 
-          if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
-          fi
-
           if [ -z "$METRICS_PORT" ]; then
             METRICS_PORT="9090"
           fi
@@ -266,14 +242,6 @@ jobs:
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='${PORT}' \
-             OMEGA_ADMIN_WEB_PUBLIC='1' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo bash '$REMOTE_DIR/diagnose_server.sh'"
-
-
-
-
-
-
+             sudo '$REMOTE_DIR/diagnose_server.sh'"

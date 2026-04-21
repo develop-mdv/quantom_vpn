@@ -1,21 +1,22 @@
-# Operations
-
-Этот документ описывает текущий практический запуск проекта: локально, на сервере и через GitHub Actions.
+﻿# Operations
 
 ## Что нужно для запуска
 
 ### Сервер
 
 - Linux с поддержкой TUN.
-- Права, позволяющие создать TUN и открыть нужный UDP port.
-- Для production обычно нужен systemd и root/capabilities.
+- Права, позволяющие создать TUN и bind-иться на нужный UDP port.
+- Для production по умолчанию предполагается systemd + root/capabilities.
 
 ### Клиент
 
 - Rust toolchain, если запуск идет из исходников.
 - На Windows нужен `wintun.dll`.
-- Основной user-facing путь сейчас идет через `omega-client-app setup/connect/status`.
-- `start_client.bat` остается рабочим, но это legacy wrapper для env-driven `omega-client`.
+- В репозитории есть `start_client.bat`, который умеет:
+  - подняться с правами администратора;
+  - прочитать `.env`;
+  - при необходимости скачать `wintun.dll`;
+  - запустить `omega-client`.
 
 ## Локальный happy path
 
@@ -34,7 +35,7 @@ cargo run -p omega-server -- admin register_device \
   --platform windows
 ```
 
-Сохрани из вывода:
+Нужно сохранить:
 
 - `device_id`
 - `token`
@@ -45,207 +46,221 @@ cargo run -p omega-server -- admin register_device \
 cargo run -p omega-server
 ```
 
-### 4. Настроить desktop client
+Сервер по умолчанию:
 
-Если используешь production deployment через deploy/omega-server.service, указывай server_ip:443. Порт 51820 относится только к локальному дефолту при запуске bare cargo run -p omega-server без переопределения OMEGA_BIND.
+- слушает `0.0.0.0:51820`
+- поднимает TUN `10.7.0.1/16`
+- пишет snapshots в `state/`
+- поднимает metrics на `127.0.0.1:9090`
+- поднимает built-in web admin на `127.0.0.1:8081`
 
-```bash
-cargo run -p omega-client-app -- setup \
-  --server <server_ip>:443 \
-  --device-id <device_uuid> \
-  --device-token <device_token_hex> \
-  --device-name laptop \
-  --profile general
-```
-
-### 5. Подключить и проверить статус
+### 4. Запустить клиент
 
 ```bash
-cargo run -p omega-client-app -- connect
-cargo run -p omega-client-app -- status
-cargo run -p omega-client-app -- status --advanced
-```
-
-### Legacy env-driven запуск
-
-```bash
-OMEGA_SERVER=<server_ip>:443 \
+OMEGA_SERVER=203.0.113.1:51820 \
 OMEGA_DEVICE_ID=<device_uuid> \
 OMEGA_DEVICE_TOKEN=<device_token_hex> \
 OMEGA_DEVICE_NAME="laptop" \
 cargo run -p omega-client
 ```
 
-## Повседневные команды
+## Windows-клиент через `.env`
 
-### Клиент
+Рекомендуемый путь:
 
-```bash
-cargo run -p omega-client-app -- status
-cargo run -p omega-client-app -- connect
-cargo run -p omega-client-app -- disconnect
-cargo run -p omega-client-app -- reconnect
-cargo run -p omega-client-app -- export-diagnostics
-cargo run -p omega-client-app -- show-config
-```
+1. Скопировать `.env.example` в `.env`.
+2. Заполнить `OMEGA_SERVER`, `OMEGA_DEVICE_ID`, `OMEGA_DEVICE_TOKEN`.
+3. При необходимости скорректировать профиль, MTU, DNS и diagnostics path.
+4. Запустить `start_client.bat` от имени администратора.
 
-### Сервер
+`start_client.bat` дополнительно удобен тем, что при отсутствии `wintun.dll` сам подтянет сборку Wintun.
+
+## Администрирование
+
+### CLI-команды
 
 ```bash
 cargo run -p omega-server -- admin list_users
+cargo run -p omega-server -- admin block_user --user-id <user_uuid>
+cargo run -p omega-server -- admin unblock_user --user-id <user_uuid>
+cargo run -p omega-server -- admin delete_user --user-id <user_uuid>
+cargo run -p omega-server -- admin register_device --user-id <user_uuid> --device-name "laptop" --platform windows
+cargo run -p omega-server -- admin revoke_device --device-id <device_uuid>
+cargo run -p omega-server -- admin list_user_devices --user-id <user_uuid>
 cargo run -p omega-server -- admin list_active_sessions
 cargo run -p omega-server -- admin show_runtime
-cargo run -p omega-server -- admin show_observability
-cargo run -p omega-server -- admin show_rollout_guard
-cargo run -p omega-server -- admin assert_rollout_guard
+cargo run -p omega-server -- admin terminate_session --flow-id <32_hex_flow_id>
 cargo run -p omega-server -- admin show_audit --limit 50
 ```
 
-## Built-in admin и runtime files
+### Built-in web admin
 
-### Built-in admin
+Если `OMEGA_ADMIN_WEB_DISABLE` не задан, сервер поднимает web admin.
 
-По текущему production deploy built-in web admin поднят публично на `0.0.0.0:8081`, если не задан `OMEGA_ADMIN_WEB_DISABLE=true`. Это временно удобно для первичной настройки, но без authentication такой доступ небезопасен.
+По умолчанию:
 
-### Основные server files
+```text
+http://127.0.0.1:8081/
+```
 
-- `state/control_plane.json` - users, devices, sessions, tickets, policies, fabric nodes, audit.
-- `state/sessions.json` - active session views.
-- `state/runtime.json` - runtime snapshot сервера.
-- `state/observability.json` - rollout guard, alerts, SRE signals.
-- `state/trace.ndjson` - correlation-aware trace journal.
+Через UI можно:
 
-### Основные client files
+- создать пользователя;
+- зарегистрировать устройство и сразу получить одноразовый token;
+- block/unblock/delete пользователя;
+- revoke устройство;
+- terminate активную сессию;
+- скопировать шаблон `.env` для клиента.
 
-- `omega-client/state/app-config.json` - launcher config.
-- `omega-client/state/lifecycle.json` - lifecycle snapshot runtime.
-- `omega-client/state/diagnostics.json` - negotiated MTU, path quality, counters, DNS checks.
-- `omega-client/state/runtime-control.json` - soft stop и launcher/runtime coordination.
-- `omega-client/state/resumption_ticket.hex` - локальный resumption state.
+## Runtime-файлы и что в них смотреть
 
-## Production deploy
+### Сервер
 
-### Обычный релизный путь
+| Файл | Что хранит |
+| --- | --- |
+| `state/identity.json` | Пользователи, устройства, audit events. |
+| `state/sessions.json` | Активные сессии в виде `ActiveSessionView`. |
+| `state/runtime.json` | Runtime config + summary + sessions. |
+| `state/admin_commands.ndjson` | Очередь команд для terminate session. |
 
-Основной production flow сейчас такой:
+### Клиент
 
-1. Push в `main`.
-2. `deploy-server.yml` собирает `omega-server --release`.
-3. Workflow загружает на сервер:
-   - `omega-server`
-   - `setup_nat.sh`
-   - `update_server.sh`
-   - `diagnose_server.sh`
-   - `omega-server.service`
-   - `omega-alerts.yml`
-4. На сервере запускается `update_server.sh`.
-5. Скрипт обновляет бинарник, systemd unit и alert rules.
-6. Затем он ждет healthy service и прогоняет rollout guard.
-7. После этого workflow повторно применяет `setup_nat.sh` и запускает `diagnose_server.sh`.
+| Файл | Что хранит |
+| --- | --- |
+| `omega-client/state/diagnostics.json` | Текущее состояние клиента, negotiated MTU, handshake RTT, DNS check, counters и path quality. |
 
-### Когда запускать `bootstrap-network.yml`
+## Диагностика
 
-Этот workflow нужен не для обычного релиза, а для сетевого bootstrap/repair:
+### Самые полезные точки проверки
 
-- новый VPS;
-- переустановка ОС;
-- слетели nftables, NAT, `ip_forward`, MSS clamping;
-- поменялся public interface или порты;
-- бинарник уже задеплоен, но трафик не идет и проблема похожа именно на firewall/NAT.
+- `cargo run -p omega-server -- admin show_runtime`
+- `cargo run -p omega-server -- admin list_active_sessions`
+- `cargo run -p omega-server -- admin show_audit`
+- `omega-client/state/diagnostics.json`
+- Prometheus endpoint на `OMEGA_METRICS_BIND`
 
-Если менялся только Rust-код, обычно достаточно обычного push и `deploy-server.yml`.
+### Linux server bootstrap/health
 
-### Alert rules
+```bash
+sudo OMEGA_VPN_PORT=443 bash deploy/setup_nat.sh
+sudo bash deploy/diagnose_server.sh
+```
 
-`deploy/omega-alerts.yml` теперь входит в auto-deploy bundle.
+`setup_nat.sh` делает:
 
-Поведение такое:
+- `ip_forward=1`
+- loose `rp_filter`
+- `nftables` rules
+- `MASQUERADE` для клиентской подсети
+- MSS clamping
+- увеличенные UDP conntrack timeouts
 
-- rules-файл копируется на сервер автоматически;
-- по умолчанию кладется в `/opt/omega/omega-alerts.yml`;
-- если задан `DEPLOY_PROMETHEUS_SERVICE_NAME`, deploy также попробует сделать `systemctl reload`, а при необходимости `restart` Prometheus;
-- если этот secret не задан, файл все равно уедет на сервер, но Prometheus нужно будет перечитать отдельно.
+`diagnose_server.sh` проверяет:
 
-## GitHub Actions secrets
+- sysctl tuning
+- nftables rules
+- systemd service status
+- UDP listener
+- runtime snapshot
+- профиль, IPv6 mode и morphing policy
 
-### Минимально достаточный набор
+## Метрики
 
-Для базового server auto-deploy обычно достаточно:
+Сервер публикует Prometheus exporter через `metrics-exporter-prometheus`.
+
+Типовые метрики:
+
+- `omega_active_sessions`
+- `omega_packets_in_total`
+- `omega_packets_out_total`
+- `omega_bytes_in_total`
+- `omega_bytes_out_total`
+- `omega_handshake_success_total`
+- `omega_handshake_failures_total`
+- `omega_nack_sent_total`
+- `omega_nack_received_total`
+- `omega_retransmit_sent_total`
+
+## Production deployment
+
+### Systemd
+
+В репозитории есть пример unit-файла `deploy/omega-server.service`.
+
+Он по умолчанию предполагает:
+
+- бинарник в `/opt/omega/omega-server`
+- profile `gaming`
+- bind `0.0.0.0:443`
+- admin web и metrics только на localhost
+- state-файлы в `/opt/omega/state/*`
+
+### Rolling update script
+
+`deploy/update_server.sh`:
+
+- складывает новый бинарник в `/opt/omega/releases/`
+- переключает symlink `/opt/omega/omega-server`
+- обновляет systemd unit при необходимости
+- рестартует сервис
+- при неуспехе откатывается на прошлый бинарник
+- чистит старые релизы
+
+### GitHub Actions
+
+#### `deploy-server.yml`
+
+Срабатывает при push в `main`, если затронуты:
+
+- `omega-server/**`
+- `omega-core/**`
+- `Cargo.toml`
+- `Cargo.lock`
+- deploy scripts / workflow
+
+Workflow:
+
+1. собирает `omega-server --release`
+2. подготавливает bundle
+3. закачивает его на VPS по SSH
+4. вызывает `deploy/update_server.sh`
+5. повторно применяет `setup_nat.sh`
+6. запускает `diagnose_server.sh`
+
+Основные secrets:
 
 - `DEPLOY_HOST`
 - `DEPLOY_USER`
 - `DEPLOY_SSH_KEY`
-
-У тебя уже есть еще и `DEPLOY_PATH`, это нормально и полезно: workflow будет складывать release bundle в указанную временную папку на сервере.
-
-### Что очень желательно добавить
-
 - `DEPLOY_KNOWN_HOSTS`
 
-Workflow умеет fallback на `ssh-keyscan`, если secret пустой, так что без него deploy тоже может сработать. Но pinned host key в secrets делает deploy заметно надежнее и предсказуемее.
-
-### Часто используемые optional secrets
+Опциональные secrets:
 
 - `DEPLOY_PORT`
 - `DEPLOY_PATH`
 - `DEPLOY_SERVICE_NAME`
 - `DEPLOY_INSTALL_DIR`
 - `DEPLOY_KEEP_RELEASES`
-
-### Optional secrets для alert rules
-
-- `DEPLOY_ALERTS_DEST`
-- `DEPLOY_PROMETHEUS_SERVICE_NAME`
-
-### Optional secrets для сетевого контура
-
 - `DEPLOY_CLIENT_CIDR`
 - `DEPLOY_VPN_PORT`
 - `DEPLOY_VPN_PROTOCOL`
 - `DEPLOY_METRICS_PORT`
 
-## Диагностика и triage
+#### `bootstrap-network.yml`
 
-### Самые полезные команды
+Ручной workflow для случаев, когда нужно отдельно накатить или перепроверить сетевой bootstrap на сервере:
 
-```bash
-cargo run -p omega-server -- admin show_rollout_guard
-cargo run -p omega-server -- admin show_observability
-cargo run -p omega-server -- admin show_runtime
-cargo run -p omega-server -- admin list_active_sessions
-cargo run -p omega-server -- admin show_audit --limit 200
-```
+- загружает `setup_nat.sh` и `diagnose_server.sh`
+- применяет сетевые правила
+- прогоняет пост-bootstrap диагностику
 
-### Скрипты сервера
+## Docker/dev container
 
-```bash
-sudo bash deploy/setup_nat.sh
-sudo bash deploy/diagnose_server.sh
-```
+В проекте есть:
 
-`setup_nat.sh` отвечает за `ip_forward`, nftables/NAT, MSS clamping и сетевые sysctl.
+- `Dockerfile.dev`
+- `docker-compose.yml`
 
-`diagnose_server.sh` проверяет:
+Они нужны для Linux-oriented development environment с `NET_ADMIN`, `/dev/net/tun`, сетевыми утилитами и Rust toolchain.
 
-- sysctl tuning;
-- nftables rules;
-- systemd service status;
-- UDP listener;
-- runtime snapshot;
-- observability snapshot;
-- rollout guard и базовые policy/profile ожидания.
-
-### Рекомендуемый triage order
-
-1. `show_rollout_guard`
-2. `show_observability`
-3. `show_runtime`
-4. `state/trace.ndjson`
-5. `show_audit --limit 200`
-6. `deploy/diagnose_server.sh`
-
-## Что важно помнить
-
-- `start_client.bat` не сломан, но это legacy path. Основной UX сейчас в `omega-client-app`.
-- `bootstrap-network.yml` не нужно запускать после каждого push.
-- `omega-alerts.yml` теперь деплоится автоматически, но auto-reload Prometheus включается только при наличии соответствующего systemd unit в secrets.
+Это удобный путь для локальных экспериментов с TUN/UDP, но не обязательный слой для обычной разработки.

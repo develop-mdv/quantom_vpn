@@ -379,32 +379,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "curve25519-dalek"
-version = "4.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "curve25519-dalek-derive",
- "fiat-crypto",
- "rustc_version",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "curve25519-dalek-derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,12 +469,6 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 dependencies = [
  "getrandom 0.2.17",
 ]
-
-[[package]]
-name = "fiat-crypto"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "find-msvc-tools"
@@ -1179,136 +1147,35 @@ name = "omega-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "omega-client-runtime",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "omega-client-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "omega-client-runtime",
+ "byteorder",
+ "bytes",
+ "hkdf",
+ "kem",
+ "ml-kem",
+ "omega-core",
+ "rand 0.8.5",
  "ring",
  "serde",
  "serde_json",
  "sha2",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "omega-client-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "byteorder",
- "bytes",
- "kem",
- "ml-kem",
- "omega-core-crypto",
- "omega-core-wire",
- "omega-stealth",
- "omega-transport",
- "rand 0.8.5",
- "serde",
- "serde_json",
  "socket2 0.5.10",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "tun-rs",
-]
-
-[[package]]
-name = "omega-control"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "omega-core-wire",
- "omega-stealth",
- "rand 0.8.5",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
 ]
 
 [[package]]
 name = "omega-core"
 version = "0.1.0"
 dependencies = [
- "criterion",
- "omega-core-crypto",
- "omega-core-wire",
- "omega-stealth",
- "omega-transport",
-]
-
-[[package]]
-name = "omega-core-crypto"
-version = "0.1.0"
-dependencies = [
- "hkdf",
- "rand 0.8.5",
- "ring",
- "sha2",
- "x25519-dalek",
-]
-
-[[package]]
-name = "omega-core-wire"
-version = "0.1.0"
-dependencies = [
- "byteorder",
- "sha2",
-]
-
-[[package]]
-name = "omega-edge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "byteorder",
  "bytes",
- "dashmap",
- "kem",
- "metrics",
- "metrics-exporter-prometheus",
- "ml-kem",
- "omega-control",
- "omega-core-crypto",
- "omega-core-wire",
- "omega-relay",
- "omega-stealth",
- "omega-transport",
- "rand 0.8.5",
- "serde",
- "serde_json",
+ "criterion",
+ "hkdf",
+ "raptorq",
+ "ring",
  "sha2",
- "socket2 0.5.10",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tun-rs",
-]
-
-[[package]]
-name = "omega-exit"
-version = "0.1.0"
-dependencies = [
- "omega-control",
- "serde",
-]
-
-[[package]]
-name = "omega-relay"
-version = "0.1.0"
-dependencies = [
- "omega-control",
- "omega-stealth",
- "serde",
 ]
 
 [[package]]
@@ -1316,31 +1183,25 @@ name = "omega-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "omega-control",
- "omega-edge",
+ "byteorder",
+ "bytes",
+ "dashmap",
+ "hkdf",
+ "kem",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "ml-kem",
+ "omega-core",
+ "rand 0.8.5",
+ "ring",
  "serde",
  "serde_json",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "omega-stealth"
-version = "0.1.0"
-dependencies = [
- "omega-transport",
- "serde",
-]
-
-[[package]]
-name = "omega-transport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "omega-core-wire",
- "raptorq",
- "serde",
  "sha2",
+ "socket2 0.5.10",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tun-rs",
 ]
 
 [[package]]
@@ -1671,15 +1532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustc_version"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
-dependencies = [
- "semver",
-]
-
-[[package]]
 name = "rustls"
 version = "0.23.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,12 +1630,6 @@ dependencies = [
  "core-foundation-sys",
  "libc",
 ]
-
-[[package]]
-name = "semver"
-version = "1.0.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -2612,18 +2458,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7249219f66ced02969388cf2bb044a09756a083d0fab1e566056b04d9fbcaa5"
 
 [[package]]
-name = "x25519-dalek"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
-dependencies = [
- "curve25519-dalek",
- "rand_core 0.6.4",
- "serde",
- "zeroize",
-]
-
-[[package]]
 name = "zerocopy"
 version = "0.8.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2648,20 +2482,6 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
-dependencies = [
- "zeroize_derive",
-]
-
-[[package]]
-name = "zeroize_derive"
-version = "1.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "zmij"

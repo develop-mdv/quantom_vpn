@@ -1,120 +1,210 @@
-# Omega VPN Deploy Guide
+# Omega VPN: Руководство по развертыванию
 
-Этот документ описывает первичное развертывание на Linux/VPS. Для day-2 операций, диагностики и текущего CI/CD смотри `docs/OPERATIONS.md`.
+Это руководство описывает процесс установки и настройки сервера Omega VPN на Linux VPS (рекомендуется Ubuntu 22.04+).
 
-## Что предполагается
+## Предварительные требования
+- VPS с публичным IP-адресом.
+- Доступ root или sudo.
+- Ядро Linux версии 5.15+ (для лучшей производительности TUN/eBPF).
 
-- Ubuntu 22.04+ или другой Linux с TUN и systemd.
-- Публичный IP или домен.
-- SSH-доступ с sudo.
-- Понимание, какой интерфейс является публичным.
+## 1. Подготовка системы
 
-## Быстрый путь: GitHub Actions + systemd
-
-Текущий рекомендуемый production flow не требует ручного `git pull` на сервере.
-
-### Один раз на сервере
-
-1. Создай директории:
+Включите пересылку пакетов (IP forwarding) для маршрутизации трафика через VPN-туннель.
 
 ```bash
-sudo mkdir -p /opt/omega/state
-sudo chown -R $USER:$USER /opt/omega
+# Включить пересылку IPv4 немедленно
+sysctl -w net.ipv4.ip_forward=1
+
+# Сделать настройку постоянной
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.d/99-omega.conf
 ```
 
-2. Поставь systemd unit:
+Настройте фаервол (UFW), чтобы разрешить SSH и VPN трафик.
 
 ```bash
-sudo cp deploy/omega-server.service /etc/systemd/system/omega-server.service
-sudo systemctl daemon-reload
+# Настройка NAT и MSS Clamping (ОБЯЗАТЕЛЬНО)
+# Без этого шага у клиента не будет доступа в интернет!
+
+# Мы подготовили автоматический скрипт настройки.
+# Просто запустите его на сервере:
+
+curl -sSL https://raw.githubusercontent.com/your-repo/omega-vpn/main/deploy/setup_nat.sh | sudo bash
+
+# Или, если вы клонировали репозиторий:
+# cd ~/omega-vpn/deploy
+# sudo bash setup_nat.sh
+
 ```
 
-3. Один раз примени сетевой bootstrap:
+## 2. Установка (Сборка из исходного кода)
+
+Установите Rust и необходимые зависимости.
 
 ```bash
-sudo bash deploy/setup_nat.sh
+apt update && apt install -y build-essential curl pkg-config libssl-dev clang
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
 
-4. Убедись, что у deploy-пользователя есть `sudo` без пароля хотя бы на нужные `systemctl` и deploy scripts.
+Клонируйте репозиторий и соберите сервер.
 
-### Дальше обычный релиз
+```bash
+git clone https://github.com/your-repo/omega-vpn.git
+cd omega-vpn
+cargo build --release -p omega-server
+```
 
-После этого основной путь - просто push в `main`.
+Скопируйте бинарный файл в системную директорию.
 
-`deploy-server.yml` сам:
+```bash
+mkdir -p /opt/omega
+cp target/release/omega-server /opt/omega/
+chmod +x /opt/omega/omega-server
+```
 
-1. собирает `omega-server --release`;
-2. загружает deploy bundle на сервер;
-3. вызывает `deploy/update_server.sh`;
-4. повторно применяет `deploy/setup_nat.sh`;
-5. запускает `deploy/diagnose_server.sh`.
+## 3. Настройка службы (Systemd)
 
-## Какие secrets нужны в GitHub
+Скопируйте файл службы systemd.
 
-### Хватает для старта
+```bash
+cp deploy/omega-server.service /etc/systemd/system/
+systemctl daemon-reload
+```
 
-- `DEPLOY_HOST`
-- `DEPLOY_USER`
-- `DEPLOY_SSH_KEY`
-- `DEPLOY_PATH`
+Включите и запустите службу.
 
-С таким набором deploy уже может работать.
+```bash
+systemctl enable omega-server
+systemctl start omega-server
+systemctl status omega-server
+```
 
-### Очень рекомендуется
+## 4. Настройка клиента
 
-- `DEPLOY_KNOWN_HOSTS`
+По умолчанию сервер слушает на `0.0.0.0:51820`.
+Убедитесь, что на клиенте установлена правильная переменная окружения `OMEGA_SERVER`, указывающая на IP вашего VPS.
 
-Без него workflow пытается сделать `ssh-keyscan` на лету. Это удобный fallback, но pinned host key в secrets надежнее.
+Пример запуска клиента:
+```bash
+OMEGA_SERVER=203.0.113.1:51820 cargo run --release -p omega-client
+```
 
-### Полезные optional secrets
+## 5. Обновление сервера
+ 
+ При выходе новых версий или исправлений безопасности (как сейчас), выполните следующие шаги:
+ 
+ 1. **Получите свежий код**:
+    ```bash
+    cd ~/omega-vpn
+    git pull
+    ```
+ 
+ 2. **Пересооберите сервер**:
+    ```bash
+    cargo build --release -p omega-server
+    ```
+ 
+ 3. **Обновите бинарный файл**:
+    ```bash
+    systemctl stop omega-server
+    cp target/release/omega-server /opt/omega/
+    chmod +x /opt/omega/omega-server
+    ```
+ 
+ 4. **Перезапустите службу**:
+    ```bash
+    systemctl start omega-server
+    systemctl status omega-server
+    ```
+ 
+ ## Устранение неполадок
 
-- `DEPLOY_PORT`
-- `DEPLOY_SERVICE_NAME`
-- `DEPLOY_INSTALL_DIR`
-- `DEPLOY_KEEP_RELEASES`
-- `DEPLOY_CLIENT_CIDR`
-- `DEPLOY_VPN_PORT`
-- `DEPLOY_VPN_PROTOCOL`
-- `DEPLOY_METRICS_PORT`
+Просмотр логов:
+```bash
+journalctl -u omega-server -f
+```
 
-### Optional secrets для alert rules
+Если пакеты теряются, проверьте настройки MTU или правила фаервола.
+## Подготовка нескольких пользователей и устройств после деплоя
 
-- `DEPLOY_ALERTS_DEST`
-- `DEPLOY_PROMETHEUS_SERVICE_NAME`
+После запуска сервера создайте пользователей и устройства через админ CLI:
 
-Если `DEPLOY_PROMETHEUS_SERVICE_NAME` задан, deploy после обновления `omega-alerts.yml` попытается перечитать Prometheus автоматически.
+```bash
+# Создать пользователя
+/opt/omega/omega-server admin create_user --max-devices 5 --max-sessions 3
 
-## Что именно деплоится сейчас
+# Зарегистрировать устройство (сохраните device_id и token из вывода)
+/opt/omega/omega-server admin register_device \
+  --user-id <user_uuid> \
+  --device-name "laptop" \
+  --platform linux
+```
 
-В server bundle входят:
+Клиент должен передавать учетные данные устройства:
 
-- `omega-server`
-- `setup_nat.sh`
-- `update_server.sh`
-- `diagnose_server.sh`
-- `omega-server.service`
-- `omega-alerts.yml`
+```bash
+OMEGA_SERVER=<server_ip>:51820 \
+OMEGA_DEVICE_ID=<device_uuid> \
+OMEGA_DEVICE_TOKEN=<token_hex> \
+OMEGA_DEVICE_NAME="laptop" \
+./omega-client
+```
 
-Это значит, что при обычном push обновляется не только бинарник, но и deploy scripts, unit file и alert rules.
+Дополнительные переменные окружения для путей состояния сервера:
 
-## Когда использовать `bootstrap-network.yml`
+- `OMEGA_IDENTITY_DB` (по умолчанию `omega-server/state/identity.json`)
+- `OMEGA_SESSION_SNAPSHOT` (по умолчанию `omega-server/state/sessions.json`)
+- `OMEGA_ADMIN_COMMANDS` (по умолчанию `omega-server/state/admin_commands.ndjson`)
+## Встроенная веб-админка
 
-Отдельно запускай этот workflow только когда нужно восстановить или проверить сетевой bootstrap:
+Сервер может поднимать встроенную web admin панель для управления пользователями/устройствами.
 
-- новый VPS;
-- переезд на другой сервер;
-- сломались firewall/NAT/sysctl;
-- поменялся interface, SSH port или публичный VPN port.
+Переменные окружения:
+- `OMEGA_ADMIN_WEB_BIND` (по умолчанию `127.0.0.1:8081`)
+- `OMEGA_ADMIN_WEB_DISABLE=1` для полного отключения
 
-Если изменился только код приложения, `deploy-server.yml` обычно достаточно.
+Пример запуска:
 
-## Ручной rollback / recovery
+```bash
+OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 /opt/omega/omega-server
+```
 
-Если automation не помогла:
+Рекомендуется держать bind только на localhost и публиковать доступ через защищенный reverse proxy (mTLS/VPN/SSH tunnel).
+## Автодеплой при push (GitHub Actions)
 
-1. Посмотри `systemctl status omega-server`.
-2. Запусти `sudo bash deploy/diagnose_server.sh`.
-3. Проверь `state/observability.json` и `state/trace.ndjson`.
-4. При необходимости откати релиз через предыдущий symlink/binary в `/opt/omega/releases/`.
+В репозитории добавлен workflow: `.github/workflows/deploy-server.yml`.
+Он автоматически срабатывает при push в ветку `main` (по изменениям server/core) и делает:
+1. Сборку `omega-server` в release режиме.
+2. Копирование бинарника на VPS по SSH.
+3. Безопасное обновление через `deploy/update_server.sh`.
+4. Рестарт `omega-server` и проверку `systemctl is-active`.
+5. Авто-rollback на предыдущий бинарник при неуспешном старте.
 
-В обычном happy path этим занимается сам `update_server.sh`.
+### Что настроить в GitHub Secrets
+
+Обязательные:
+- `DEPLOY_HOST` — IP или домен VPS.
+- `DEPLOY_USER` — пользователь для SSH (например `deploy`).
+- `DEPLOY_SSH_KEY` — приватный SSH ключ (ed25519/rsa) для доступа к VPS.
+- `DEPLOY_KNOWN_HOSTS` — результат `ssh-keyscan -H <host>`.
+
+Опциональные:
+- `DEPLOY_PORT` — SSH порт (по умолчанию `22`).
+- `DEPLOY_PATH` — временная директория на сервере (по умолчанию `/tmp/omega-deploy`).
+- `DEPLOY_SERVICE_NAME` — systemd unit (по умолчанию `omega-server`).
+- `DEPLOY_INSTALL_DIR` — директория установки бинарников (по умолчанию `/opt/omega`).
+- `DEPLOY_KEEP_RELEASES` — сколько релизов хранить (по умолчанию `5`).
+
+### Подготовка VPS
+
+1. Убедитесь, что systemd unit уже настроен (`omega-server.service`).
+2. У пользователя `DEPLOY_USER` должны быть права на перезапуск сервиса через `sudo` без пароля.
+   Пример правила в `/etc/sudoers.d/omega-deploy`:
+
+```bash
+deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart omega-server, /usr/bin/systemctl is-active omega-server, /usr/bin/systemctl --no-pager --full status omega-server
+```
+
+3. Убедитесь, что существует директория `/opt/omega` и сервис стартует командой `ExecStart=/opt/omega/omega-server`.
+
+После этого достаточно делать `git push` в `main` — сервер будет обновляться автоматически.

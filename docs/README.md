@@ -1,78 +1,51 @@
-# Omega VPN Docs
+﻿# Omega VPN Docs
 
-Эта папка содержит актуальную документацию по текущему состоянию проекта. Исторический план фаз лежит отдельно в `../relese_plan/` и не должен восприниматься как основная operational reference.
+Этот каталог - единая база знаний по проекту. Он собран по текущему коду, а не по историческим обещаниям, поэтому отсюда лучше начинать любое знакомство с репозиторием.
 
-## С чего начать
+## С чего читать
 
-1. `PROJECT_CONTEXT.md` - короткая и честная картина проекта на текущий момент.
-2. `ARCHITECTURE.md` - как сейчас устроены client, server, control plane, fabric и observability.
-3. `REPO_MAP.md` - верхнеуровневая карта репозитория.
-4. `REPO_MAP_V2.md` - подробная карта workspace и crate boundaries.
-5. `CONFIG_REFERENCE.md` - реальные `OMEGA_*` переменные и launcher config.
-6. `OPERATIONS.md` - запуск, диагностика, CI/CD и day-2 operations.
-7. `../DEPLOY.md` - отдельный Linux/VPS deploy playbook.
+- `PROJECT_CONTEXT.md` - короткий контекст проекта для быстрых обсуждений и онбординга.
+- `ARCHITECTURE.md` - как устроены handshake, datapath, identity, session management и observability.
+- `CONFIG_REFERENCE.md` - справочник по `OMEGA_*` переменным и их дефолтам.
+- `OPERATIONS.md` - запуск, администрирование, диагностика, деплой, GitHub Actions.
+- `REPO_MAP.md` - навигация по папкам и ключевым файлам.
 
-## Основные блоки документации
+## Короткий маршрут по задачам
 
-### Продукт и архитектура
+- Хочу понять, что реально уже реализовано: начни с `PROJECT_CONTEXT.md`.
+- Хочу добавить фичу в протокол или datapath: открой `ARCHITECTURE.md` и `REPO_MAP.md`.
+- Хочу настроить клиент или сервер: смотри `CONFIG_REFERENCE.md`.
+- Хочу поднять сервер, зарегистрировать устройство или проверить прод: смотри `OPERATIONS.md`.
+- Хочу понять, где в коде лежит нужная логика: смотри `REPO_MAP.md`.
 
-- `PROJECT_CONTEXT.md` - high-level summary и текущие ограничения.
-- `ARCHITECTURE.md` - актуальная архитектурная схема и runtime boundaries.
-- `ARCHITECTURE_AXIOMS.md` - архитектурные правила и инварианты зависимостей.
-- `DEPENDENCY_DAG.md` - dependency DAG по workspace.
-- `REPO_MAP.md` - репозиторий на уровне директорий и точек входа.
-- `REPO_MAP_V2.md` - детальная карта crates после refactor.
+## Источники истины
 
-### Протокол и криптография
+Документация привязана к конкретным участкам кода:
 
-- `PROTOCOL_V2_FORMAL_SPEC.md` - формальная рамка `Omega v2`.
-- `DOLEV_YAO_THREAT_MODEL.md` - threat model и классы противника.
-- `HANDSHAKE_PQC_V2.md` - handshake v2 и hybrid KEX.
-- `HANDSHAKE_PQC_COST_ESTIMATE.md` - handshake budget и cost estimate.
-- `PROTOCOL_PROOFS.md` - proof obligations и code-level invariants.
-- `FORMAL_VERIFICATION_REPORT.md` - покрытие formal work и его границы.
-- `models/handshake_v2_proverif.pv` и `models/handshake_v2_tamarin.spthy` - formal skeleton models.
+- Протокол и wire format: `omega-core/src/protocol.rs`
+- Криптография и flow/session keys: `omega-core/src/crypto.rs`
+- ARQ, replay protection, morphing primitives: `omega-core/src/arq.rs`, `omega-core/src/replay.rs`, `omega-core/src/chaos.rs`
+- Серверный handshake и datapath: `omega-server/src/handshake.rs`, `omega-server/src/datapath.rs`
+- Server runtime и snapshots: `omega-server/src/main.rs`, `omega-server/src/runtime.rs`, `omega-server/src/session.rs`
+- Identity, audit и device auth: `omega-server/src/identity/*`
+- Web admin: `omega-server/src/web_admin.rs`
+- Клиентский runtime, Windows routing и diagnostics: `omega-client/src/main.rs`, `omega-client/src/config.rs`, `omega-client/src/diagnostics.rs`
+- Деплой и сетевой bootstrap: `deploy/*`, `.github/workflows/*`
 
-### Transport, path, stealth и reliability
+## Как поддерживать документацию актуальной
 
-- `STOCHASTIC_TRANSPORT_V2.md` - frame transport, ACK ranges, pacing и CC.
-- `BAYESIAN_PATH_MANAGER.md` - path scoring, MTU adaptation, blackhole handling.
-- `SHANNON_RELIABILITY_ENGINE.md` - retransmit/FEC/reliability budgets.
-- `ADVERSARIAL_STEALTH_ENGINE.md` - personas, probing resistance и runtime coupling.
-- `STEALTH_METRICS.md` - stealth KPI и detectability metrics.
-- `STEALTH_PERSONA_DETECTABILITY_REPORT.md` - persona measurements и overhead.
-- `WGAN_PERSONA_MODELS.md` - offline research workflow для stealth traces.
+Если меняется код, нужно обновлять и соответствующий документ:
 
-### Relay, control plane и клиенты
+- Новый `OMEGA_*` env var или измененный default -> `CONFIG_REFERENCE.md`
+- Изменение handshake, packet format, routing, session lifecycle -> `ARCHITECTURE.md`
+- Новый operational runbook, workflow, systemd, deploy script -> `OPERATIONS.md`
+- Перестройка папок или перенос ответственных модулей -> `REPO_MAP.md`
+- Изменение фактического статуса проекта или ограничений -> `PROJECT_CONTEXT.md` и корневой `README.md`
 
-- `GRAPH_RELAY_FABRIC.md` - relay/edge/exit graph model и failover.
-- `MIXNET_ANONYMITY.md` - допустимые anonymity идеи и их границы.
-- `BFT_CONTROL_PLANE.md` - consistency model и audit chain.
-- `CONTROL_PLANE_STATE_MODEL.md` - typed entities и lifecycle.
-- `POLICY_TEST_MATRIX.md` - policy semantics и validation matrix.
-- `CLIENT_UX_SPEC.md` - launcher UX и runtime boundary.
-- `CLIENT_USABILITY_DIAGNOSTIC_REPORT.md` - usability и diagnostics findings.
-- `TUF_UPDATE_SPEC.md` - signed update path и apply semantics.
+## Специализированные материалы
 
-### Operations, SRE и beta readiness
+Ниже остаются полезные узкие документы:
 
-- `CONFIG_REFERENCE.md` - curated runtime/deploy variable reference.
-- `OPERATIONS.md` - local run, production deploy, diagnostics и CI/CD.
-- `OBSERVABILITY_DASHBOARDS.md` - dashboards и signals.
-- `INCIDENT_RUNBOOKS.md` - incident response playbooks.
-- `DIFFERENTIAL_PRIVACY_TELEMETRY.md` - privacy boundary telemetry.
-- `ML_ANOMALY_SRE.md` - SPC/anomaly logic.
-- `INDEPENDENT_AUDIT_PACKAGE.md` - единая точка входа для security review.
-- `BETA_READINESS_CHECKLIST.md` - beta gate checklist.
-
-## Практический маршрут по задачам
-
-- Нужно быстро понять проект: `PROJECT_CONTEXT.md` -> `ARCHITECTURE.md` -> `REPO_MAP.md`.
-- Нужно менять код: `REPO_MAP_V2.md` -> `ARCHITECTURE_AXIOMS.md` -> нужный subsystem document.
-- Нужно запускать и деплоить: `OPERATIONS.md` -> `../DEPLOY.md` -> `CONFIG_REFERENCE.md`.
-- Нужно разбираться с security/beta: `DOLEV_YAO_THREAT_MODEL.md` -> `PROTOCOL_PROOFS.md` -> `INDEPENDENT_AUDIT_PACKAGE.md`.
-
-## Что считать историческими материалами
-
-- `../relese_plan/` - план фаз и их acceptance criteria. Это важный инженерный архив, но не главный источник текущих runtime-правил.
-- Отдельные research/report documents полезны как supporting evidence, но operational source of truth находятся в `ARCHITECTURE.md`, `CONFIG_REFERENCE.md`, `OPERATIONS.md` и `README.md` репозитория.
+- `../DEPLOY.md` - детальный deploy playbook для Linux/VPS.
+- `GAMING_NETWORKING.md` - заметки по gaming-профилю, MTU и UDP-first настройкам.
+- `../resource_budget.md` - ресурсные оценки и производственные бюджеты.

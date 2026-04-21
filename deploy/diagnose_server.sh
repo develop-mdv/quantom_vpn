@@ -22,8 +22,6 @@ Environment:
   OMEGA_METRICS_PORT           Prometheus metrics TCP port (default: 9090)
   OMEGA_SERVICE_NAME           systemd service name (default: omega-server)
   OMEGA_RUNTIME_SNAPSHOT       runtime snapshot path (default: /opt/omega/state/runtime.json)
-  OMEGA_OBSERVABILITY_SNAPSHOT observability snapshot path (default: /opt/omega/state/observability.json)
-  OMEGA_SERVER_BIN             omega-server binary for admin rollout checks (default: /opt/omega/omega-server)
 EOF
 }
 
@@ -45,15 +43,8 @@ METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-0}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
 RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-/opt/omega/state/runtime.json}"
-OBSERVABILITY_SNAPSHOT="${OMEGA_OBSERVABILITY_SNAPSHOT:-/opt/omega/state/observability.json}"
-SERVER_BIN="${OMEGA_SERVER_BIN:-/opt/omega/omega-server}"
 NFT_INET_TABLE="omega_vpn"
 NFT_NAT_TABLE="omega_vpn_nat"
-
-export_runtime_env_defaults() {
-    export OMEGA_RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-$RUNTIME_SNAPSHOT}"
-    export OMEGA_OBSERVABILITY_SNAPSHOT="${OMEGA_OBSERVABILITY_SNAPSHOT:-$OBSERVABILITY_SNAPSHOT}"
-}
 
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
@@ -92,7 +83,6 @@ echo "[INFO] Client subnet: ${CLIENT_CIDR}"
 echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
 echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
 echo "[INFO] Runtime snapshot: ${RUNTIME_SNAPSHOT}"
-echo "[INFO] Observability snapshot: ${OBSERVABILITY_SNAPSHOT}"
 echo
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -267,33 +257,10 @@ else
     warn "Runtime snapshot file is missing; diagnostics JSON is not being written yet."
 fi
 
-if [[ -f "$OBSERVABILITY_SNAPSHOT" ]]; then
-    pass "Observability snapshot exists."
-
-    if grep -Fq '"recommended_action": "proceed"' "$OBSERVABILITY_SNAPSHOT"; then
-        pass "Observability snapshot currently recommends proceeding with rollout."
-    else
-        fail "Observability snapshot does not recommend proceeding with rollout."
-    fi
-
-    if [[ -x "$SERVER_BIN" ]]; then
-        export_runtime_env_defaults
-        if "$SERVER_BIN" admin assert_rollout_guard >/dev/null 2>&1; then
-            pass "Admin rollout guard check passed."
-        else
-            fail "Admin rollout guard check failed."
-        fi
-    else
-        warn "omega-server binary is not executable at ${SERVER_BIN}; admin rollout guard check skipped."
-    fi
-else
-    warn "Observability snapshot file is missing; rollout guard telemetry is unavailable."
-fi
-
 if (( fail_count == 0 )); then
     pass "Server path looks Steam/Dota-ready for UDP relay traffic from the VPN side."
 else
-    echo "[FAIL] Server path is not yet healthy enough for a reliable gaming profile."
+    fail "Server path is not yet healthy enough for a reliable gaming profile."
 fi
 
 warn "Cloud security groups and provider ACLs are outside this script; verify outbound UDP is open."
@@ -305,6 +272,3 @@ echo "[INFO] Summary: ${pass_count} passed, ${warn_count} warnings, ${fail_count
 if (( fail_count > 0 )); then
     exit 1
 fi
-
-
-

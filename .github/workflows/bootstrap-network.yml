@@ -12,11 +12,6 @@ on:
         required: true
         default: "443"
         type: string
-      admin_web_port:
-        description: Public admin web UI TCP port.
-        required: true
-        default: "8081"
-        type: string
       vpn_protocol:
         description: Public VPN listener protocol.
         required: true
@@ -152,7 +147,6 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
           VPN_PORT_INPUT: ${{ inputs.vpn_port }}
-          ADMIN_WEB_PORT_INPUT: ${{ inputs.admin_web_port }}
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
@@ -165,7 +159,6 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE"
           PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
-          ADMIN_WEB_PORT="$(printf '%s' "$ADMIN_WEB_PORT_INPUT" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
@@ -179,10 +172,6 @@ jobs:
             CLIENT_CIDR="10.7.0.0/16"
           fi
 
-          if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
-          fi
-
           if [ -z "$METRICS_PORT" ]; then
             METRICS_PORT="9090"
           fi
@@ -194,11 +183,6 @@ jobs:
 
           if ! echo "$SSH_PORT" | grep -Eq '^[0-9]+$'; then
             echo "ssh_port must be numeric"
-            exit 1
-          fi
-
-          if ! echo "$ADMIN_WEB_PORT" | grep -Eq '^[0-9]+$'; then
-            echo "admin_web_port must be numeric"
             exit 1
           fi
 
@@ -219,18 +203,15 @@ jobs:
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_ADMIN_WEB_PUBLIC='1' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo bash '$REMOTE_DIR/setup_nat.sh'"
+             sudo '$REMOTE_DIR/setup_nat.sh'"
 
       - name: Run post-bootstrap diagnostics
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
           VPN_PORT_INPUT: ${{ inputs.vpn_port }}
-          ADMIN_WEB_PORT_INPUT: ${{ inputs.admin_web_port }}
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
@@ -244,7 +225,6 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE"
           PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
-          ADMIN_WEB_PORT="$(printf '%s' "$ADMIN_WEB_PORT_INPUT" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
@@ -258,10 +238,6 @@ jobs:
             CLIENT_CIDR="10.7.0.0/16"
           fi
 
-          if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
-          fi
-
           if [ -z "$METRICS_PORT" ]; then
             METRICS_PORT="9090"
           fi
@@ -273,11 +249,9 @@ jobs:
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
              OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_ADMIN_WEB_PUBLIC='1' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
              OMEGA_METRICS_PUBLIC='1' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo bash '$REMOTE_DIR/diagnose_server.sh'"
+             sudo '$REMOTE_DIR/diagnose_server.sh'"
 
       - name: Verify omega-server status
         run: |

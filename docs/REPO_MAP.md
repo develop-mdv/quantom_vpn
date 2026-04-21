@@ -1,66 +1,168 @@
-# Repo Map
-
-Этот документ показывает репозиторий на уровне директорий и точек входа. Для подробной карты crates и dependency boundaries смотри `REPO_MAP_V2.md`.
+﻿# Repo Map
 
 ## Корень репозитория
 
-- `README.md` - главная входная точка в проект.
-- `DEPLOY.md` - первичный Linux/VPS deploy playbook.
-- `resource_budget.md` - ресурсные оценки и бюджеты.
-- `.env.example` - пример legacy env-driven клиентского запуска.
-- `start_client.bat` - Windows wrapper для legacy `omega-client` flow.
-- `docs/` - актуальная база знаний по архитектуре, операциям, security и subsystem docs.
-- `relese_plan/` - исторический план фаз и acceptance criteria.
-- `deploy/` - scripts и unit files для production bootstrap/deploy.
-- `.github/workflows/` - GitHub Actions для auto-deploy и network bootstrap.
+### Workspace и общие файлы
 
-## Основные crates
+- `Cargo.toml` - Rust workspace (`omega-core`, `omega-server`, `omega-client`).
+- `Cargo.lock` - lockfile workspace.
+- `README.md` - главная входная точка в документацию.
+- `DEPLOY.md` - подробный Linux/VPS deploy playbook.
+- `resource_budget.md` - ресурсные оценки и пропускная способность.
+- `.env.example` - пример env для клиента.
+- `start_client.bat` - Windows entrypoint для клиента.
+- `docker-compose.yml` и `Dockerfile.dev` - dev container / local Linux sandbox.
 
-### Foundations
+## `omega-core/`
 
-- `omega-core-wire/` - handshake и transport wire types.
-- `omega-core-crypto/` - crypto primitives и key schedule.
-- `omega-transport/` - transport v2, reliability, replay, FEC.
-- `omega-stealth/` - personas и morphing policy.
+Библиотека общих сетевых и криптографических примитивов.
 
-### Control and fabric
+- `src/lib.rs` - экспорт модулей.
+- `src/protocol.rs` - packet format, STUN wrapper, handshake payloads, reject reasons, NACK format.
+- `src/crypto.rs` - `SessionKeys`, HKDF, AEAD, `FlowId`.
+- `src/replay.rs` - anti-replay window.
+- `src/arq.rs` - retransmit queue, gap detection, loss estimator.
+- `src/chaos.rs` - packet size morphing PRNG.
+- `src/raptorq_mgr.rs` - FEC primitives.
+- `benches/*` - benchmark-и.
 
-- `omega-control/` - control plane, policy engine, identity/tickets/audit.
-- `omega-relay/` - relay graph и route selection.
-- `omega-exit/` - exit-role contracts.
+Когда идти сюда:
 
-### Runtime
+- меняется wire format;
+- меняется cryptographic derivation;
+- меняется ARQ/replay behavior;
+- нужно понять, какие packet types и handshake payloads вообще существуют.
 
-- `omega-edge/` - server runtime.
-- `omega-client-runtime/` - privileged client runtime.
+## `omega-server/`
 
-### App and compatibility
+Серверный runtime и административная логика.
 
-- `omega-client-app/` - desktop launcher.
-- `omega-server/` - server entrypoint и admin CLI.
-- `omega-client/` - compatibility client entrypoint.
-- `omega-core/` - compatibility facade.
+- `src/main.rs` - server bootstrap, admin CLI, snapshot tasks, web admin startup.
+- `src/handshake.rs` - handshake pipeline и валидация auth/device/session limit.
+- `src/datapath.rs` - UDP <-> TUN loops, NACK handling, roaming, encryption/decryption.
+- `src/session.rs` - `SessionState`, `SessionManager`, IP leases, cleanup, snapshots.
+- `src/runtime.rs` - server profile, morphing policy, runtime snapshot schema.
+- `src/metrics.rs` - Prometheus metrics wiring.
+- `src/web_admin.rs` - built-in HTTP admin UI.
 
-## Операционный контур
+### `omega-server/src/identity/`
 
-### `deploy/`
+- `mod.rs` - `IdentityStore`, persistence, audit, register/revoke/auth.
+- `users.rs` - `UserRecord`, `UserStatus`.
+- `devices.rs` - `DeviceRecord`, platform enum.
+- `auth.rs` - auth result/failure mapping.
+- `limits.rs` - лимиты устройств и concurrent sessions.
+
+Когда идти сюда:
+
+- меняется handshake auth;
+- меняется модель пользователей/устройств;
+- меняется выдача tunnel IP;
+- меняется web admin или admin CLI;
+- нужно отладить, почему сессии не создаются или завершаются.
+
+## `omega-client/`
+
+Клиентский runtime и platform-specific routing.
+
+- `src/main.rs` - client bootstrap, handshake, TUN, UDP loops, Windows routing/DNS/IPv6 logic.
+- `src/config.rs` - весь env-driven runtime config клиента.
+- `src/diagnostics.rs` - JSON snapshot клиента и path quality summary.
+- `state/` - runtime output, не источник кода.
+
+Когда идти сюда:
+
+- меняется env-конфигурация клиента;
+- нужно поменять split/full tunnel behavior;
+- нужно править Windows routes/DNS/IPv6 guard;
+- нужно расширить diagnostics.
+
+## `deploy/`
+
+Операционные скрипты и systemd units.
 
 - `setup_nat.sh` - nftables/NAT/sysctl bootstrap.
-- `diagnose_server.sh` - server diagnostics и rollout checks.
-- `update_server.sh` - staged deploy, restart, rollback, rollout guard.
-- `omega-server.service` - example systemd unit.
-- `omega-alerts.yml` - Prometheus alert rules, которые теперь входят в auto-deploy bundle.
+- `diagnose_server.sh` - server path diagnostics.
+- `update_server.sh` - release switch + restart + rollback.
+- `omega-server.service` - production-like systemd unit для сервера.
+- `omega-client.service` - пример systemd unit для клиента.
 
-### `.github/workflows/`
+Когда идти сюда:
 
-- `deploy-server.yml` - обычный server auto-deploy после push в `main`.
-- `bootstrap-network.yml` - ручной network bootstrap/repair workflow.
+- меняется production bootstrap;
+- меняется NAT/MSS/metrics exposure;
+- меняется схема установки бинарника на VPS.
 
-## Где искать изменения по типу задачи
+## `.github/workflows/`
 
-- Меняется handshake или packet layout -> `omega-core-wire/`, `omega-core-crypto/`, `docs/PROTOCOL_V2_FORMAL_SPEC.md`.
-- Меняется transport/path/reliability -> `omega-transport/`, `omega-stealth/`, `docs/STOCHASTIC_TRANSPORT_V2.md`, `docs/BAYESIAN_PATH_MANAGER.md`.
-- Меняется control plane/policy -> `omega-control/`, `docs/BFT_CONTROL_PLANE.md`, `docs/CONTROL_PLANE_STATE_MODEL.md`.
-- Меняется server runtime -> `omega-edge/`, `omega-server/`, `docs/ARCHITECTURE.md`, `docs/OPERATIONS.md`.
-- Меняется client UX/runtime -> `omega-client-app/`, `omega-client-runtime/`, `docs/CLIENT_UX_SPEC.md`.
-- Меняется deploy/CI/CD -> `deploy/`, `.github/workflows/`, `DEPLOY.md`, `docs/OPERATIONS.md`.
+- `deploy-server.yml` - автоматический deploy сервера после push в `main`.
+- `bootstrap-network.yml` - ручной bootstrap и проверка сетевого контура.
+
+Когда идти сюда:
+
+- меняется CI/CD;
+- меняется набор deploy secrets;
+- нужно понять, что именно происходит на GitHub runner и на VPS.
+
+## `docs/`
+
+Актуальная база знаний проекта.
+
+- `README.md` - индекс документации.
+- `PROJECT_CONTEXT.md` - короткий контекст.
+- `ARCHITECTURE.md` - архитектура.
+- `CONFIG_REFERENCE.md` - env и defaults.
+- `OPERATIONS.md` - запуск, диагностика, deploy.
+- `REPO_MAP.md` - этот файл.
+- `GAMING_NETWORKING.md` - узкая заметка по gaming-профилю.
+
+## Карта типовых изменений
+
+### Меняем handshake или packet format
+
+Смотри:
+
+- `omega-core/src/protocol.rs`
+- `omega-core/src/crypto.rs`
+- `omega-server/src/handshake.rs`
+- `omega-client/src/main.rs`
+
+### Меняем надежность канала
+
+Смотри:
+
+- `omega-core/src/arq.rs`
+- `omega-core/src/chaos.rs`
+- `omega-core/src/raptorq_mgr.rs`
+- `omega-server/src/datapath.rs`
+- `omega-client/src/main.rs`
+
+### Меняем identity и device model
+
+Смотри:
+
+- `omega-server/src/identity/mod.rs`
+- `omega-server/src/identity/users.rs`
+- `omega-server/src/identity/devices.rs`
+- `omega-server/src/web_admin.rs`
+- `omega-server/src/main.rs`
+
+### Меняем observability и runtime snapshots
+
+Смотри:
+
+- `omega-client/src/diagnostics.rs`
+- `omega-server/src/runtime.rs`
+- `omega-server/src/metrics.rs`
+- `omega-server/src/main.rs`
+
+### Меняем deploy/network bootstrap
+
+Смотри:
+
+- `deploy/setup_nat.sh`
+- `deploy/diagnose_server.sh`
+- `deploy/update_server.sh`
+- `deploy/omega-server.service`
+- `.github/workflows/deploy-server.yml`
+- `.github/workflows/bootstrap-network.yml`

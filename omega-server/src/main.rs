@@ -1,23 +1,49 @@
+mod datapath;
+mod handshake;
+mod identity;
+mod metrics;
+mod morphing;
+mod runtime;
+mod session;
+mod web_admin;
+
 use std::fs;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
-use omega_control::identity::{
+use identity::{
     ensure_identity_file, parse_platform, IdentityStore, DEFAULT_MAX_CONCURRENT_SESSIONS,
     DEFAULT_MAX_DEVICES,
 };
 
+const DEFAULT_BIND: &str = "0.0.0.0:51820";
+const DEFAULT_TUN_IP: &str = "10.7.0.1";
+const DEFAULT_TUN_PREFIX: u8 = 16;
+const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
+const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
 const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
+const DEFAULT_ADMIN_WEB_BIND: &str = "127.0.0.1:8081";
+const DEFAULT_UDP_RCVBUF: usize = 8 * 1024 * 1024;
+const DEFAULT_UDP_SNDBUF: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, Serialize)]
 struct AdminCommand {
     command: String,
     flow_id: Option<String>,
     actor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CommandResult {
+    command: String,
+    ok: bool,
+    message: String,
 }
 
 #[tokio::main]
@@ -34,7 +60,157 @@ async fn main() -> anyhow::Result<()> {
         return run_admin(args);
     }
 
-    omega_edge::run_server().await
+    run_server().await
+}
+
+async fn run_server() -> anyhow::Result<()> {
+    tracing::info!("omega-server v{} starting", env!("CARGO_PKG_VERSION"));
+
+    let profile = runtime::ServerProfile::from_env();
+    let morphing_policy = runtime::MorphingPolicy::from_env(profile);
+    let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
+    let metrics_bind =
+        std::env::var("OMEGA_METRICS_BIND").unwrap_or_else(|_| DEFAULT_METRICS_BIND.to_string());
+    let web_admin_bind = std::env::var("OMEGA_ADMIN_WEB_BIND")
+        .unwrap_or_else(|_| DEFAULT_ADMIN_WEB_BIND.to_string());
+    let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF);
+    let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF);
+    let allow_legacy_v1 = env_bool("OMEGA_ALLOW_LEGACY_V1");
+    let tunnel_mtu = std::env::var("OMEGA_TUN_MTU")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .map(|value| value.clamp(1200, 1420))
+        .unwrap_or_else(|| profile.default_mtu());
+
+    if let Err(e) = metrics::init_metrics(&metrics_bind) {
+        tracing::warn!(error = %e, "failed to init metrics, continuing without exporter");
+    }
+
+    let identity_path = IdentityStore::default_path();
+    ensure_identity_file(&identity_path)?;
+    let identity_store = Arc::new(IdentityStore::load(identity_path)?);
+
+    tracing::info!(
+        "creating TUN device at {} with MTU {}",
+        DEFAULT_TUN_IP,
+        tunnel_mtu
+    );
+
+    let tun: Arc<tun_rs::AsyncDevice> = match tun_rs::DeviceBuilder::new()
+        .ipv4(DEFAULT_TUN_IP, DEFAULT_TUN_PREFIX, None)
+        .mtu(tunnel_mtu)
+        .build_async()
+    {
+        Ok(dev) => Arc::new(dev),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create TUN device");
+            return Err(e.into());
+        }
+    };
+
+    let udp = Arc::new(bind_udp_socket(&bind_addr, udp_rcvbuf, udp_sndbuf)?);
+    tracing::info!(%bind_addr, udp_rcvbuf, udp_sndbuf, "listening on UDP");
+
+    let session_manager = Arc::new(session::SessionManager::new());
+    let runtime_config = runtime::ServerRuntimeConfig {
+        profile,
+        morphing_policy,
+        bind_addr: bind_addr.clone(),
+        metrics_bind: metrics_bind.clone(),
+        admin_web_bind: web_admin_bind.clone(),
+        tunnel_ip: DEFAULT_TUN_IP.to_string(),
+        tunnel_prefix: DEFAULT_TUN_PREFIX,
+        tunnel_mtu,
+        udp_rcvbuf,
+        udp_sndbuf,
+        transport: "udp".to_string(),
+        tunnel_family: "ipv4".to_string(),
+        ipv6_mode: runtime::Ipv6Mode::Disabled,
+        allow_legacy_v1,
+    };
+
+    if !env_bool("OMEGA_ADMIN_WEB_DISABLE") {
+        let web_identity = identity_store.clone();
+        let web_sessions = session_manager.clone();
+        tokio::spawn(async move {
+            if let Err(err) = web_admin::run(web_admin_bind, web_identity, web_sessions).await {
+                tracing::warn!(error = %err, "web admin stopped");
+            }
+        });
+    }
+
+    let cleanup_manager = session_manager.clone();
+    tokio::spawn(async move {
+        session::spawn_cleanup_task(cleanup_manager).await;
+    });
+
+    let snapshot_path = std::env::var("OMEGA_SESSION_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SESSION_SNAPSHOT_PATH));
+    let snapshot_manager = session_manager.clone();
+    tokio::spawn(async move {
+        if let Err(err) = spawn_session_snapshot_task(snapshot_manager, snapshot_path).await {
+            tracing::warn!(error = %err, "session snapshot task stopped");
+        }
+    });
+
+    let runtime_snapshot_path = runtime::ServerRuntimeConfig::runtime_snapshot_path();
+    let runtime_sessions = session_manager.clone();
+    let runtime_details = runtime_config.clone();
+    tokio::spawn(async move {
+        if let Err(err) = runtime::spawn_runtime_snapshot_task(
+            runtime_details,
+            runtime_sessions,
+            runtime_snapshot_path,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "runtime snapshot task stopped");
+        }
+    });
+
+    let admin_command_path = std::env::var("OMEGA_ADMIN_COMMANDS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_ADMIN_COMMAND_PATH));
+    let command_manager = session_manager.clone();
+    let command_identity = identity_store.clone();
+    tokio::spawn(async move {
+        if let Err(err) =
+            spawn_admin_command_task(command_manager, command_identity, admin_command_path).await
+        {
+            tracing::warn!(error = %err, "admin command task stopped");
+        }
+    });
+
+    let tun_r = tun.clone();
+    let udp_r = udp.clone();
+    let sessions_r = session_manager.clone();
+    tokio::spawn(async move {
+        datapath::tun_to_udp_loop(tun_r, udp_r, sessions_r).await;
+    });
+
+    let tun_w = tun.clone();
+    let udp_w = udp.clone();
+    let sessions_w = session_manager.clone();
+    let identity_w = identity_store.clone();
+    tokio::spawn(async move {
+        datapath::udp_to_tun_loop(
+            tun_w,
+            udp_w,
+            sessions_w,
+            identity_w,
+            tunnel_mtu,
+            allow_legacy_v1,
+            morphing_policy,
+        )
+        .await;
+    });
+
+    tracing::info!("data path running, press Ctrl+C to stop");
+    tokio::signal::ctrl_c().await?;
+    tracing::info!(active_sessions = session_manager.count(), "shutting down");
+
+    Ok(())
 }
 
 fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
@@ -121,85 +297,19 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
             }
         }
         "list_active_sessions" => {
-            for session in store.list_active_sessions() {
-                println!(
-                    "flow_id={} user_id={} device_id={} tunnel_ip={} peer={} policy_id={} mode={:?} status={:?} route={} last_seen={}",
-                    session.flow_id,
-                    session.user_id,
-                    session.device_id,
-                    session.tunnel_ip,
-                    session.client_addr,
-                    session.policy_id,
-                    session.mode,
-                    session.status,
-                    session.active_route_id,
-                    session.last_seen_at
-                );
-            }
-        }
-        "show_control_plane" => {
-            let summary = store.summary();
-            println!(
-                "revision={} users={} blocked_users={} active_devices={} revoked_devices={} active_sessions={} issued_tickets={} policies={} fabric_nodes={}",
-                summary.revision,
-                summary.users,
-                summary.blocked_users,
-                summary.active_devices,
-                summary.revoked_devices,
-                summary.active_sessions,
-                summary.issued_tickets,
-                summary.policies,
-                summary.fabric_nodes
-            );
-        }
-        "list_policies" => {
-            for policy in store.list_policies() {
-                println!(
-                    "policy_id={} version={} enabled={} rules={} updated_at={}",
-                    policy.policy_id,
-                    policy.version,
-                    policy.enabled,
-                    policy.rules.len(),
-                    policy.updated_at
-                );
-            }
-        }
-        "show_policy_conflicts" => {
-            for conflict in store.policy_conflicts() {
-                println!(
-                    "policy_id={} field={} left={} right={} reason={}",
-                    conflict.policy_id,
-                    conflict.field,
-                    conflict.left_rule_id,
-                    conflict.right_rule_id,
-                    conflict.reason
-                );
-            }
-        }
-        "list_fabric_nodes" => {
-            for node in store.list_fabric_nodes() {
-                println!(
-                    "node_id={} role={} region={} operator={} healthy={} revision={} trust={}",
-                    node.node_id,
-                    node.role.as_str(),
-                    node.region,
-                    node.operator,
-                    node.healthy,
-                    node.graph_revision,
-                    node.trust_label
-                );
-            }
-        }
-        "rotate_device_token" => {
-            let device_id = required_arg(&args, "--device-id")?;
-            let rotated = store.rotate_device_token(device_id, "admin_cli")?;
-            println!(
-                "rotated device token: device_id={} user_id={} token={}",
-                rotated.device.device_id, rotated.device.user_id, rotated.device_token
-            );
+            let snapshot_path = std::env::var("OMEGA_SESSION_SNAPSHOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from(DEFAULT_SESSION_SNAPSHOT_PATH));
+            let raw = fs::read_to_string(&snapshot_path).with_context(|| {
+                format!(
+                    "failed to read session snapshot {} (is server running?)",
+                    snapshot_path.display()
+                )
+            })?;
+            println!("{}", raw);
         }
         "show_runtime" => {
-            let snapshot_path = omega_edge::runtime::ServerRuntimeConfig::runtime_snapshot_path();
+            let snapshot_path = runtime::ServerRuntimeConfig::runtime_snapshot_path();
             let raw = fs::read_to_string(&snapshot_path).with_context(|| {
                 format!(
                     "failed to read runtime snapshot {} (is server running?)",
@@ -207,32 +317,6 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
                 )
             })?;
             println!("{}", raw);
-        }
-        "show_observability" => {
-            let snapshot_path = omega_edge::observability::ObservabilityConfig::snapshot_path();
-            let raw = fs::read_to_string(&snapshot_path).with_context(|| {
-                format!(
-                    "failed to read observability snapshot {} (is server running?)",
-                    snapshot_path.display()
-                )
-            })?;
-            println!("{}", raw);
-        }
-        "show_rollout_guard" => {
-            let snapshot_path = omega_edge::observability::ObservabilityConfig::snapshot_path();
-            let snapshot = omega_edge::observability::load_observability_snapshot(&snapshot_path)?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "observability snapshot {} is not available yet",
-                        snapshot_path.display()
-                    )
-                })?;
-            println!("{}", serde_json::to_string_pretty(&snapshot.rollout_guard)?);
-        }
-        "assert_rollout_guard" => {
-            let snapshot_path = omega_edge::observability::ObservabilityConfig::snapshot_path();
-            let guard = omega_edge::observability::assert_rollout_guard(&snapshot_path)?;
-            println!("{}", serde_json::to_string_pretty(&guard)?);
         }
         "terminate_session" => {
             let flow_id = required_arg(&args, "--flow-id")?;
@@ -263,6 +347,134 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn spawn_session_snapshot_task(
+    session_manager: Arc<session::SessionManager>,
+    path: PathBuf,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        let snapshot = session_manager.snapshot();
+        let payload = serde_json::to_string_pretty(&snapshot)?;
+        tokio::fs::write(&path, payload).await?;
+    }
+}
+
+async fn spawn_admin_command_task(
+    session_manager: Arc<session::SessionManager>,
+    identity_store: Arc<IdentityStore>,
+    path: PathBuf,
+) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if !path.exists() {
+        tokio::fs::write(&path, "").await?;
+    }
+
+    let mut processed_lines = 0usize;
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+
+    loop {
+        interval.tick().await;
+        let raw = match tokio::fs::read_to_string(&path).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "failed to read admin command file"
+                );
+                continue;
+            }
+        };
+
+        let lines = raw.lines().collect::<Vec<_>>();
+        if lines.len() < processed_lines {
+            processed_lines = 0;
+        }
+
+        for line in lines.iter().skip(processed_lines) {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let cmd: AdminCommand = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(err) => {
+                    tracing::warn!(error = %err, line = %line, "invalid admin command line");
+                    continue;
+                }
+            };
+
+            let result = execute_admin_command(&session_manager, &identity_store, cmd);
+            tracing::info!(
+                command = %result.command,
+                ok = result.ok,
+                message = %result.message,
+                "admin command processed"
+            );
+        }
+
+        processed_lines = lines.len();
+    }
+}
+
+fn execute_admin_command(
+    session_manager: &session::SessionManager,
+    identity_store: &IdentityStore,
+    cmd: AdminCommand,
+) -> CommandResult {
+    match cmd.command.as_str() {
+        "terminate_session" => {
+            let Some(flow) = cmd.flow_id.as_deref() else {
+                return CommandResult {
+                    command: cmd.command,
+                    ok: false,
+                    message: "flow_id is required".to_string(),
+                };
+            };
+
+            let Some(flow_id) = session::flow_id_from_hex(flow) else {
+                return CommandResult {
+                    command: cmd.command,
+                    ok: false,
+                    message: format!("invalid flow_id {}", flow),
+                };
+            };
+
+            let ok = session_manager.terminate_session(&flow_id);
+            identity_store.append_audit(
+                "terminate_session",
+                cmd.actor.as_deref().unwrap_or("admin_api"),
+                serde_json::json!({
+                    "flow_id": flow,
+                    "terminated": ok,
+                }),
+            );
+
+            CommandResult {
+                command: cmd.command,
+                ok,
+                message: if ok {
+                    format!("terminated {}", flow)
+                } else {
+                    format!("session {} not found", flow)
+                },
+            }
+        }
+        _ => CommandResult {
+            command: cmd.command,
+            ok: false,
+            message: "unknown command".to_string(),
+        },
+    }
+}
+
 fn enqueue_admin_command(command: AdminCommand) -> anyhow::Result<()> {
     let command_path = std::env::var("OMEGA_ADMIN_COMMANDS")
         .map(PathBuf::from)
@@ -291,6 +503,54 @@ fn required_arg<'a>(args: &'a [String], flag: &str) -> anyhow::Result<&'a str> {
     arg_value(args, flag).ok_or_else(|| anyhow!("missing required argument {}", flag))
 }
 
+fn env_bool(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn bind_udp_socket(
+    bind_addr: &str,
+    recv_buffer: usize,
+    send_buffer: usize,
+) -> anyhow::Result<tokio::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let addr: SocketAddr = bind_addr
+        .parse()
+        .with_context(|| format!("invalid OMEGA_BIND address '{}'", bind_addr))?;
+    let domain = if addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+        .with_context(|| format!("failed to create UDP socket for {}", bind_addr))?;
+    socket
+        .set_nonblocking(true)
+        .context("failed to set UDP socket nonblocking")?;
+    let _ = socket.set_reuse_address(true);
+    if addr.is_ipv6() {
+        let _ = socket.set_only_v6(false);
+    }
+    let _ = socket.set_recv_buffer_size(recv_buffer);
+    let _ = socket.set_send_buffer_size(send_buffer);
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("failed to bind UDP socket to {}", bind_addr))?;
+
+    let std_socket: std::net::UdpSocket = socket.into();
+    tokio::net::UdpSocket::from_std(std_socket).context("failed to convert UDP socket for tokio")
+}
+
 fn print_admin_usage() {
     println!("omega-server admin commands:");
     println!("  create_user [--max-devices N] [--max-sessions N]");
@@ -300,17 +560,9 @@ fn print_admin_usage() {
     println!("  delete_user --user-id <uuid>");
     println!("  register_device --user-id <uuid> --device-name <name> --platform <windows|linux|macos|android|ios|other> [--fingerprint <value>]");
     println!("  revoke_device --device-id <uuid>");
-    println!("  rotate_device_token --device-id <uuid>");
     println!("  list_user_devices --user-id <uuid>");
     println!("  list_active_sessions");
-    println!("  show_control_plane");
-    println!("  list_policies");
-    println!("  show_policy_conflicts");
-    println!("  list_fabric_nodes");
     println!("  show_runtime");
-    println!("  show_observability");
-    println!("  show_rollout_guard");
-    println!("  assert_rollout_guard");
     println!("  terminate_session --flow-id <32_hex_chars>");
     println!("  show_audit [--limit N]");
 }
