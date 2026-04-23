@@ -27,10 +27,8 @@ const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 16;
 const DEFAULT_TUN_IPV6: &str = "fd70:7::1";
 const DEFAULT_TUN_PREFIX_V6: u8 = 64;
-const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
 const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
 const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
-const DEFAULT_ADMIN_WEB_BIND: &str = "127.0.0.1:8081";
 const DEFAULT_UDP_RCVBUF: usize = 8 * 1024 * 1024;
 const DEFAULT_UDP_SNDBUF: usize = 8 * 1024 * 1024;
 
@@ -71,10 +69,22 @@ async fn run_server() -> anyhow::Result<()> {
     let profile = runtime::ServerProfile::from_env();
     let morphing_policy = runtime::MorphingPolicy::from_env(profile);
     let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
-    let metrics_bind =
-        std::env::var("OMEGA_METRICS_BIND").unwrap_or_else(|_| DEFAULT_METRICS_BIND.to_string());
-    let web_admin_bind = std::env::var("OMEGA_ADMIN_WEB_BIND")
-        .unwrap_or_else(|_| DEFAULT_ADMIN_WEB_BIND.to_string());
+    let metrics_bind = resolve_bind(
+        "OMEGA_METRICS_BIND",
+        "OMEGA_METRICS_PUBLIC",
+        "OMEGA_METRICS_PORT",
+        "127.0.0.1",
+        9090,
+        "::",
+    );
+    let web_admin_bind = resolve_bind(
+        "OMEGA_ADMIN_WEB_BIND",
+        "OMEGA_ADMIN_WEB_PUBLIC",
+        "OMEGA_ADMIN_WEB_PORT",
+        "127.0.0.1",
+        8081,
+        "::",
+    );
     let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF);
     let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF);
     let allow_legacy_v1 = env_bool("OMEGA_ALLOW_LEGACY_V1");
@@ -521,6 +531,45 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_bind(
+    bind_env: &str,
+    public_env: &str,
+    port_env: &str,
+    default_host: &str,
+    default_port: u16,
+    public_host: &str,
+) -> String {
+    if let Some(bind) = env_string(bind_env) {
+        return bind;
+    }
+
+    let port = std::env::var(port_env)
+        .ok()
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(default_port);
+    let host = if env_bool(public_env) {
+        public_host
+    } else {
+        default_host
+    };
+    format_socket_bind(host, port)
+}
+
+fn format_socket_bind(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -577,4 +626,80 @@ fn print_admin_usage() {
     println!("  show_runtime");
     println!("  terminate_session --flow-id <32_hex_chars>");
     println!("  show_audit [--limit N]");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_socket_bind, resolve_bind};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_env(keys: &[&str]) {
+        for key in keys {
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_bind_prefers_explicit_value() {
+        let _guard = env_lock().lock().unwrap();
+        let keys = ["TEST_BIND", "TEST_PUBLIC", "TEST_PORT"];
+        clear_env(&keys);
+        unsafe {
+            std::env::set_var("TEST_BIND", "10.0.0.5:1234");
+            std::env::set_var("TEST_PUBLIC", "1");
+            std::env::set_var("TEST_PORT", "4321");
+        }
+
+        assert_eq!(
+            resolve_bind(
+                "TEST_BIND",
+                "TEST_PUBLIC",
+                "TEST_PORT",
+                "127.0.0.1",
+                8081,
+                "::"
+            ),
+            "10.0.0.5:1234"
+        );
+
+        clear_env(&keys);
+    }
+
+    #[test]
+    fn resolve_bind_uses_public_host_and_custom_port() {
+        let _guard = env_lock().lock().unwrap();
+        let keys = ["TEST_BIND", "TEST_PUBLIC", "TEST_PORT"];
+        clear_env(&keys);
+        unsafe {
+            std::env::set_var("TEST_PUBLIC", "true");
+            std::env::set_var("TEST_PORT", "18081");
+        }
+
+        assert_eq!(
+            resolve_bind(
+                "TEST_BIND",
+                "TEST_PUBLIC",
+                "TEST_PORT",
+                "127.0.0.1",
+                8081,
+                "::"
+            ),
+            "[::]:18081"
+        );
+
+        clear_env(&keys);
+    }
+
+    #[test]
+    fn format_socket_bind_wraps_ipv6_hosts() {
+        assert_eq!(format_socket_bind("::", 8081), "[::]:8081");
+        assert_eq!(format_socket_bind("127.0.0.1", 8081), "127.0.0.1:8081");
+    }
 }

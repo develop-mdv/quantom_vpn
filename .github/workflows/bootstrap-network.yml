@@ -29,6 +29,34 @@ on:
         required: true
         default: "10.7.0.0/16"
         type: string
+      client_cidr_v6:
+        description: VPN client IPv6 prefix that must be NATed and audited.
+        required: true
+        default: "fd70:7::/64"
+        type: string
+      vpn_ipv6_mode:
+        description: Inner tunnel IPv6 mode.
+        required: true
+        default: nat66
+        type: choice
+        options:
+          - nat66
+          - disabled
+      admin_web_public:
+        description: Expose built-in admin web publicly.
+        required: true
+        default: true
+        type: boolean
+      admin_web_port:
+        description: Built-in admin web TCP port.
+        required: true
+        default: "8081"
+        type: string
+      metrics_public:
+        description: Expose Prometheus metrics publicly.
+        required: true
+        default: false
+        type: boolean
       metrics_port:
         description: Public Prometheus metrics TCP port.
         required: true
@@ -150,6 +178,11 @@ jobs:
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
+          CLIENT_CIDR_V6_INPUT: ${{ inputs.client_cidr_v6 }}
+          VPN_IPV6_MODE_INPUT: ${{ inputs.vpn_ipv6_mode }}
+          ADMIN_WEB_PUBLIC_INPUT: ${{ inputs.admin_web_public }}
+          ADMIN_WEB_PORT_INPUT: ${{ inputs.admin_web_port }}
+          METRICS_PUBLIC_INPUT: ${{ inputs.metrics_public }}
           METRICS_PORT_INPUT: ${{ inputs.metrics_port }}
         run: |
           HOST="$DEPLOY_HOST_CLEAN"
@@ -162,6 +195,11 @@ jobs:
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
+          CLIENT_CIDR_V6="$(printf '%s' "$CLIENT_CIDR_V6_INPUT" | tr -d '\r\n\t ')"
+          VPN_IPV6_MODE="$(printf '%s' "$VPN_IPV6_MODE_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PUBLIC="$(printf '%s' "$ADMIN_WEB_PUBLIC_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PORT="$(printf '%s' "$ADMIN_WEB_PORT_INPUT" | tr -d '\r\n\t ')"
+          METRICS_PUBLIC="$(printf '%s' "$METRICS_PUBLIC_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           METRICS_PORT="$(printf '%s' "$METRICS_PORT_INPUT" | tr -d '\r\n\t ')"
 
           if [ -z "$SSH_PORT" ]; then
@@ -170,6 +208,26 @@ jobs:
 
           if [ -z "$CLIENT_CIDR" ]; then
             CLIENT_CIDR="10.7.0.0/16"
+          fi
+
+          if [ -z "$CLIENT_CIDR_V6" ]; then
+            CLIENT_CIDR_V6="fd70:7::/64"
+          fi
+
+          if [ -z "$VPN_IPV6_MODE" ]; then
+            VPN_IPV6_MODE="nat66"
+          fi
+
+          if [ -z "$ADMIN_WEB_PORT" ]; then
+            ADMIN_WEB_PORT="8081"
+          fi
+
+          if [ -z "$ADMIN_WEB_PUBLIC" ]; then
+            ADMIN_WEB_PUBLIC="true"
+          fi
+
+          if [ -z "$METRICS_PUBLIC" ]; then
+            METRICS_PUBLIC="false"
           fi
 
           if [ -z "$METRICS_PORT" ]; then
@@ -200,10 +258,14 @@ jobs:
             "chmod +x '$REMOTE_DIR/setup_nat.sh' '$REMOTE_DIR/diagnose_server.sh' && \
              OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
              OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
              OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
              sudo '$REMOTE_DIR/setup_nat.sh'"
 
@@ -215,6 +277,11 @@ jobs:
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
+          CLIENT_CIDR_V6_INPUT: ${{ inputs.client_cidr_v6 }}
+          VPN_IPV6_MODE_INPUT: ${{ inputs.vpn_ipv6_mode }}
+          ADMIN_WEB_PUBLIC_INPUT: ${{ inputs.admin_web_public }}
+          ADMIN_WEB_PORT_INPUT: ${{ inputs.admin_web_port }}
+          METRICS_PUBLIC_INPUT: ${{ inputs.metrics_public }}
           METRICS_PORT_INPUT: ${{ inputs.metrics_port }}
           DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
         run: |
@@ -228,6 +295,11 @@ jobs:
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
+          CLIENT_CIDR_V6="$(printf '%s' "$CLIENT_CIDR_V6_INPUT" | tr -d '\r\n\t ')"
+          VPN_IPV6_MODE="$(printf '%s' "$VPN_IPV6_MODE_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PUBLIC="$(printf '%s' "$ADMIN_WEB_PUBLIC_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PORT="$(printf '%s' "$ADMIN_WEB_PORT_INPUT" | tr -d '\r\n\t ')"
+          METRICS_PUBLIC="$(printf '%s' "$METRICS_PUBLIC_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           METRICS_PORT="$(printf '%s' "$METRICS_PORT_INPUT" | tr -d '\r\n\t ')"
 
           if [ -z "$SSH_PORT" ]; then
@@ -238,6 +310,26 @@ jobs:
             CLIENT_CIDR="10.7.0.0/16"
           fi
 
+          if [ -z "$CLIENT_CIDR_V6" ]; then
+            CLIENT_CIDR_V6="fd70:7::/64"
+          fi
+
+          if [ -z "$VPN_IPV6_MODE" ]; then
+            VPN_IPV6_MODE="nat66"
+          fi
+
+          if [ -z "$ADMIN_WEB_PUBLIC" ]; then
+            ADMIN_WEB_PUBLIC="true"
+          fi
+
+          if [ -z "$ADMIN_WEB_PORT" ]; then
+            ADMIN_WEB_PORT="8081"
+          fi
+
+          if [ -z "$METRICS_PUBLIC" ]; then
+            METRICS_PUBLIC="false"
+          fi
+
           if [ -z "$METRICS_PORT" ]; then
             METRICS_PORT="9090"
           fi
@@ -246,10 +338,14 @@ jobs:
             "OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
              OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
              OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
              OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
              sudo '$REMOTE_DIR/diagnose_server.sh'"
 

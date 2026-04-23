@@ -174,8 +174,13 @@ jobs:
         env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
+          DEPLOY_CLIENT_CIDR_V6: ${{ secrets.DEPLOY_CLIENT_CIDR_V6 }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_VPN_IPV6_MODE_VALUE: ${{ secrets.DEPLOY_VPN_IPV6_MODE }}
+          DEPLOY_ADMIN_WEB_PUBLIC_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PUBLIC }}
+          DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
+          DEPLOY_METRICS_PUBLIC_VALUE: ${{ secrets.DEPLOY_METRICS_PUBLIC }}
           DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
@@ -185,17 +190,26 @@ jobs:
           REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
+          CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
+          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
+          METRICS_PUBLIC="$(printf '%s' "${DEPLOY_METRICS_PUBLIC_VALUE:-0}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "chmod +x '$REMOTE_DIR/setup_nat.sh' && \
              OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
              OMEGA_SSH_PORT='${PORT}' \
-             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
              sudo '$REMOTE_DIR/setup_nat.sh'"
 
@@ -204,8 +218,13 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
           DEPLOY_CLIENT_CIDR: ${{ secrets.DEPLOY_CLIENT_CIDR }}
+          DEPLOY_CLIENT_CIDR_V6: ${{ secrets.DEPLOY_CLIENT_CIDR_V6 }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_VPN_IPV6_MODE_VALUE: ${{ secrets.DEPLOY_VPN_IPV6_MODE }}
+          DEPLOY_ADMIN_WEB_PUBLIC_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PUBLIC }}
+          DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
+          DEPLOY_METRICS_PUBLIC_VALUE: ${{ secrets.DEPLOY_METRICS_PUBLIC }}
           DEPLOY_METRICS_PORT_VALUE: ${{ secrets.DEPLOY_METRICS_PORT }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
@@ -215,8 +234,13 @@ jobs:
           REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
+          CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
+          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
+          METRICS_PUBLIC="$(printf '%s' "${DEPLOY_METRICS_PUBLIC_VALUE:-0}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
           if [ -z "$CLIENT_CIDR" ]; then
@@ -231,6 +255,26 @@ jobs:
             VPN_PROTOCOL="udp"
           fi
 
+          if [ -z "$VPN_IPV6_MODE" ]; then
+            VPN_IPV6_MODE="nat66"
+          fi
+
+          if [ -z "$CLIENT_CIDR_V6" ]; then
+            CLIENT_CIDR_V6="fd70:7::/64"
+          fi
+
+          if [ -z "$ADMIN_WEB_PUBLIC" ]; then
+            ADMIN_WEB_PUBLIC="1"
+          fi
+
+          if [ -z "$ADMIN_WEB_PORT" ]; then
+            ADMIN_WEB_PORT="8081"
+          fi
+
+          if [ -z "$METRICS_PUBLIC" ]; then
+            METRICS_PUBLIC="0"
+          fi
+
           if [ -z "$METRICS_PORT" ]; then
             METRICS_PORT="9090"
           fi
@@ -239,9 +283,13 @@ jobs:
             "chmod +x '$REMOTE_DIR/diagnose_server.sh' && \
              OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
              OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
              OMEGA_VPN_PORT='$VPN_PORT' \
              OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
              OMEGA_SSH_PORT='${PORT}' \
-             OMEGA_METRICS_PUBLIC='1' \
+             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
              OMEGA_METRICS_PORT='$METRICS_PORT' \
              sudo '$REMOTE_DIR/diagnose_server.sh'"

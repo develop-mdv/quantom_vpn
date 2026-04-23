@@ -76,6 +76,10 @@
 | --- | --- | --- |
 | `OMEGA_METRICS_BIND` | `127.0.0.1:9090` | HTTP listener Prometheus exporter. |
 | `OMEGA_ADMIN_WEB_BIND` | `127.0.0.1:8081` | Built-in web admin bind address. |
+| `OMEGA_METRICS_PUBLIC` | `false` | Если `OMEGA_METRICS_BIND` не задан явно, переводит metrics listener на публичный bind с портом из `OMEGA_METRICS_PORT` или default `9090`. |
+| `OMEGA_METRICS_PORT` | `9090` | Порт для implicit public metrics bind. |
+| `OMEGA_ADMIN_WEB_PUBLIC` | `false` | Если `OMEGA_ADMIN_WEB_BIND` не задан явно, переводит built-in admin на публичный bind с портом из `OMEGA_ADMIN_WEB_PORT` или default `8081`. |
+| `OMEGA_ADMIN_WEB_PORT` | `8081` | Порт для implicit public admin bind. |
 | `OMEGA_ADMIN_WEB_DISABLE` | `false` | Полностью отключает web admin. |
 | `OMEGA_CLIENT_SERVER` | не задан | Только UI hint: какой `OMEGA_SERVER` показывать в web admin для клиента. |
 

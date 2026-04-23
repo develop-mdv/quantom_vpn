@@ -103,6 +103,12 @@ cargo run -p omega-server -- admin show_audit --limit 50
 http://127.0.0.1:8081/
 ```
 
+В production unit из `deploy/omega-server.service` built-in admin публикуется на:
+
+```text
+http://<SERVER_IP>:8081/
+```
+
 Через UI можно:
 
 - создать пользователя;
@@ -201,8 +207,10 @@ sudo bash deploy/diagnose_server.sh
 
 - бинарник в `/opt/omega/omega-server`
 - profile `gaming`
-- bind `0.0.0.0:443`
-- admin web и metrics только на localhost
+- bind `[::]:443` для внешнего dual-stack UDP listener
+- `OMEGA_IPV6_MODE=nat66`
+- built-in admin на публичном `:8081`
+- metrics только на localhost
 - state-файлы в `/opt/omega/state/*`
 
 ### Rolling update script
