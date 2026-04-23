@@ -414,18 +414,23 @@ pub struct ServerHello {
     pub fec_enabled: bool,
     pub flow_id: FlowId,
     pub tunnel_ip: std::net::Ipv4Addr,
+    pub tunnel_ipv6: Option<std::net::Ipv6Addr>,
     pub ciphertext: Vec<u8>,
 }
 
 impl ServerHello {
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(24 + self.ciphertext.len());
+        let addr_len = if self.tunnel_ipv6.is_some() { 20 } else { 4 };
+        let mut buf = Vec::with_capacity(20 + addr_len + self.ciphertext.len());
         buf.push(self.version);
         buf.push((self.server_mtu >> 8) as u8);
         buf.push(self.server_mtu as u8);
         buf.push(if self.fec_enabled { 1 } else { 0 });
         buf.extend_from_slice(&self.flow_id.0);
         buf.extend_from_slice(&self.tunnel_ip.octets());
+        if let Some(tunnel_ipv6) = self.tunnel_ipv6 {
+            buf.extend_from_slice(&tunnel_ipv6.octets());
+        }
         buf.extend_from_slice(&self.ciphertext);
         buf
     }
@@ -436,13 +441,27 @@ impl ServerHello {
         }
 
         let flow_id = FlowId::from_bytes(&buf[4..20])?;
-        let has_ip = buf.len() >= 24 + MLKEM768_CT_LEN;
-        let tunnel_ip = if has_ip {
+        let has_ipv4 = buf.len() >= 24 + MLKEM768_CT_LEN;
+        let has_ipv6 = buf.len() >= 40 + MLKEM768_CT_LEN;
+        let tunnel_ip = if has_ipv4 {
             std::net::Ipv4Addr::new(buf[20], buf[21], buf[22], buf[23])
         } else {
             std::net::Ipv4Addr::new(10, 7, 0, 2)
         };
-        let ct_offset = if has_ip { 24 } else { 20 };
+        let tunnel_ipv6 = if has_ipv6 {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&buf[24..40]);
+            Some(std::net::Ipv6Addr::from(octets))
+        } else {
+            None
+        };
+        let ct_offset = if has_ipv6 {
+            40
+        } else if has_ipv4 {
+            24
+        } else {
+            20
+        };
 
         Some(Self {
             version: buf[0],
@@ -450,6 +469,7 @@ impl ServerHello {
             fec_enabled: buf[3] != 0,
             flow_id,
             tunnel_ip,
+            tunnel_ipv6,
             ciphertext: buf[ct_offset..ct_offset + MLKEM768_CT_LEN].to_vec(),
         })
     }
@@ -692,6 +712,7 @@ mod tests {
             fec_enabled: false,
             flow_id: FlowId([7u8; 16]),
             tunnel_ip: std::net::Ipv4Addr::new(10, 7, 2, 5),
+            tunnel_ipv6: Some("fd70:7::205".parse().unwrap()),
             ciphertext: vec![0xBB; MLKEM768_CT_LEN],
         };
         let serialized = sh.serialize();
@@ -701,7 +722,24 @@ mod tests {
         assert!(!parsed.fec_enabled);
         assert_eq!(parsed.flow_id, FlowId([7u8; 16]));
         assert_eq!(parsed.tunnel_ip, std::net::Ipv4Addr::new(10, 7, 2, 5));
+        assert_eq!(parsed.tunnel_ipv6, Some("fd70:7::205".parse().unwrap()));
         assert_eq!(parsed.ciphertext.len(), MLKEM768_CT_LEN);
+    }
+
+    #[test]
+    fn test_server_hello_ipv4_only_backward_compat() {
+        let mut serialized = Vec::with_capacity(24 + MLKEM768_CT_LEN);
+        serialized.push(HANDSHAKE_VERSION);
+        serialized.push(0x05);
+        serialized.push(0x00);
+        serialized.push(0);
+        serialized.extend_from_slice(&[7u8; 16]);
+        serialized.extend_from_slice(&[10, 7, 2, 5]);
+        serialized.extend_from_slice(&vec![0xBB; MLKEM768_CT_LEN]);
+
+        let parsed = ServerHello::deserialize(&serialized).unwrap();
+        assert_eq!(parsed.tunnel_ip, std::net::Ipv4Addr::new(10, 7, 2, 5));
+        assert!(parsed.tunnel_ipv6.is_none());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,8 +20,8 @@ const SESSION_TTL: Duration = Duration::from_secs(120);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_SESSIONS: usize = 10_000;
 
-const POOL_START: u32 = 2; // 10.7.0.2
-const POOL_END: u32 = 65_534; // 10.7.255.254
+const POOL_START: u32 = 2; // 10.7.0.2 / fd70:7::2
+const POOL_END: u32 = 65_534; // 10.7.255.254 / fd70:7::fffe
 const POOL_SIZE: u32 = POOL_END - POOL_START + 1;
 const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
 const PADDING_BUDGET_MIN: usize = 0;
@@ -29,6 +29,14 @@ const PADDING_RECOVERY_STEP: usize = 24;
 const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
 const REDUNDANCY_EXTRA_MAX: u8 = 2;
 const REDUNDANCY_DECAY_SECS: u64 = 8;
+const IPV6_PREFIX_HIGH: u16 = 0xfd70;
+const IPV6_PREFIX_LOW: u16 = 0x0007;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TunnelAddrs {
+    pub ipv4: Ipv4Addr,
+    pub ipv6: Option<Ipv6Addr>,
+}
 
 pub struct SessionState {
     pub keys: SessionKeys,
@@ -42,6 +50,7 @@ pub struct SessionState {
     pub morphing_policy: crate::runtime::MorphingPolicy,
     pub client_addr: SocketAddr,
     pub tunnel_ip: Ipv4Addr,
+    pub tunnel_ipv6: Option<Ipv6Addr>,
     pub user_id: String,
     pub device_id: String,
     pub created_at: Instant,
@@ -73,6 +82,7 @@ impl SessionState {
         keys: SessionKeys,
         client_addr: SocketAddr,
         tunnel_ip: Ipv4Addr,
+        tunnel_ipv6: Option<Ipv6Addr>,
         user_id: String,
         device_id: String,
         chaos_seed: u64,
@@ -95,6 +105,7 @@ impl SessionState {
             morphing_policy,
             client_addr,
             tunnel_ip,
+            tunnel_ipv6,
             user_id,
             device_id,
             created_at: Instant::now(),
@@ -243,6 +254,7 @@ pub struct ActiveSessionView {
     pub user_id: String,
     pub device_id: String,
     pub tunnel_ip: String,
+    pub tunnel_ipv6: Option<String>,
     pub client_addr: String,
     pub age_secs: u64,
     pub idle_secs: u64,
@@ -252,28 +264,32 @@ pub struct ActiveSessionView {
 
 pub struct SessionManager {
     sessions: Arc<DashMap<FlowId, SessionState>>,
-    tunnel_ip_to_flow: Arc<DashMap<Ipv4Addr, FlowId>>,
+    tunnel_addr_to_flow: Arc<DashMap<IpAddr, FlowId>>,
     flow_to_user: Arc<DashMap<FlowId, String>>,
     flow_to_device: Arc<DashMap<FlowId, String>>,
     user_to_flows: Arc<DashMap<String, Vec<FlowId>>>,
     device_to_flows: Arc<DashMap<String, Vec<FlowId>>>,
-    device_leases: Arc<DashMap<String, Ipv4Addr>>,
-    lease_to_device: Arc<DashMap<Ipv4Addr, String>>,
+    device_leases: Arc<DashMap<String, TunnelAddrs>>,
+    lease_to_device_v4: Arc<DashMap<Ipv4Addr, String>>,
+    lease_to_device_v6: Arc<DashMap<Ipv6Addr, String>>,
     next_ip_cursor: AtomicU32,
+    ipv6_enabled: bool,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
+    pub fn new(ipv6_enabled: bool) -> Self {
         Self {
             sessions: Arc::new(DashMap::with_capacity(1_024)),
-            tunnel_ip_to_flow: Arc::new(DashMap::with_capacity(1_024)),
+            tunnel_addr_to_flow: Arc::new(DashMap::with_capacity(2_048)),
             flow_to_user: Arc::new(DashMap::with_capacity(1_024)),
             flow_to_device: Arc::new(DashMap::with_capacity(1_024)),
             user_to_flows: Arc::new(DashMap::with_capacity(1_024)),
             device_to_flows: Arc::new(DashMap::with_capacity(1_024)),
             device_leases: Arc::new(DashMap::with_capacity(1_024)),
-            lease_to_device: Arc::new(DashMap::with_capacity(1_024)),
+            lease_to_device_v4: Arc::new(DashMap::with_capacity(1_024)),
+            lease_to_device_v6: Arc::new(DashMap::with_capacity(1_024)),
             next_ip_cursor: AtomicU32::new(POOL_START),
+            ipv6_enabled,
         }
     }
 
@@ -285,8 +301,13 @@ impl SessionManager {
         let user_id = state.user_id.clone();
         let device_id = state.device_id.clone();
         let tunnel_ip = state.tunnel_ip;
+        let tunnel_ipv6 = state.tunnel_ipv6;
 
-        self.tunnel_ip_to_flow.insert(tunnel_ip, flow_id);
+        self.tunnel_addr_to_flow
+            .insert(IpAddr::V4(tunnel_ip), flow_id);
+        if let Some(ipv6) = tunnel_ipv6 {
+            self.tunnel_addr_to_flow.insert(IpAddr::V6(ipv6), flow_id);
+        }
         self.flow_to_user.insert(flow_id, user_id.clone());
         self.flow_to_device.insert(flow_id, device_id.clone());
         push_flow(&self.user_to_flows, &user_id, flow_id);
@@ -305,8 +326,8 @@ impl SessionManager {
         self.sessions.get_mut(flow_id)
     }
 
-    pub fn flow_by_tunnel_ip(&self, ip: Ipv4Addr) -> Option<FlowId> {
-        self.tunnel_ip_to_flow.get(&ip).map(|v| *v)
+    pub fn flow_by_tunnel_addr(&self, ip: IpAddr) -> Option<FlowId> {
+        self.tunnel_addr_to_flow.get(&ip).map(|v| *v)
     }
 
     pub fn remove(&self, flow_id: &FlowId) -> Option<SessionState> {
@@ -316,23 +337,16 @@ impl SessionManager {
         let user_id = state.user_id.clone();
         let device_id = state.device_id.clone();
         let tunnel_ip = state.tunnel_ip;
+        let tunnel_ipv6 = state.tunnel_ipv6;
 
         self.flow_to_user.remove(flow_id);
         self.flow_to_device.remove(flow_id);
         remove_flow(&self.user_to_flows, &user_id, *flow_id);
         remove_flow(&self.device_to_flows, &device_id, *flow_id);
 
-        let mapped = self.tunnel_ip_to_flow.get(&tunnel_ip).map(|v| *v);
-        if mapped == Some(*flow_id) {
-            if let Some(next) = self
-                .device_to_flows
-                .get(&device_id)
-                .and_then(|v| v.first().copied())
-            {
-                self.tunnel_ip_to_flow.insert(tunnel_ip, next);
-            } else {
-                self.tunnel_ip_to_flow.remove(&tunnel_ip);
-            }
+        self.rebind_tunnel_addr(IpAddr::V4(tunnel_ip), &device_id, flow_id);
+        if let Some(ipv6) = tunnel_ipv6 {
+            self.rebind_tunnel_addr(IpAddr::V6(ipv6), &device_id, flow_id);
         }
 
         metrics::update_session_count(self.count());
@@ -378,9 +392,9 @@ impl SessionManager {
             .unwrap_or(0)
     }
 
-    pub fn allocate_tunnel_ip(&self, device_id: &str) -> Option<Ipv4Addr> {
-        if let Some(ip) = self.device_leases.get(device_id).map(|v| *v) {
-            return Some(ip);
+    pub fn allocate_tunnel_addrs(&self, device_id: &str) -> Option<TunnelAddrs> {
+        if let Some(addrs) = self.device_leases.get(device_id).map(|v| *v) {
+            return Some(addrs);
         }
 
         for _ in 0..POOL_SIZE {
@@ -390,25 +404,42 @@ impl SessionManager {
                 .wrapping_sub(POOL_START)
                 % POOL_SIZE
                 + POOL_START;
-            let ip = ip_from_cursor(cursor);
-            if self.lease_to_device.contains_key(&ip) {
+            let ipv4 = ip_from_cursor(cursor);
+            if self.lease_to_device_v4.contains_key(&ipv4) {
                 continue;
             }
 
-            self.lease_to_device.insert(ip, device_id.to_string());
-            self.device_leases.insert(device_id.to_string(), ip);
+            let ipv6 = self.ipv6_enabled.then(|| ipv6_from_cursor(cursor));
+            if let Some(ipv6) = ipv6 {
+                if self.lease_to_device_v6.contains_key(&ipv6) {
+                    continue;
+                }
+            }
+
+            let addrs = TunnelAddrs { ipv4, ipv6 };
+            self.lease_to_device_v4.insert(ipv4, device_id.to_string());
+            if let Some(ipv6) = ipv6 {
+                self.lease_to_device_v6.insert(ipv6, device_id.to_string());
+            }
+            self.device_leases.insert(device_id.to_string(), addrs);
             metrics::record_ip_lease_assigned();
-            return Some(ip);
+            return Some(addrs);
         }
 
         None
     }
 
-    pub fn release_device_lease(&self, device_id: &str) -> Option<Ipv4Addr> {
-        let ip = self.device_leases.remove(device_id).map(|(_, ip)| ip)?;
-        self.lease_to_device.remove(&ip);
+    pub fn release_device_lease(&self, device_id: &str) -> Option<TunnelAddrs> {
+        let addrs = self
+            .device_leases
+            .remove(device_id)
+            .map(|(_, addrs)| addrs)?;
+        self.lease_to_device_v4.remove(&addrs.ipv4);
+        if let Some(ipv6) = addrs.ipv6 {
+            self.lease_to_device_v6.remove(&ipv6);
+        }
         metrics::record_ip_lease_released();
-        Some(ip)
+        Some(addrs)
     }
 
     pub fn cleanup_stale(&self) -> usize {
@@ -443,6 +474,7 @@ impl SessionManager {
                 user_id: entry.value().user_id.clone(),
                 device_id: entry.value().device_id.clone(),
                 tunnel_ip: entry.value().tunnel_ip.to_string(),
+                tunnel_ipv6: entry.value().tunnel_ipv6.map(|value| value.to_string()),
                 client_addr: entry.value().client_addr.to_string(),
                 age_secs: now.duration_since(entry.value().created_at).as_secs(),
                 idle_secs: now.duration_since(entry.value().last_seen).as_secs(),
@@ -450,6 +482,32 @@ impl SessionManager {
                 fec_enabled: entry.value().fec_enabled,
             })
             .collect()
+    }
+
+    fn rebind_tunnel_addr(&self, addr: IpAddr, device_id: &str, removed_flow: &FlowId) {
+        let mapped = self.tunnel_addr_to_flow.get(&addr).map(|v| *v);
+        if mapped != Some(*removed_flow) {
+            return;
+        }
+
+        if let Some(next) = self
+            .device_to_flows
+            .get(device_id)
+            .and_then(|v| v.first().copied())
+        {
+            if let Some(state) = self.sessions.get(&next) {
+                let owns_addr = match addr {
+                    IpAddr::V4(ipv4) => state.tunnel_ip == ipv4,
+                    IpAddr::V6(ipv6) => state.tunnel_ipv6 == Some(ipv6),
+                };
+                if owns_addr {
+                    self.tunnel_addr_to_flow.insert(addr, next);
+                    return;
+                }
+            }
+        }
+
+        self.tunnel_addr_to_flow.remove(&addr);
     }
 }
 
@@ -473,6 +531,12 @@ fn ip_from_cursor(cursor: u32) -> Ipv4Addr {
     let third = (host / 256) as u8;
     let fourth = (host % 256) as u8;
     Ipv4Addr::new(10, 7, third, fourth)
+}
+
+fn ipv6_from_cursor(cursor: u32) -> Ipv6Addr {
+    let high = ((cursor >> 16) & 0xffff) as u16;
+    let low = (cursor & 0xffff) as u16;
+    Ipv6Addr::new(IPV6_PREFIX_HIGH, IPV6_PREFIX_LOW, 0, 0, 0, 0, high, low)
 }
 
 fn push_flow(map: &DashMap<String, Vec<FlowId>>, key: &str, flow_id: FlowId) {
@@ -549,6 +613,7 @@ mod tests {
             keys,
             "127.0.0.1:5000".parse().unwrap(),
             Ipv4Addr::new(10, 7, 0, 2),
+            Some("fd70:7::2".parse().unwrap()),
             "user".to_string(),
             "device".to_string(),
             7,
@@ -584,5 +649,14 @@ mod tests {
         }
         assert!(emitted_nack, "gap should eventually trigger a nack");
         assert!(session.loss_ratio() > 0.0);
+    }
+
+    #[test]
+    fn allocates_dual_stack_tunnel_leases_when_ipv6_enabled() {
+        let manager = SessionManager::new(true);
+        let lease = manager.allocate_tunnel_addrs("device").unwrap();
+
+        assert_eq!(lease.ipv4, Ipv4Addr::new(10, 7, 0, 2));
+        assert_eq!(lease.ipv6, Some("fd70:7::2".parse().unwrap()));
     }
 }

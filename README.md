@@ -6,7 +6,7 @@
 
 - `omega-core`: wire protocol, crypto, anti-replay, ARQ, chaos-based packet morphing, FEC primitives.
 - `omega-server`: UDP server runtime, TUN, identity store, session manager, web admin, metrics, snapshots.
-- `omega-client`: client runtime, Windows routing/DNS/IPv6 guard, diagnostics.
+- `omega-client`: client runtime, dual-stack handshake/TUN, Windows/Linux/macOS routing and DNS orchestration, diagnostics.
 
 ## Важная честная оговорка по текущему состоянию
 
@@ -14,7 +14,8 @@
 
 - это **не** WireGuard и не OpenVPN, а собственный `Omega` protocol;
 - datapath сейчас **UDP-only**;
-- tunnel family сейчас **IPv4-only**;
+- tunnel family теперь умеет **dual-stack IPv4 + IPv6** при `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте;
+- client networking теперь сам ставит и убирает dual-stack full/split routes на Windows, Linux и macOS;
 - рабочая надежность сегодня строится вокруг **ARQ/NACK + retransmit cache + adaptive redundancy**;
 - в кодовой базе уже есть `RaptorQ/FEC` примитивы, но полноценный FEC packet path пока не доведен до живого runtime.
 

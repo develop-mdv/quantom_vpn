@@ -381,7 +381,7 @@ fn render_page(
     out.push_str("</tbody></table></div>");
 
     out.push_str("<h2>Active Sessions</h2>");
-    out.push_str("<div class=\"card\"><table><thead><tr><th>Flow ID</th><th>User</th><th>Device</th><th>Tunnel IP</th><th>Peer</th><th>Idle(s)</th><th>Action</th></tr></thead><tbody>");
+    out.push_str("<div class=\"card\"><table><thead><tr><th>Flow ID</th><th>User</th><th>Device</th><th>Tunnel</th><th>Peer</th><th>Idle(s)</th><th>Action</th></tr></thead><tbody>");
     if sessions.is_empty() {
         out.push_str("<tr><td colspan=\"7\">No active sessions</td></tr>");
     } else {
@@ -390,7 +390,15 @@ fn render_page(
             out.push_str(&format!("<td>{}</td>", escape_html(&sess.flow_id)));
             out.push_str(&format!("<td>{}</td>", escape_html(&sess.user_id)));
             out.push_str(&format!("<td>{}</td>", escape_html(&sess.device_id)));
-            out.push_str(&format!("<td>{}</td>", escape_html(&sess.tunnel_ip)));
+            let tunnel_label = if let Some(tunnel_ipv6) = &sess.tunnel_ipv6 {
+                format!("{}<br>{}", sess.tunnel_ip, tunnel_ipv6)
+            } else {
+                sess.tunnel_ip.clone()
+            };
+            out.push_str(&format!(
+                "<td>{}</td>",
+                escape_html(&tunnel_label).replace("&lt;br&gt;", "<br>")
+            ));
             out.push_str(&format!("<td>{}</td>", escape_html(&sess.client_addr)));
             out.push_str(&format!("<td>{}</td>", sess.idle_secs));
             out.push_str("<td><form method=\"post\" action=\"/sessions/terminate\">");

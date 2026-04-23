@@ -12,9 +12,10 @@ Environment:
   OMEGA_PUBLIC_IFACE           public interface; autodetected from default route when empty
   OMEGA_TUN_IFACE_PATTERN      tunnel interface glob expected in nftables (default: tun*)
   OMEGA_CLIENT_CIDR            VPN client subnet (default: 10.7.0.0/16)
+  OMEGA_CLIENT_CIDR_V6         VPN client IPv6 prefix (default: fd70:7::/64)
   OMEGA_VPN_PORT               public UDP port (default: 443)
   OMEGA_VPN_PROTO              expected transport, should stay udp (default: udp)
-  OMEGA_VPN_IPV6_MODE          expected IPv6 mode, should stay disabled (default: disabled)
+  OMEGA_VPN_IPV6_MODE          expected IPv6 mode: disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port that must remain reachable (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expect public admin web UI (default: 0)
   OMEGA_ADMIN_WEB_PORT         admin web UI TCP port (default: 8081)
@@ -33,6 +34,7 @@ fi
 IFACE="${OMEGA_PUBLIC_IFACE:-${1:-}}"
 TUN_IFACE_PATTERN="${OMEGA_TUN_IFACE_PATTERN:-tun*}"
 CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
+CLIENT_CIDR_V6="${OMEGA_CLIENT_CIDR_V6:-fd70:7::/64}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-disabled}"
@@ -45,6 +47,7 @@ SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"
 RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-/opt/omega/state/runtime.json}"
 NFT_INET_TABLE="omega_vpn"
 NFT_NAT_TABLE="omega_vpn_nat"
+NFT_NAT6_TABLE="omega_vpn_nat6"
 
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
@@ -80,6 +83,7 @@ fi
 echo "[INFO] Public interface: ${IFACE:-unknown}"
 echo "[INFO] Tunnel interface pattern: ${TUN_IFACE_PATTERN}"
 echo "[INFO] Client subnet: ${CLIENT_CIDR}"
+echo "[INFO] Client IPv6 prefix: ${CLIENT_CIDR_V6}"
 echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
 echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
 echo "[INFO] Runtime snapshot: ${RUNTIME_SNAPSHOT}"
@@ -95,16 +99,33 @@ else
     fail "Expected UDP transport, got ${VPN_PROTO}."
 fi
 
-if [[ "$VPN_IPV6_MODE" == "disabled" ]]; then
-    pass "IPv6 mode is explicitly disabled, which matches the current IPv4-only Omega tunnel."
-else
-    fail "IPv6 mode is not disabled even though the current datapath is IPv4-only."
-fi
+case "$VPN_IPV6_MODE" in
+    disabled)
+        pass "IPv6 mode is disabled."
+        ;;
+    nat66)
+        pass "IPv6 mode is nat66; dual-stack tunneling is expected."
+        ;;
+    *)
+        fail "Unsupported IPv6 mode ${VPN_IPV6_MODE}."
+        ;;
+esac
 
 if cmd_exists sysctl; then
     [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] \
         && pass "IPv4 forwarding is enabled." \
         || fail "IPv4 forwarding is disabled."
+
+    ipv6_forward="$(sysctl -n net.ipv6.conf.all.forwarding 2>/dev/null || echo 0)"
+    if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+        [[ "$ipv6_forward" == "1" ]] \
+            && pass "IPv6 forwarding is enabled." \
+            || fail "IPv6 forwarding is disabled."
+    else
+        [[ "$ipv6_forward" == "0" ]] \
+            && pass "IPv6 forwarding is disabled as expected." \
+            || warn "IPv6 forwarding is enabled while OMEGA_VPN_IPV6_MODE=${VPN_IPV6_MODE}."
+    fi
 
     [[ "$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)" == "2" ]] \
         && pass "net.ipv4.conf.all.rp_filter is in loose mode." \
@@ -144,6 +165,7 @@ fi
 if cmd_exists nft; then
     inet_table="$(nft list table inet "$NFT_INET_TABLE" 2>/dev/null || true)"
     nat_table="$(nft list table ip "$NFT_NAT_TABLE" 2>/dev/null || true)"
+    nat6_table="$(nft list table ip6 "$NFT_NAT6_TABLE" 2>/dev/null || true)"
 
     [[ -n "$inet_table" ]] \
         && pass "nftables inet table ${NFT_INET_TABLE} is loaded." \
@@ -169,6 +191,24 @@ if cmd_exists nft; then
         pass "MASQUERADE is enabled for ${CLIENT_CIDR}."
     else
         fail "MASQUERADE rule for ${CLIENT_CIDR} is missing."
+    fi
+
+    if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+        if grep -Fq "ip6 saddr ${CLIENT_CIDR_V6}" <<<"$inet_table"; then
+            pass "IPv6 forward rule for ${CLIENT_CIDR_V6} is present."
+        else
+            fail "IPv6 forward rule for ${CLIENT_CIDR_V6} is missing."
+        fi
+
+        [[ -n "$nat6_table" ]] \
+            && pass "nftables nat6 table ${NFT_NAT6_TABLE} is loaded." \
+            || fail "nftables nat6 table ${NFT_NAT6_TABLE} is missing."
+
+        if grep -Fq "masquerade" <<<"$nat6_table" && grep -Fq "ip6 saddr ${CLIENT_CIDR_V6}" <<<"$nat6_table"; then
+            pass "NAT66 is enabled for ${CLIENT_CIDR_V6}."
+        else
+            fail "NAT66 rule for ${CLIENT_CIDR_V6} is missing."
+        fi
     fi
 else
     fail "nft is not installed."
@@ -212,16 +252,30 @@ fi
 
 if [[ -f "$RUNTIME_SNAPSHOT" ]]; then
     pass "Runtime snapshot exists."
-    if grep -Fq '"tunnel_family": "ipv4"' "$RUNTIME_SNAPSHOT"; then
-        pass "Runtime snapshot confirms IPv4 tunnel family."
-    else
-        warn "Runtime snapshot does not show tunnel_family=ipv4."
-    fi
+    if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+        if grep -Fq '"tunnel_family": "dual_stack"' "$RUNTIME_SNAPSHOT"; then
+            pass "Runtime snapshot confirms dual-stack tunnel family."
+        else
+            warn "Runtime snapshot does not show tunnel_family=dual_stack."
+        fi
 
-    if grep -Fq '"ipv6_mode": "disabled"' "$RUNTIME_SNAPSHOT"; then
-        pass "Runtime snapshot confirms IPv6 is disabled."
+        if grep -Fq '"ipv6_mode": "nat66"' "$RUNTIME_SNAPSHOT"; then
+            pass "Runtime snapshot confirms IPv6 nat66 mode."
+        else
+            warn "Runtime snapshot does not confirm ipv6_mode=nat66."
+        fi
     else
-        warn "Runtime snapshot does not confirm ipv6_mode=disabled."
+        if grep -Fq '"tunnel_family": "ipv4"' "$RUNTIME_SNAPSHOT"; then
+            pass "Runtime snapshot confirms IPv4 tunnel family."
+        else
+            warn "Runtime snapshot does not show tunnel_family=ipv4."
+        fi
+
+        if grep -Fq '"ipv6_mode": "disabled"' "$RUNTIME_SNAPSHOT"; then
+            pass "Runtime snapshot confirms IPv6 is disabled."
+        else
+            warn "Runtime snapshot does not confirm ipv6_mode=disabled."
+        fi
     fi
 
     if grep -Fq '"profile": "gaming"' "$RUNTIME_SNAPSHOT"; then
@@ -264,7 +318,7 @@ else
 fi
 
 warn "Cloud security groups and provider ACLs are outside this script; verify outbound UDP is open."
-warn "Client-side DNS policy, IPv6 leak guard, and split routes must still be validated on each client host."
+warn "Client-side DNS policy, IPv6 tunnel policy, and split routes must still be validated on each client host."
 
 echo
 echo "[INFO] Summary: ${pass_count} passed, ${warn_count} warnings, ${fail_count} failed."

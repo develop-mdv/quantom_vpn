@@ -48,6 +48,7 @@ pub struct ClientDiagnosticsSnapshot {
     pub handshake_rtt_ms: Option<u64>,
     pub interface_name: Option<String>,
     pub tunnel_ip: Option<String>,
+    pub tunnel_ipv6: Option<String>,
     pub udp_dns_check: UdpCheckStatus,
     pub estimated_rx_loss_ratio: f64,
     pub estimated_rx_loss_percent: f64,
@@ -109,6 +110,7 @@ impl ClientDiagnostics {
                 handshake_rtt_ms: None,
                 interface_name: None,
                 tunnel_ip: None,
+                tunnel_ipv6: None,
                 udp_dns_check: UdpCheckStatus::Pending,
                 estimated_rx_loss_ratio: 0.0,
                 estimated_rx_loss_percent: 0.0,
@@ -165,10 +167,17 @@ impl ClientDiagnostics {
         });
     }
 
-    pub fn set_handshake(&self, tunnel_ip: std::net::Ipv4Addr, negotiated_mtu: u16, rtt_ms: u64) {
+    pub fn set_handshake(
+        &self,
+        tunnel_ip: std::net::Ipv4Addr,
+        tunnel_ipv6: Option<std::net::Ipv6Addr>,
+        negotiated_mtu: u16,
+        rtt_ms: u64,
+    ) {
         self.with_snapshot(|snapshot| {
             snapshot.status = "connected".to_string();
             snapshot.tunnel_ip = Some(tunnel_ip.to_string());
+            snapshot.tunnel_ipv6 = tunnel_ipv6.map(|value| value.to_string());
             snapshot.negotiated_mtu = Some(negotiated_mtu);
             snapshot.handshake_rtt_ms = Some(rtt_ms);
             let (quality, suspected_issue) = summarize_path(snapshot);

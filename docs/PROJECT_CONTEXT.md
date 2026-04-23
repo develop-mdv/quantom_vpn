@@ -6,7 +6,7 @@
 
 - `omega-core` - протокол, криптография, anti-replay, ARQ, chaos-based traffic morphing, FEC primitives.
 - `omega-server` - серверный runtime: UDP listener, TUN, identity store, session manager, web admin, metrics и snapshots.
-- `omega-client` - клиентский runtime: handshake, TUN, Windows routing/DNS/IPv6 guard, diagnostics.
+- `omega-client` - клиентский runtime: handshake, TUN, dual-stack route/DNS orchestration на Windows/Linux/macOS, diagnostics.
 
 Проект ориентирован на собственный UDP-туннель с маскировкой под STUN/RTP и управлением устройствами на сервере.
 
@@ -23,9 +23,8 @@
 
 ## Что важно не перепутать
 
-- Туннель сейчас IPv4-only.
-- Серверный TUN по умолчанию поднимается как `10.7.0.1/16`.
-- Лизы для клиентов выдаются из диапазона `10.7.0.2 - 10.7.255.254`.
+- Сервер умеет dual-stack TUN: `10.7.0.1/16` и при `OMEGA_IPV6_MODE=nat66` еще `fd70:7::1/64`.
+- Лизы для клиентов выдаются из диапазонов `10.7.0.2 - 10.7.255.254` и, если IPv6 включен, `fd70:7::2 - fd70:7::fffe`.
 - Plain device token показывается только в момент `register_device`; в identity store хранится только hash.
 - `OMEGA_ALLOW_LEGACY_V1` сейчас только ослабляет проверку версии handshake. Полноценный "старый режим без auth" он не включает.
 
@@ -33,15 +32,15 @@
 
 - Проект в alpha-stage и не скрывает этого.
 - Реального TCP fallback в клиенте/сервере нет.
-- Полноценной IPv6-туннелизации нет, только explicit disable/passthrough policies.
+- Inner IPv6 теперь есть в handshake/session/datapath/TUN bootstrap, но deploy-модель пока только `nat66`, без routed-prefix orchestration.
 - В `omega-core` есть `RaptorQ/FEC` примитивы и флаги handshake, но живой datapath их пока не использует как полноценный FEC packet path.
-- Split tunnel ограничен route selection на клиенте; полноценного split-DNS orchestration нет.
+- Split tunnel теперь умеет IPv4 и IPv6 route selection, но полноценного split-DNS orchestration все еще нет.
 
 ## Основные сущности
 
 - `UserRecord` - пользователь с лимитами `max_devices` и `max_concurrent_sessions`.
 - `DeviceRecord` - зарегистрированное устройство пользователя.
-- `SessionState` - активная tunnel session c `flow_id`, `client_addr`, `tunnel_ip`, ARQ state и morphing state.
+- `SessionState` - активная tunnel session c `flow_id`, `client_addr`, `tunnel_ip`, `tunnel_ipv6`, ARQ state и morphing state.
 - `AuditEvent` - журнал административных и auth-событий.
 
 ## Куда смотреть в коде

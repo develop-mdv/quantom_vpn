@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -138,12 +138,14 @@ impl DnsPolicy {
 pub enum Ipv6Policy {
     Disabled,
     Passthrough,
+    Tunnel,
 }
 
 impl Ipv6Policy {
     fn from_env(default: Self) -> Self {
         match std::env::var("OMEGA_IPV6_POLICY") {
             Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "tunnel" | "vpn" => Self::Tunnel,
                 "passthrough" | "system" | "direct" => Self::Passthrough,
                 "disabled" | "off" | "block" => Self::Disabled,
                 _ => default,
@@ -207,6 +209,61 @@ impl Ipv4Route {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Ipv6Route {
+    pub cidr: String,
+    pub destination: String,
+    pub prefix: u8,
+}
+
+impl Ipv6Route {
+    pub fn parse_list(raw: &str) -> Vec<Self> {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter_map(|value| match Self::parse(value) {
+                Ok(route) => Some(route),
+                Err(err) => {
+                    tracing::warn!(
+                        value,
+                        error = %err,
+                        "ignoring invalid OMEGA_SPLIT_ROUTES_V6 entry"
+                    );
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        let (ip_raw, prefix_raw) = raw
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("missing CIDR prefix"))?;
+        let ip: Ipv6Addr = ip_raw
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid IPv6 network"))?;
+        let prefix: u8 = prefix_raw
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid prefix length"))?;
+        if prefix > 128 {
+            return Err(anyhow::anyhow!("prefix must be <= 128"));
+        }
+
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix)
+        };
+        let destination = Ipv6Addr::from(u128::from(ip) & mask);
+
+        Ok(Self {
+            cidr: format!("{destination}/{prefix}"),
+            destination: destination.to_string(),
+            prefix,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClientConfig {
     pub profile: ConnectionProfile,
     pub morphing_policy: MorphingPolicy,
@@ -219,6 +276,7 @@ pub struct ClientConfig {
     pub udp_sndbuf: usize,
     pub dns_servers: Vec<String>,
     pub split_routes: Vec<Ipv4Route>,
+    pub split_routes_v6: Vec<Ipv6Route>,
     pub network_diag: bool,
     pub diagnostics_path: PathBuf,
     pub handshake_attempts: u32,
@@ -236,9 +294,15 @@ impl ClientConfig {
         let split_routes = std::env::var("OMEGA_SPLIT_ROUTES")
             .map(|value| Ipv4Route::parse_list(&value))
             .unwrap_or_default();
-        if matches!(tunnel_mode, TunnelMode::Split) && split_routes.is_empty() {
+        let split_routes_v6 = std::env::var("OMEGA_SPLIT_ROUTES_V6")
+            .map(|value| Ipv6Route::parse_list(&value))
+            .unwrap_or_default();
+        if matches!(tunnel_mode, TunnelMode::Split)
+            && split_routes.is_empty()
+            && split_routes_v6.is_empty()
+        {
             tracing::warn!(
-                "OMEGA_TUNNEL_MODE=split was requested without OMEGA_SPLIT_ROUTES; falling back to full tunnel"
+                "OMEGA_TUNNEL_MODE=split was requested without OMEGA_SPLIT_ROUTES or OMEGA_SPLIT_ROUTES_V6; falling back to full tunnel"
             );
             tunnel_mode = TunnelMode::Full;
         }
@@ -297,6 +361,7 @@ impl ClientConfig {
             udp_sndbuf,
             dns_servers,
             split_routes,
+            split_routes_v6,
             network_diag: env_bool("OMEGA_NETWORK_DIAG", true),
             diagnostics_path,
             handshake_attempts,
@@ -311,6 +376,10 @@ impl ClientConfig {
 
     pub fn should_disable_ipv6(&self) -> bool {
         matches!(self.ipv6_policy, Ipv6Policy::Disabled)
+    }
+
+    pub fn should_tunnel_ipv6(&self) -> bool {
+        matches!(self.ipv6_policy, Ipv6Policy::Tunnel)
     }
 }
 
@@ -336,6 +405,10 @@ fn env_usize(name: &str, default: usize) -> usize {
 fn parse_dns_servers() -> Vec<String> {
     let configured =
         std::env::var("OMEGA_DNS_SERVERS").unwrap_or_else(|_| "1.1.1.1,8.8.8.8".to_string());
+    parse_dns_servers_from(&configured)
+}
+
+fn parse_dns_servers_from(configured: &str) -> Vec<String> {
     let mut servers = Vec::new();
 
     for item in configured
@@ -343,7 +416,7 @@ fn parse_dns_servers() -> Vec<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        if item.parse::<Ipv4Addr>().is_ok() {
+        if item.parse::<IpAddr>().is_ok() {
             servers.push(item.to_string());
         } else {
             tracing::warn!(value = %item, "ignoring invalid OMEGA_DNS_SERVERS entry");
@@ -354,5 +427,29 @@ fn parse_dns_servers() -> Vec<String> {
         vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()]
     } else {
         servers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ipv6_split_routes() {
+        let routes = Ipv6Route::parse_list("fd70:7:100::/64,2001:db8::/32");
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].cidr, "fd70:7:100::/64");
+        assert_eq!(routes[1].cidr, "2001:db8::/32");
+    }
+
+    #[test]
+    fn accepts_ipv6_dns_servers() {
+        let servers = parse_dns_servers_from("1.1.1.1,2606:4700:4700::1111");
+
+        assert_eq!(
+            servers,
+            vec!["1.1.1.1".to_string(), "2606:4700:4700::1111".to_string()]
+        );
     }
 }

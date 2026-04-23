@@ -25,6 +25,8 @@ use identity::{
 const DEFAULT_BIND: &str = "0.0.0.0:51820";
 const DEFAULT_TUN_IP: &str = "10.7.0.1";
 const DEFAULT_TUN_PREFIX: u8 = 16;
+const DEFAULT_TUN_IPV6: &str = "fd70:7::1";
+const DEFAULT_TUN_PREFIX_V6: u8 = 64;
 const DEFAULT_METRICS_BIND: &str = "127.0.0.1:9090";
 const DEFAULT_SESSION_SNAPSHOT_PATH: &str = "state/sessions.json";
 const DEFAULT_ADMIN_COMMAND_PATH: &str = "state/admin_commands.ndjson";
@@ -76,6 +78,7 @@ async fn run_server() -> anyhow::Result<()> {
     let udp_rcvbuf = env_usize("OMEGA_UDP_RCVBUF", DEFAULT_UDP_RCVBUF);
     let udp_sndbuf = env_usize("OMEGA_UDP_SNDBUF", DEFAULT_UDP_SNDBUF);
     let allow_legacy_v1 = env_bool("OMEGA_ALLOW_LEGACY_V1");
+    let ipv6_mode = runtime::Ipv6Mode::from_env();
     let tunnel_mtu = std::env::var("OMEGA_TUN_MTU")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
@@ -96,11 +99,14 @@ async fn run_server() -> anyhow::Result<()> {
         tunnel_mtu
     );
 
-    let tun: Arc<tun_rs::AsyncDevice> = match tun_rs::DeviceBuilder::new()
+    let mut tun_builder = tun_rs::DeviceBuilder::new()
         .ipv4(DEFAULT_TUN_IP, DEFAULT_TUN_PREFIX, None)
-        .mtu(tunnel_mtu)
-        .build_async()
-    {
+        .mtu(tunnel_mtu);
+    if ipv6_mode.is_enabled() {
+        tun_builder = tun_builder.ipv6(DEFAULT_TUN_IPV6, DEFAULT_TUN_PREFIX_V6);
+    }
+
+    let tun: Arc<tun_rs::AsyncDevice> = match tun_builder.build_async() {
         Ok(dev) => Arc::new(dev),
         Err(e) => {
             tracing::error!(error = %e, "failed to create TUN device");
@@ -111,7 +117,7 @@ async fn run_server() -> anyhow::Result<()> {
     let udp = Arc::new(bind_udp_socket(&bind_addr, udp_rcvbuf, udp_sndbuf)?);
     tracing::info!(%bind_addr, udp_rcvbuf, udp_sndbuf, "listening on UDP");
 
-    let session_manager = Arc::new(session::SessionManager::new());
+    let session_manager = Arc::new(session::SessionManager::new(ipv6_mode.is_enabled()));
     let runtime_config = runtime::ServerRuntimeConfig {
         profile,
         morphing_policy,
@@ -120,12 +126,18 @@ async fn run_server() -> anyhow::Result<()> {
         admin_web_bind: web_admin_bind.clone(),
         tunnel_ip: DEFAULT_TUN_IP.to_string(),
         tunnel_prefix: DEFAULT_TUN_PREFIX,
+        tunnel_ipv6: ipv6_mode.is_enabled().then(|| DEFAULT_TUN_IPV6.to_string()),
+        tunnel_ipv6_prefix: ipv6_mode.is_enabled().then_some(DEFAULT_TUN_PREFIX_V6),
         tunnel_mtu,
         udp_rcvbuf,
         udp_sndbuf,
         transport: "udp".to_string(),
-        tunnel_family: "ipv4".to_string(),
-        ipv6_mode: runtime::Ipv6Mode::Disabled,
+        tunnel_family: if ipv6_mode.is_enabled() {
+            "dual_stack".to_string()
+        } else {
+            "ipv4".to_string()
+        },
+        ipv6_mode,
         allow_legacy_v1,
     };
 

@@ -12,9 +12,10 @@ Environment:
   OMEGA_PUBLIC_IFACE           public interface; autodetected from default route when empty
   OMEGA_TUN_IFACE_PATTERN      tunnel interface glob for nftables (default: tun*)
   OMEGA_CLIENT_CIDR            VPN client subnet (default: 10.7.0.0/16)
+  OMEGA_CLIENT_CIDR_V6         VPN client IPv6 prefix (default: fd70:7::/64)
   OMEGA_VPN_PORT               public UDP port (default: 443)
   OMEGA_VPN_PROTO              must stay udp for the current Omega datapath (default: udp)
-  OMEGA_VPN_IPV6_MODE          disabled or exit with error (default: disabled)
+  OMEGA_VPN_IPV6_MODE          disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port to preserve (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expose built-in admin UI publicly (default: 0)
   OMEGA_ADMIN_WEB_PORT         built-in admin UI TCP port (default: 8081)
@@ -44,6 +45,7 @@ fi
 IFACE="${OMEGA_PUBLIC_IFACE:-${1:-}}"
 TUN_IFACE_PATTERN="${OMEGA_TUN_IFACE_PATTERN:-tun*}"
 CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
+CLIENT_CIDR_V6="${OMEGA_CLIENT_CIDR_V6:-fd70:7::/64}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-disabled}"
@@ -67,6 +69,7 @@ NFT_CONF="${NFT_DIR}/omega-vpn.nft"
 NFT_MAIN="/etc/nftables.conf"
 NFT_INET_TABLE="omega_vpn"
 NFT_NAT_TABLE="omega_vpn_nat"
+NFT_NAT6_TABLE="omega_vpn_nat6"
 
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
@@ -106,8 +109,8 @@ if [[ "$VPN_PROTO" != "udp" ]]; then
     exit 1
 fi
 
-if [[ "$VPN_IPV6_MODE" != "disabled" ]]; then
-    echo "[ERROR] Current Omega tunnel is IPv4-only. Set OMEGA_VPN_IPV6_MODE=disabled."
+if [[ "$VPN_IPV6_MODE" != "disabled" && "$VPN_IPV6_MODE" != "nat66" ]]; then
+    echo "[ERROR] OMEGA_VPN_IPV6_MODE must be disabled or nat66."
     exit 1
 fi
 
@@ -156,6 +159,9 @@ render_nft_config() {
     local admin_rule=""
     local metrics_rule=""
     local trace_rule=""
+    local ipv6_mss_rule=""
+    local ipv6_forward_rules=""
+    local nat6_table=""
 
     vpn_input_rule="udp dport ${VPN_PORT} counter accept"
     if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
@@ -166,6 +172,19 @@ render_nft_config() {
     fi
     if [[ "$NFT_TRACE" == "1" ]]; then
         trace_rule="iifname \"${TUN_IFACE_PATTERN}\" meta nftrace set 1"
+    fi
+    if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+        ipv6_mss_rule="        oifname \"${IFACE}\" ip6 saddr ${CLIENT_CIDR_V6} tcp flags syn / syn,rst tcp option maxseg size set rt mtu"
+        ipv6_forward_rules=$'        iifname "'"${TUN_IFACE_PATTERN}"'" oifname "'"${IFACE}"'" ip6 saddr '"${CLIENT_CIDR_V6}"' counter accept\n        iifname "'"${IFACE}"'" oifname "'"${TUN_IFACE_PATTERN}"'" ip6 daddr '"${CLIENT_CIDR_V6}"' ct state established,related counter accept'
+        nat6_table=$(cat <<EOF
+table ip6 ${NFT_NAT6_TABLE} {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip6 saddr ${CLIENT_CIDR_V6} oifname "${IFACE}" counter masquerade
+    }
+}
+EOF
+)
     fi
 
     cat >"$NFT_CONF" <<EOF
@@ -184,6 +203,7 @@ table inet ${NFT_INET_TABLE} {
     chain mss_clamp {
         type filter hook forward priority mangle; policy accept;
         oifname "${IFACE}" ip saddr ${CLIENT_CIDR} tcp flags syn / syn,rst tcp option maxseg size set rt mtu
+${ipv6_mss_rule}
     }
 
     chain forward {
@@ -193,6 +213,7 @@ table inet ${NFT_INET_TABLE} {
         ${trace_rule}
         iifname "${TUN_IFACE_PATTERN}" oifname "${IFACE}" ip saddr ${CLIENT_CIDR} counter accept
         iifname "${IFACE}" oifname "${TUN_IFACE_PATTERN}" ip daddr ${CLIENT_CIDR} ct state established,related counter accept
+${ipv6_forward_rules}
         iifname "${TUN_IFACE_PATTERN}" counter log prefix "omega-forward-drop: " drop
         oifname "${TUN_IFACE_PATTERN}" counter log prefix "omega-forward-drop: " drop
     }
@@ -205,17 +226,25 @@ table ip ${NFT_NAT_TABLE} {
     }
 }
 EOF
+    if [[ -n "$nat6_table" ]]; then
+        printf '\n%s\n' "$nat6_table" >> "$NFT_CONF"
+    fi
 }
 
 echo "[INFO] Public interface: ${IFACE}"
 echo "[INFO] Tunnel interface pattern: ${TUN_IFACE_PATTERN}"
 echo "[INFO] VPN client subnet: ${CLIENT_CIDR}"
+echo "[INFO] VPN client IPv6 prefix: ${CLIENT_CIDR_V6}"
 echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
-echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE} (explicitly disabled for the current IPv4-only Omega tunnel)"
+echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
 
 echo "[INFO] Applying sysctl tuning for UDP-first VPN traffic..."
 persist_sysctl "net.ipv4.ip_forward" "1"
-persist_sysctl "net.ipv6.conf.all.forwarding" "0"
+if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+    persist_sysctl "net.ipv6.conf.all.forwarding" "1"
+else
+    persist_sysctl "net.ipv6.conf.all.forwarding" "0"
+fi
 persist_sysctl "net.ipv4.conf.all.rp_filter" "2"
 persist_sysctl "net.ipv4.conf.default.rp_filter" "2"
 persist_sysctl "net.ipv4.conf.${IFACE}.rp_filter" "2"
@@ -234,6 +263,7 @@ render_nft_config
 
 nft delete table inet "$NFT_INET_TABLE" >/dev/null 2>&1 || true
 nft delete table ip "$NFT_NAT_TABLE" >/dev/null 2>&1 || true
+nft delete table ip6 "$NFT_NAT6_TABLE" >/dev/null 2>&1 || true
 nft -f "$NFT_CONF"
 
 if systemctl list-unit-files nftables.service >/dev/null 2>&1; then
@@ -246,11 +276,18 @@ echo "[INFO] Applied ruleset:"
 nft list table inet "$NFT_INET_TABLE"
 echo
 nft list table ip "$NFT_NAT_TABLE"
+if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+    echo
+    nft list table ip6 "$NFT_NAT6_TABLE"
+fi
 
 echo
 echo "[INFO] Steam/Dota readiness notes:"
 echo "  - No selective egress filtering is applied to Steam UDP ports 3478, 4379, 4380, 27000-27250."
 echo "  - MASQUERADE is enabled for ${CLIENT_CIDR} -> ${IFACE}."
+if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+    echo "  - NAT66 is enabled for ${CLIENT_CIDR_V6} -> ${IFACE}."
+fi
 echo "  - MSS clamping follows path MTU on the VPN forward path."
 echo "  - rp_filter is forced to loose mode (2) to avoid asymmetric-route drops."
 echo "  - nf_conntrack UDP timeouts were raised to ${CONNTRACK_UDP_TIMEOUT}/${CONNTRACK_UDP_STREAM} seconds."
@@ -258,5 +295,5 @@ echo "  - nf_conntrack UDP timeouts were raised to ${CONNTRACK_UDP_TIMEOUT}/${CO
 echo
 echo "[INFO] Next steps:"
 echo "  1. Keep cloud security groups outbound-open for UDP."
-echo "  2. Keep the client gaming profile on UDP only."
+echo "  2. Keep the client gaming profile on UDP only, even when inner IPv6 is enabled."
 echo "  3. Use deploy/diagnose_server.sh after the service is up."

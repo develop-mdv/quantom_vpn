@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,15 +36,14 @@ pub async fn tun_to_udp_loop(
             }
         };
 
-        if n < 20 {
-            continue;
-        }
-
-        let dst_ip = Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]);
-        let flow_id = match session_manager.flow_by_tunnel_ip(dst_ip) {
+        let dst_addr = match extract_tunnel_destination(&buf[..n]) {
+            Some(addr) => addr,
+            None => continue,
+        };
+        let flow_id = match session_manager.flow_by_tunnel_addr(dst_addr) {
             Some(fid) => fid,
             None => {
-                tracing::trace!(%dst_ip, "no session for destination tunnel IP");
+                tracing::trace!(%dst_addr, "no session for destination tunnel address");
                 continue;
             }
         };
@@ -403,9 +402,64 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
+fn extract_tunnel_destination(buf: &[u8]) -> Option<IpAddr> {
+    if buf.is_empty() {
+        return None;
+    }
+
+    match buf[0] >> 4 {
+        4 => {
+            if buf.len() < 20 {
+                return None;
+            }
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(
+                buf[16], buf[17], buf[18], buf[19],
+            )))
+        }
+        6 => {
+            if buf.len() < 40 {
+                return None;
+            }
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&buf[24..40]);
+            Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)))
+        }
+        _ => None,
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::extract_tunnel_destination;
+
+    #[test]
+    fn extracts_ipv4_destination_from_inner_packet() {
+        let packet = [
+            0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 10, 7, 0, 1, 10, 7, 0, 2,
+        ];
+        assert_eq!(
+            extract_tunnel_destination(&packet),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 7, 0, 2)))
+        );
+    }
+
+    #[test]
+    fn extracts_ipv6_destination_from_inner_packet() {
+        let mut packet = [0u8; 40];
+        packet[0] = 0x60;
+        packet[24..40].copy_from_slice(&Ipv6Addr::new(0xfd70, 0x0007, 0, 0, 0, 0, 0, 2).octets());
+        assert_eq!(
+            extract_tunnel_destination(&packet),
+            Some(IpAddr::V6(Ipv6Addr::new(0xfd70, 0x0007, 0, 0, 0, 0, 0, 2)))
+        );
+    }
 }

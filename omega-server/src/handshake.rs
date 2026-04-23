@@ -122,8 +122,8 @@ pub fn process_client_handshake(
         ));
     }
 
-    let tunnel_ip = match session_manager.allocate_tunnel_ip(&auth_ctx.device.device_id) {
-        Some(ip) => ip,
+    let tunnel_addrs = match session_manager.allocate_tunnel_addrs(&auth_ctx.device.device_id) {
+        Some(addrs) => addrs,
         None => {
             metrics::record_handshake_failure(HandshakeRejectReason::IpPoolExhausted);
             return Ok(reject_handshake(
@@ -177,7 +177,8 @@ pub fn process_client_handshake(
     let session = SessionState::new(
         session_keys,
         client_addr,
-        tunnel_ip,
+        tunnel_addrs.ipv4,
+        tunnel_addrs.ipv6,
         auth_ctx.user.user_id.clone(),
         auth_ctx.device.device_id.clone(),
         chaos_seed,
@@ -197,7 +198,8 @@ pub fn process_client_handshake(
         %client_addr,
         user_id = %user_id,
         device_id = %auth_ctx.device.device_id,
-        %tunnel_ip,
+        tunnel_ip = %tunnel_addrs.ipv4,
+        tunnel_ipv6 = ?tunnel_addrs.ipv6,
         mtu = negotiated_mtu,
         fec = fec_enabled,
         replaced_sessions,
@@ -211,7 +213,8 @@ pub fn process_client_handshake(
         server_mtu: negotiated_mtu,
         fec_enabled,
         flow_id,
-        tunnel_ip,
+        tunnel_ip: tunnel_addrs.ipv4,
+        tunnel_ipv6: tunnel_addrs.ipv6,
         ciphertext: ct_bytes.to_vec(),
     };
     let response = StunWrapper::wrap_response(&txn_id, &server_hello.serialize());

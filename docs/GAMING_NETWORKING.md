@@ -8,9 +8,10 @@ to the "UDP-first, MTU-aware, diagnosable" target from the Dota/Steam VPN spec.
 - `OMEGA_PROFILE=gaming|general|restricted`
 - `OMEGA_MORPHING=balanced|full|off`
 - `OMEGA_TUNNEL_MODE=full|split`
+- `OMEGA_SPLIT_ROUTES_V6` for IPv6 split-tunnel destinations
 - `OMEGA_TUN_MTU` for explicit tunnel MTU selection
 - `OMEGA_DNS_POLICY=tunnel|system`
-- `OMEGA_IPV6_POLICY=disabled|passthrough`
+- `OMEGA_IPV6_POLICY=disabled|passthrough|tunnel`
 - `OMEGA_DIAGNOSTICS_PATH` client runtime snapshot JSON
 - `OMEGA_RUNTIME_SNAPSHOT` server runtime snapshot JSON
 - `deploy/setup_nat.sh` now configures `nftables`, `MASQUERADE`, MSS clamping, loose `rp_filter`,
@@ -28,7 +29,7 @@ OMEGA_TUNNEL_MODE=full
 OMEGA_TUN_MTU=1380
 OMEGA_KEEPALIVE_SECS=25
 OMEGA_DNS_POLICY=tunnel
-OMEGA_IPV6_POLICY=disabled
+OMEGA_IPV6_POLICY=tunnel
 OMEGA_NETWORK_DIAG=1
 ```
 
@@ -39,14 +40,15 @@ OMEGA_PROFILE=gaming
 OMEGA_MORPHING=off
 OMEGA_TUN_MTU=1380
 OMEGA_BIND=0.0.0.0:443
+OMEGA_IPV6_MODE=nat66
 OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
 ```
 
 Then bootstrap the server networking as root:
 
 ```bash
-sudo OMEGA_VPN_PORT=443 bash deploy/setup_nat.sh
-sudo bash deploy/diagnose_server.sh
+sudo OMEGA_VPN_PORT=443 OMEGA_VPN_IPV6_MODE=nat66 bash deploy/setup_nat.sh
+sudo OMEGA_VPN_IPV6_MODE=nat66 bash deploy/diagnose_server.sh
 ```
 
 ## Diagnostics Files
@@ -83,8 +85,8 @@ The repository still does **not** meet the spec completely:
 
 - The datapath is still a custom Omega UDP tunnel, not WireGuard.
 - There is no real OpenVPN TCP fallback implementation.
-- The runtime is still IPv4-only; IPv6 is explicitly disabled rather than fully tunneled.
-- Split tunnel route selection exists on the client, but true split-DNS behavior is still limited.
+- IPv6 now works as an inner dual-stack tunnel, but the current server deploy model is still NAT66 rather than routed-prefix IPv6.
+- Split tunnel route selection exists for both IPv4 and IPv6 on the client, but true split-DNS behavior is still intentionally limited.
 
 So the project is now much closer to the operational requirements for Steam/Dota troubleshooting,
 but it has not yet completed the protocol-level migration required by the spec.

@@ -45,6 +45,23 @@ impl ServerProfile {
 #[serde(rename_all = "snake_case")]
 pub enum Ipv6Mode {
     Disabled,
+    Nat66,
+}
+
+impl Ipv6Mode {
+    pub fn from_env() -> Self {
+        match std::env::var("OMEGA_IPV6_MODE") {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "nat66" | "enabled" | "tunneled" | "tunnel" => Self::Nat66,
+                _ => Self::Disabled,
+            },
+            Err(_) => Self::Disabled,
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Nat66)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -92,6 +109,8 @@ pub struct ServerRuntimeConfig {
     pub admin_web_bind: String,
     pub tunnel_ip: String,
     pub tunnel_prefix: u8,
+    pub tunnel_ipv6: Option<String>,
+    pub tunnel_ipv6_prefix: Option<u8>,
     pub tunnel_mtu: u16,
     pub udp_rcvbuf: usize,
     pub udp_sndbuf: usize,

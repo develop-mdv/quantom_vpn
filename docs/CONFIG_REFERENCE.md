@@ -33,6 +33,7 @@
 | `OMEGA_MORPHING` | profile-based | `full`, `balanced`, `off`. Для `restricted` default = `full`, для `general` = `balanced`, для `gaming` = `off`. |
 | `OMEGA_TUNNEL_MODE` | `full` | `full` или `split`. |
 | `OMEGA_SPLIT_ROUTES` | пусто | Список CIDR через запятую для split tunnel. Без него `split` откатится обратно в `full`. |
+| `OMEGA_SPLIT_ROUTES_V6` | пусто | IPv6 CIDR через запятую для split tunnel. Можно использовать отдельно или вместе с `OMEGA_SPLIT_ROUTES`. |
 
 ### Сетевые параметры клиента
 
@@ -41,8 +42,8 @@
 | `OMEGA_TUN_MTU` | по профилю | MTU туннеля. `gaming=1380`, `general=1360`, `restricted=1280`, затем clamp `1200..1420`. |
 | `OMEGA_KEEPALIVE_SECS` | по профилю | Интервал keepalive. `gaming=25`, `general=15`, `restricted=10`, минимум `5`. |
 | `OMEGA_DNS_POLICY` | зависит от tunnel mode | `tunnel` для full-tunnel по умолчанию, `system` для split-tunnel. |
-| `OMEGA_DNS_SERVERS` | `1.1.1.1,8.8.8.8` | IPv4 DNS servers для tunnel DNS policy. |
-| `OMEGA_IPV6_POLICY` | зависит от tunnel mode | `disabled` для full-tunnel, `passthrough` для split-tunnel. |
+| `OMEGA_DNS_SERVERS` | `1.1.1.1,8.8.8.8` | DNS servers для tunnel DNS policy. Поддерживаются IPv4 и IPv6 адреса. |
+| `OMEGA_IPV6_POLICY` | зависит от tunnel mode | `disabled` для full-tunnel, `passthrough` для split-tunnel. Можно явно включить `tunnel`, чтобы клиент поднимал dual-stack TUN, принимал IPv6 lease из handshake и ставил IPv6 routes на Windows/Linux/macOS. |
 | `OMEGA_NETWORK_DIAG` | `true` | Включает post-connect UDP DNS diagnostic. |
 | `OMEGA_DIAGNOSTICS_PATH` | `omega-client/state/diagnostics.json` | Путь к JSON diagnostics snapshot. |
 
@@ -67,6 +68,7 @@
 | `OMEGA_UDP_RCVBUF` | `8388608` | Размер UDP receive buffer. |
 | `OMEGA_UDP_SNDBUF` | `8388608` | Размер UDP send buffer. |
 | `OMEGA_ALLOW_LEGACY_V1` | `false` | Разрешает version 1 пройти version-check. Но полноценный legacy режим это сейчас не дает: device auth все равно обязателен. |
+| `OMEGA_IPV6_MODE` | `disabled` | `disabled` или `nat66`. В `nat66` сервер поднимает dual-stack TUN, выдает клиентам `fd70:7::/64` leases и пишет dual-stack runtime snapshot. |
 
 ### Admin и observability
 
@@ -96,9 +98,10 @@
 | `OMEGA_PUBLIC_IFACE` | auto-detect | Публичный сетевой интерфейс. |
 | `OMEGA_TUN_IFACE_PATTERN` | `tun*` | Шаблон tunnel interface для nftables. |
 | `OMEGA_CLIENT_CIDR` | `10.7.0.0/16` | Подсеть VPN-клиентов для NAT и forward rules. |
+| `OMEGA_CLIENT_CIDR_V6` | `fd70:7::/64` | IPv6 prefix VPN-клиентов для NAT66 и forward rules. |
 | `OMEGA_VPN_PORT` | `443` | Публичный VPN port для firewall/bootstrap. |
 | `OMEGA_VPN_PROTO` | `udp` | Текущий datapath должен оставаться `udp`. |
-| `OMEGA_VPN_IPV6_MODE` | `disabled` | Скрипты ожидают current IPv4-only режим. |
+| `OMEGA_VPN_IPV6_MODE` | `disabled` | `disabled` или `nat66` для deploy-скриптов. В `nat66` скрипты включают IPv6 forwarding, `ip6` forward rules и NAT66 для `OMEGA_CLIENT_CIDR_V6`. |
 | `OMEGA_SSH_PORT` | `22` | SSH port, который нельзя потерять при bootstrap. |
 | `OMEGA_ADMIN_WEB_PUBLIC` | `0` | Публиковать ли built-in admin web наружу. |
 | `OMEGA_ADMIN_WEB_PORT` | `8081` | TCP port built-in admin web. |
@@ -128,7 +131,8 @@
 ## Практические замечания
 
 - Самый важный production override на сервере - это `OMEGA_TOKEN_PEPPER`.
-- Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`.
+- Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`, `OMEGA_SPLIT_ROUTES_V6` или обе переменные сразу.
+- Для полноценного inner IPv6 нужно согласованно включать `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте.
 - `OMEGA_PROFILE=gaming` теперь по умолчанию выбирает `OMEGA_MORPHING=off`, чтобы не тратить throughput на padding и лишнюю избыточность.
 - Если `OMEGA_MORPHING=off`, latency и throughput обычно становятся лучше, но traffic cover будет слабее.
 - `OMEGA_ALLOW_LEGACY_V1` не стоит считать полноценной backward compatibility feature.

@@ -164,6 +164,16 @@ sudo bash deploy/diagnose_server.sh
 - runtime snapshot
 - профиль, IPv6 mode и morphing policy
 
+## Client networking
+
+Клиент теперь сам управляет full/split route lifecycle и tunnel DNS на поддерживаемых desktop-платформах:
+
+- Windows
+- Linux
+- macOS
+
+Для IPv6 full-tunnel клиенту нужен `OMEGA_IPV6_POLICY=tunnel`, а серверу `OMEGA_IPV6_MODE=nat66`.
+
 ## Метрики
 
 Сервер публикует Prometheus exporter через `metrics-exporter-prometheus`.

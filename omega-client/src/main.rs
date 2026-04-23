@@ -1,5 +1,6 @@
 mod config;
 mod diagnostics;
+mod network;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -17,11 +18,12 @@ use omega_core::replay::ReplayFilter;
 use tokio::net::UdpSocket;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{ClientConfig, MorphingPolicy, TunnelMode};
+use crate::config::{ClientConfig, MorphingPolicy};
 use crate::diagnostics::ClientDiagnostics;
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
 const DEFAULT_TUN_PREFIX: u8 = 16;
+const DEFAULT_TUN_PREFIX_V6: u8 = 64;
 const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
 const MAX_RETRANSMIT_BURST: usize = 24;
 const RETRANSMIT_PACING_US: u64 = 500;
@@ -198,482 +200,6 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[derive(Clone)]
-struct WindowsManagedRoute {
-    destination: String,
-    mask: String,
-}
-
-#[cfg(target_os = "windows")]
-struct WindowsNetworkState {
-    disabled_ipv6_adapters: Vec<String>,
-    interface_alias: String,
-    reset_dns: bool,
-    managed_routes: Vec<WindowsManagedRoute>,
-    route_conflict: Option<String>,
-}
-
-#[cfg(target_os = "windows")]
-fn configure_windows_routing(
-    server_ip: std::net::Ipv4Addr,
-    tunnel_ip: std::net::Ipv4Addr,
-    interface_mtu: u16,
-    config: &ClientConfig,
-) -> Option<WindowsNetworkState> {
-    use std::process::Command;
-    use std::time::Duration;
-
-    tracing::info!(%tunnel_ip, "configuring Windows routing tables");
-
-    let tunnel_ip_s = tunnel_ip.to_string();
-    let mut if_index = String::new();
-    let mut if_alias = String::new();
-
-    for _ in 0..15 {
-        let output_idx = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceIndex",
-                    tunnel_ip_s
-                ),
-            ])
-            .output();
-
-        let output_alias = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceAlias",
-                    tunnel_ip_s
-                ),
-            ])
-            .output();
-
-        if let (Ok(o_idx), Ok(o_alias)) = (output_idx, output_alias) {
-            let idx_str = String::from_utf8_lossy(&o_idx.stdout).trim().to_string();
-            let alias_str = String::from_utf8_lossy(&o_alias.stdout).trim().to_string();
-
-            if !idx_str.is_empty() && !alias_str.is_empty() {
-                if_index = idx_str;
-                if_alias = alias_str;
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    if if_index.is_empty() || if_alias.is_empty() {
-        tracing::error!("could not find Wintun interface");
-        return None;
-    }
-
-    let _ = Command::new("netsh")
-        .args([
-            "interface",
-            "ipv4",
-            "set",
-            "subinterface",
-            &if_alias,
-            &format!("mtu={}", interface_mtu),
-            "store=active",
-        ])
-        .status();
-
-    let set_metric_cmd = format!(
-        "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -InterfaceMetric 1",
-        powershell_quote(&if_alias)
-    );
-    let _ = Command::new("powershell")
-        .args(["-Command", &set_metric_cmd])
-        .status();
-
-    let mut reset_dns = false;
-    if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
-        let dns_ps = config
-            .dns_servers
-            .iter()
-            .map(|v| format!("'{}'", v))
-            .collect::<Vec<_>>()
-            .join(",");
-        let alias_ps = powershell_quote(&if_alias);
-        let set_dns_cmd = format!(
-            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
-            alias_ps, dns_ps
-        );
-        let _ = Command::new("powershell")
-            .args(["-Command", &set_dns_cmd])
-            .status();
-        reset_dns = true;
-        tracing::info!(
-            interface = %if_alias,
-            dns = %config.dns_servers.join(","),
-            "configured DNS on Wintun interface"
-        );
-    }
-
-    let disabled_ipv6_adapters = if config.should_disable_ipv6() {
-        configure_windows_ipv6_guard(&if_alias)
-    } else {
-        Vec::new()
-    };
-
-    let ps_cmd = format!(
-        "(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Where-Object {{ $_.InterfaceIndex -ne {} }} | Sort-Object RouteMetric | Select-Object -First 1).NextHop",
-        if_index
-    );
-
-    let mut managed_routes = Vec::new();
-    let server_route = WindowsManagedRoute {
-        destination: server_ip.to_string(),
-        mask: "255.255.255.255".to_string(),
-    };
-    delete_windows_route(&server_route);
-
-    if let Ok(output) = Command::new("powershell")
-        .args(["-Command", &ps_cmd])
-        .output()
-    {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(gateway) = stdout
-            .lines()
-            .next()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            add_windows_gateway_route(&server_route, gateway);
-        }
-    }
-
-    match config.tunnel_mode {
-        TunnelMode::Full => {
-            let lower_half = WindowsManagedRoute {
-                destination: "0.0.0.0".to_string(),
-                mask: "128.0.0.0".to_string(),
-            };
-            let upper_half = WindowsManagedRoute {
-                destination: "128.0.0.0".to_string(),
-                mask: "128.0.0.0".to_string(),
-            };
-            delete_windows_route(&lower_half);
-            delete_windows_route(&upper_half);
-            add_windows_interface_route(&lower_half, &if_index);
-            add_windows_interface_route(&upper_half, &if_index);
-            managed_routes.push(lower_half);
-            managed_routes.push(upper_half);
-        }
-        TunnelMode::Split => {
-            for route in &config.split_routes {
-                let managed = WindowsManagedRoute {
-                    destination: route.destination.clone(),
-                    mask: route.netmask.clone(),
-                };
-                delete_windows_route(&managed);
-                add_windows_interface_route(&managed, &if_index);
-                managed_routes.push(managed);
-            }
-        }
-    }
-
-    Some(WindowsNetworkState {
-        disabled_ipv6_adapters,
-        interface_alias: if_alias,
-        reset_dns,
-        managed_routes,
-        route_conflict: if matches!(config.tunnel_mode, TunnelMode::Full) {
-            verify_windows_full_tunnel_routes(&tunnel_ip_s).err()
-        } else {
-            None
-        },
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn cleanup_windows_routing(server_ip: std::net::Ipv4Addr, state: Option<&WindowsNetworkState>) {
-    use std::process::Command;
-
-    if let Some(state) = state {
-        if state.reset_dns {
-            let reset_dns = format!(
-                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
-                powershell_quote(&state.interface_alias)
-            );
-            let _ = Command::new("powershell")
-                .args(["-Command", &reset_dns])
-                .status();
-        }
-
-        let reset_metric = format!(
-            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -AutomaticMetric Enabled",
-            powershell_quote(&state.interface_alias)
-        );
-        let _ = Command::new("powershell")
-            .args(["-Command", &reset_metric])
-            .status();
-
-        restore_windows_ipv6_guard(&state.disabled_ipv6_adapters);
-
-        for route in &state.managed_routes {
-            delete_windows_route(route);
-        }
-    }
-
-    delete_windows_route(&WindowsManagedRoute {
-        destination: server_ip.to_string(),
-        mask: "255.255.255.255".to_string(),
-    });
-}
-
-#[cfg(not(target_os = "windows"))]
-fn configure_windows_routing(
-    _: std::net::Ipv4Addr,
-    _: std::net::Ipv4Addr,
-    _: u16,
-    _: &ClientConfig,
-) -> Option<()> {
-    None
-}
-#[cfg(not(target_os = "windows"))]
-fn cleanup_windows_routing(_: std::net::Ipv4Addr, _: Option<&()>) {}
-
-#[cfg(target_os = "windows")]
-fn add_windows_gateway_route(route: &WindowsManagedRoute, gateway: &str) {
-    let _ = std::process::Command::new("route")
-        .args([
-            "add",
-            &route.destination,
-            "mask",
-            &route.mask,
-            gateway,
-            "metric",
-            "1",
-        ])
-        .status();
-}
-
-#[cfg(target_os = "windows")]
-fn add_windows_interface_route(route: &WindowsManagedRoute, if_index: &str) {
-    let _ = std::process::Command::new("route")
-        .args([
-            "add",
-            &route.destination,
-            "mask",
-            &route.mask,
-            "0.0.0.0",
-            "IF",
-            if_index,
-            "metric",
-            "1",
-        ])
-        .status();
-}
-
-#[cfg(target_os = "windows")]
-fn delete_windows_route(route: &WindowsManagedRoute) {
-    let _ = std::process::Command::new("route")
-        .args(["delete", &route.destination, "mask", &route.mask])
-        .status();
-}
-
-#[cfg(target_os = "windows")]
-fn verify_windows_full_tunnel_routes(tunnel_ip: &str) -> Result<(), String> {
-    let output = std::process::Command::new("route")
-        .args(["print", "-4"])
-        .output()
-        .map_err(|err| format!("failed to inspect Windows routes: {err}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let summary = summarize_windows_full_tunnel_routes(&stdout, tunnel_ip);
-
-    if summary.lower_half_ok && summary.upper_half_ok {
-        return Ok(());
-    }
-
-    let mut details = Vec::new();
-    if !summary.conflicting_routes.is_empty() {
-        details.push(format!(
-            "observed competing routes: {}",
-            summary.conflicting_routes.join(" | ")
-        ));
-    }
-
-    let conflicting_processes = detect_conflicting_tunnel_processes();
-    if !conflicting_processes.is_empty() {
-        details.push(format!(
-            "running tunnel processes: {}",
-            conflicting_processes.join(", ")
-        ));
-    }
-
-    let suffix = if details.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", details.join("; "))
-    };
-
-    Err(format!(
-        "Windows full-tunnel routes are not owned by Omega interface {}{}",
-        tunnel_ip, suffix
-    ))
-}
-
-#[cfg(target_os = "windows")]
-struct WindowsFullTunnelRouteSummary {
-    lower_half_ok: bool,
-    upper_half_ok: bool,
-    conflicting_routes: Vec<String>,
-}
-
-#[cfg(target_os = "windows")]
-fn summarize_windows_full_tunnel_routes(
-    route_print: &str,
-    tunnel_ip: &str,
-) -> WindowsFullTunnelRouteSummary {
-    let mut lower_half_ok = false;
-    let mut upper_half_ok = false;
-    let mut conflicting_routes = Vec::new();
-
-    for line in route_print.lines() {
-        let cols = line.split_whitespace().collect::<Vec<_>>();
-        if cols.len() < 5 {
-            continue;
-        }
-
-        let is_lower_half = cols[0] == "0.0.0.0" && cols[1] == "128.0.0.0";
-        let is_upper_half = cols[0] == "128.0.0.0" && cols[1] == "128.0.0.0";
-        if !is_lower_half && !is_upper_half {
-            continue;
-        }
-
-        let interface = cols[3];
-        if interface == tunnel_ip {
-            if is_lower_half {
-                lower_half_ok = true;
-            } else {
-                upper_half_ok = true;
-            }
-        } else {
-            conflicting_routes.push(line.trim().to_string());
-        }
-    }
-
-    WindowsFullTunnelRouteSummary {
-        lower_half_ok,
-        upper_half_ok,
-        conflicting_routes,
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn detect_conflicting_tunnel_processes() -> Vec<String> {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return Vec::new();
-    };
-
-    let needles = [
-        "tun2socks.exe",
-        "xray.exe",
-        "v2ray.exe",
-        "sing-box.exe",
-        "clash.exe",
-        "clash-verge.exe",
-        "mihomo.exe",
-        "nekoray.exe",
-        "hysteria.exe",
-        "amneziavpn.exe",
-    ];
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let name = line
-                .trim()
-                .trim_matches('"')
-                .split("\",\"")
-                .next()
-                .map(str::to_ascii_lowercase)?;
-            if needles.iter().any(|needle| name == *needle) {
-                Some(name)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-#[cfg(target_os = "windows")]
-fn powershell_quote(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
-#[cfg(target_os = "windows")]
-fn configure_windows_ipv6_guard(wintun_alias: &str) -> Vec<String> {
-    use std::process::Command;
-
-    let list_cmd = format!(
-        "Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -ne '{}' -and $_.InterfaceDescription -notlike '*Wintun*' }} | ForEach-Object {{ $binding = Get-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue; if ($binding -and $binding.Enabled) {{ $_.Name }} }}",
-        powershell_quote(wintun_alias)
-    );
-
-    let Ok(output) = Command::new("powershell")
-        .args(["-Command", &list_cmd])
-        .output()
-    else {
-        return Vec::new();
-    };
-
-    let adapters = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-
-    for adapter in &adapters {
-        let disable_cmd = format!(
-            "Disable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
-            powershell_quote(adapter)
-        );
-        let _ = Command::new("powershell")
-            .args(["-Command", &disable_cmd])
-            .status();
-    }
-
-    if !adapters.is_empty() {
-        tracing::info!(
-            adapters = %adapters.join(","),
-            "disabled IPv6 on active physical adapters while VPN is running"
-        );
-    }
-
-    adapters
-}
-
-#[cfg(target_os = "windows")]
-fn restore_windows_ipv6_guard(adapters: &[String]) {
-    use std::process::Command;
-
-    for adapter in adapters {
-        let enable_cmd = format!(
-            "Enable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
-            powershell_quote(adapter)
-        );
-        let _ = Command::new("powershell")
-            .args(["-Command", &enable_cmd])
-            .status();
-    }
-
-    if !adapters.is_empty() {
-        tracing::info!(
-            adapters = %adapters.join(","),
-            "restored IPv6 on physical adapters"
-        );
-    }
-}
-
 fn detect_platform() -> DevicePlatform {
     #[cfg(target_os = "windows")]
     {
@@ -779,7 +305,7 @@ async fn run_udp_dns_diagnostic(
 
     let targets = dns_servers
         .into_iter()
-        .filter_map(|value| value.parse::<std::net::Ipv4Addr>().ok())
+        .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
         .collect::<Vec<_>>();
     if targets.is_empty() {
         tracing::warn!("UDP diagnostic skipped: no valid DNS servers");
@@ -787,21 +313,44 @@ async fn run_udp_dns_diagnostic(
         return;
     }
 
-    let socket = match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(socket) => socket,
-        Err(err) => {
-            tracing::warn!(error = %err, "UDP diagnostic failed to bind socket");
-            diagnostics.udp_check_failed(format!("failed to bind socket: {err}"));
-            return;
-        }
-    };
-
     let txid: u16 = rand::random();
     let query = build_dns_query("example.com", txid);
     let mut buf = [0u8; 1500];
+    let mut socket_v4 = None;
+    let mut socket_v6 = None;
 
     for dns_ip in targets {
         let target = SocketAddr::from((dns_ip, 53));
+        let socket = match dns_ip {
+            std::net::IpAddr::V4(_) => {
+                if socket_v4.is_none() {
+                    socket_v4 = Some(match UdpSocket::bind("0.0.0.0:0").await {
+                        Ok(socket) => socket,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "UDP diagnostic failed to bind IPv4 socket");
+                            diagnostics
+                                .udp_check_failed(format!("failed to bind IPv4 socket: {err}"));
+                            return;
+                        }
+                    });
+                }
+                socket_v4.as_ref().unwrap()
+            }
+            std::net::IpAddr::V6(_) => {
+                if socket_v6.is_none() {
+                    socket_v6 = Some(match UdpSocket::bind("[::]:0").await {
+                        Ok(socket) => socket,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "UDP diagnostic failed to bind IPv6 socket");
+                            diagnostics
+                                .udp_check_failed(format!("failed to bind IPv6 socket: {err}"));
+                            return;
+                        }
+                    });
+                }
+                socket_v6.as_ref().unwrap()
+            }
+        };
         if let Err(err) = socket.send_to(&query, target).await {
             tracing::warn!(error = %err, %target, "UDP diagnostic send failed");
             continue;
@@ -992,12 +541,24 @@ async fn main() -> anyhow::Result<()> {
 
     use socket2::{Domain, Protocol, Socket, Type};
 
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    let socket_domain = if server_addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = Socket::new(socket_domain, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_nonblocking(true)?;
     let _ = socket.set_recv_buffer_size(client_config.udp_rcvbuf);
     let _ = socket.set_send_buffer_size(client_config.udp_sndbuf);
+    if server_addr.is_ipv6() {
+        let _ = socket.set_only_v6(false);
+    }
 
-    let addr: SocketAddr = "0.0.0.0:0".parse()?;
+    let addr: SocketAddr = if server_addr.is_ipv4() {
+        "0.0.0.0:0".parse()?
+    } else {
+        "[::]:0".parse()?
+    };
     socket.bind(&addr.into())?;
 
     let std_socket: std::net::UdpSocket = socket.into();
@@ -1040,27 +601,41 @@ async fn main() -> anyhow::Result<()> {
     let ssrc = u32::from_be_bytes(flow_id_bytes[0..4].try_into().unwrap());
 
     let tun_ip = server_hello.tunnel_ip;
+    let tun_ipv6 = server_hello.tunnel_ipv6;
     let tun_ip_s = tun_ip.to_string();
-    let tun: Arc<tun_rs::AsyncDevice> = Arc::new(
-        tun_rs::DeviceBuilder::new()
-            .ipv4(tun_ip_s.clone(), DEFAULT_TUN_PREFIX, None)
-            .mtu(server_hello.server_mtu)
-            .with(|builder| {
-                #[cfg(target_os = "windows")]
-                {
-                    let ring_capacity = client_config.udp_rcvbuf.clamp(0x2_0000, 0x400_0000) as u32;
-                    builder.ring_capacity(ring_capacity);
-                }
-            })
-            .build_async()?,
-    );
-    if let Ok(interface_name) = tun.name() {
-        diagnostics.set_interface_name(interface_name.clone());
-        tracing::info!(%interface_name, %tun_ip, server_mtu = server_hello.server_mtu, "handshake complete");
-    } else {
-        tracing::info!(%tun_ip, server_mtu = server_hello.server_mtu, "handshake complete");
+    let mut tun_builder = tun_rs::DeviceBuilder::new()
+        .ipv4(tun_ip_s.clone(), DEFAULT_TUN_PREFIX, None)
+        .mtu(server_hello.server_mtu)
+        .with(|builder| {
+            #[cfg(target_os = "windows")]
+            {
+                let ring_capacity = client_config.udp_rcvbuf.clamp(0x2_0000, 0x400_0000) as u32;
+                builder.ring_capacity(ring_capacity);
+            }
+        });
+    if let Some(tun_ipv6_addr) = tun_ipv6 {
+        tun_builder = tun_builder.ipv6(tun_ipv6_addr.to_string(), DEFAULT_TUN_PREFIX_V6);
     }
-    diagnostics.set_handshake(tun_ip, server_hello.server_mtu, handshake.rtt_ms);
+    let tun: Arc<tun_rs::AsyncDevice> = Arc::new(tun_builder.build_async()?);
+    let interface_name = tun.name().ok();
+    if let Some(interface_name) = interface_name.as_ref() {
+        diagnostics.set_interface_name(interface_name.clone());
+        tracing::info!(
+            %interface_name,
+            %tun_ip,
+            tunnel_ipv6 = ?tun_ipv6,
+            server_mtu = server_hello.server_mtu,
+            "handshake complete"
+        );
+    } else {
+        tracing::info!(
+            %tun_ip,
+            tunnel_ipv6 = ?tun_ipv6,
+            server_mtu = server_hello.server_mtu,
+            "handshake complete"
+        );
+    }
+    diagnostics.set_handshake(tun_ip, tun_ipv6, server_hello.server_mtu, handshake.rtt_ms);
     diagnostics.update_path_metrics(
         0.0,
         DEFAULT_INITIAL_ARQ_RTT_MS,
@@ -1068,32 +643,19 @@ async fn main() -> anyhow::Result<()> {
         0,
     );
 
-    #[cfg(target_os = "windows")]
-    let windows_state = if let std::net::SocketAddr::V4(v4) = server_addr {
-        let state =
-            configure_windows_routing(*v4.ip(), tun_ip, server_hello.server_mtu, &client_config);
-        if matches!(client_config.tunnel_mode, TunnelMode::Full) {
-            match state.as_ref() {
-                Some(state) if state.route_conflict.is_none() => {}
-                Some(state) => {
-                    let err = state.route_conflict.clone().unwrap_or_else(|| {
-                        "Windows full-tunnel routing verification failed".to_string()
-                    });
-                    diagnostics.set_status("routing_failed");
-                    cleanup_windows_routing(*v4.ip(), Some(state));
-                    return Err(anyhow::anyhow!(err));
-                }
-                None => {
-                    diagnostics.set_status("routing_failed");
-                    return Err(anyhow::anyhow!(
-                        "failed to configure Windows full-tunnel routes; stop other VPN/tun2socks adapters and retry"
-                    ));
-                }
-            }
+    let network_state = match network::configure(
+        server_addr,
+        tun_ip,
+        tun_ipv6,
+        interface_name.as_deref(),
+        server_hello.server_mtu,
+        &client_config,
+    ) {
+        Ok(state) => state,
+        Err(err) => {
+            diagnostics.set_status("routing_failed");
+            return Err(err);
         }
-        state
-    } else {
-        None
     };
 
     let diag_dns_servers = client_config.dns_servers.clone();
@@ -1462,12 +1024,7 @@ async fn main() -> anyhow::Result<()> {
     diagnostics.set_status("stopping");
     tracing::info!("shutting down");
 
-    #[cfg(target_os = "windows")]
-    {
-        if let std::net::SocketAddr::V4(v4) = server_addr {
-            cleanup_windows_routing(*v4.ip(), windows_state.as_ref());
-        }
-    }
+    network::cleanup(server_addr, network_state.as_ref());
 
     Ok(())
 }
@@ -1502,37 +1059,5 @@ mod tests {
         }
         assert!(emitted_nack, "gap should eventually trigger a nack");
         assert!(state.loss_ratio() > 0.0);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn full_tunnel_route_summary_accepts_omega_owned_routes() {
-        let summary = summarize_windows_full_tunnel_routes(
-            "\
-Network Destination        Netmask          Gateway       Interface  Metric\n\
-          0.0.0.0        128.0.0.0         On-link         10.7.0.2      6\n\
-        128.0.0.0        128.0.0.0         On-link         10.7.0.2      6\n",
-            "10.7.0.2",
-        );
-
-        assert!(summary.lower_half_ok);
-        assert!(summary.upper_half_ok);
-        assert!(summary.conflicting_routes.is_empty());
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn full_tunnel_route_summary_detects_competing_tunnel() {
-        let summary = summarize_windows_full_tunnel_routes(
-            "\
-Network Destination        Netmask          Gateway       Interface  Metric\n\
-          0.0.0.0        128.0.0.0         On-link        10.33.0.2      6\n\
-        128.0.0.0        128.0.0.0         On-link        10.33.0.2      6\n",
-            "10.7.0.2",
-        );
-
-        assert!(!summary.lower_half_ok);
-        assert!(!summary.upper_half_ok);
-        assert_eq!(summary.conflicting_routes.len(), 2);
     }
 }

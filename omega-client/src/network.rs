@@ -1,0 +1,1139 @@
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::process::Command;
+
+use anyhow::Context;
+
+use crate::config::{ClientConfig, TunnelMode};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteLookup {
+    interface: String,
+    gateway: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteFamily {
+    Ipv4,
+    Ipv6,
+}
+
+impl RouteFamily {
+    fn address_family(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "IPv4",
+            Self::Ipv6 => "IPv6",
+        }
+    }
+
+    fn default_next_hop(self) -> &'static str {
+        match self {
+            Self::Ipv4 => "0.0.0.0",
+            Self::Ipv6 => "::",
+        }
+    }
+
+    fn default_prefix_len(self) -> u8 {
+        match self {
+            Self::Ipv4 => 32,
+            Self::Ipv6 => 128,
+        }
+    }
+}
+
+fn normalize_gateway(raw: &str) -> Option<String> {
+    let value = raw.trim().trim_matches('"');
+    if value.is_empty()
+        || value.eq_ignore_ascii_case("on-link")
+        || value == "0.0.0.0"
+        || value == "::"
+    {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn parse_windows_route_lookup_csv(output: &str) -> Option<RouteLookup> {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let _header = lines.next()?;
+    let values = lines.next()?;
+    let cols = values
+        .trim_matches('"')
+        .split("\",\"")
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if cols.len() < 2 {
+        return None;
+    }
+    Some(RouteLookup {
+        interface: cols[0].to_string(),
+        gateway: normalize_gateway(cols[1]),
+    })
+}
+
+fn parse_linux_route_lookup(output: &str) -> Option<RouteLookup> {
+    let cols = output.split_whitespace().collect::<Vec<_>>();
+    let interface = cols
+        .windows(2)
+        .find_map(|window| (window[0] == "dev").then(|| window[1].to_string()))?;
+    let gateway = cols
+        .windows(2)
+        .find_map(|window| (window[0] == "via").then(|| window[1]))
+        .and_then(normalize_gateway);
+
+    Some(RouteLookup { interface, gateway })
+}
+
+fn parse_macos_route_get(output: &str) -> Option<RouteLookup> {
+    let mut interface = None;
+    let mut gateway = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if let Some((key, value)) = trimmed.split_once(':') {
+            match key.trim() {
+                "interface" => interface = Some(value.trim().to_string()),
+                "gateway" => gateway = normalize_gateway(value),
+                _ => {}
+            }
+        }
+    }
+
+    Some(RouteLookup {
+        interface: interface?,
+        gateway,
+    })
+}
+
+fn parse_macos_service_order(output: &str, interface: &str) -> Option<String> {
+    let mut current_service = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('(')
+            && trimmed
+                .chars()
+                .nth(1)
+                .map(|ch| ch.is_ascii_digit())
+                .unwrap_or(false)
+        {
+            if let Some((_, service)) = trimmed.split_once(')') {
+                current_service = Some(service.trim().trim_start_matches('*').trim().to_string());
+            }
+            continue;
+        }
+
+        if trimmed.contains("Device:") && trimmed.contains(interface) {
+            return current_service.clone();
+        }
+    }
+
+    None
+}
+
+fn parse_macos_dns_servers(output: &str) -> Option<Vec<String>> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+    if trimmed.starts_with("There aren't any DNS Servers set on ") {
+        return Some(Vec::new());
+    }
+
+    let servers = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    Some(servers)
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct WindowsManagedRoute {
+    family: RouteFamily,
+    destination_prefix: String,
+}
+
+#[cfg(target_os = "windows")]
+pub struct NetworkState {
+    disabled_ipv6_adapters: Vec<String>,
+    interface_alias: String,
+    reset_dns: bool,
+    managed_routes: Vec<WindowsManagedRoute>,
+    reset_ipv6_metric: bool,
+}
+
+#[cfg(target_os = "linux")]
+pub struct NetworkState {
+    interface_name: String,
+    dns_configured: bool,
+    managed_routes_v4: Vec<String>,
+    managed_routes_v6: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+pub struct NetworkState {
+    primary_service: Option<String>,
+    previous_dns_servers: Option<Vec<String>>,
+    dns_configured: bool,
+    managed_routes_v4: Vec<String>,
+    managed_routes_v6: Vec<String>,
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+pub struct NetworkState;
+
+pub fn configure(
+    server_addr: SocketAddr,
+    tunnel_ip: Ipv4Addr,
+    tunnel_ipv6: Option<Ipv6Addr>,
+    interface_name: Option<&str>,
+    interface_mtu: u16,
+    config: &ClientConfig,
+) -> anyhow::Result<Option<NetworkState>> {
+    #[cfg(target_os = "windows")]
+    let _ = interface_name;
+
+    #[cfg(target_os = "windows")]
+    {
+        return configure_windows_routing(
+            server_addr,
+            tunnel_ip,
+            tunnel_ipv6,
+            interface_mtu,
+            config,
+        )
+        .map(Some);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return configure_linux_network(
+            server_addr,
+            tunnel_ip,
+            tunnel_ipv6,
+            interface_name,
+            interface_mtu,
+            config,
+        )
+        .map(Some);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return configure_macos_network(
+            server_addr,
+            tunnel_ip,
+            tunnel_ipv6,
+            interface_name,
+            interface_mtu,
+            config,
+        )
+        .map(Some);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (
+            server_addr,
+            tunnel_ip,
+            tunnel_ipv6,
+            interface_name,
+            interface_mtu,
+            config,
+        );
+        Ok(None)
+    }
+}
+
+pub fn cleanup(server_addr: SocketAddr, state: Option<&NetworkState>) {
+    #[cfg(target_os = "windows")]
+    {
+        cleanup_windows_routing(server_addr, state);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        cleanup_linux_network(server_addr, state);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        cleanup_macos_network(server_addr, state);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (server_addr, state);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_routing(
+    server_addr: SocketAddr,
+    tunnel_ip: Ipv4Addr,
+    tunnel_ipv6: Option<Ipv6Addr>,
+    interface_mtu: u16,
+    config: &ClientConfig,
+) -> anyhow::Result<NetworkState> {
+    use std::time::Duration;
+
+    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
+        anyhow::bail!(
+            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
+        );
+    }
+
+    tracing::info!(
+        %server_addr,
+        %tunnel_ip,
+        tunnel_ipv6 = ?tunnel_ipv6,
+        "configuring Windows routing tables"
+    );
+
+    let tunnel_ip_s = tunnel_ip.to_string();
+    let mut if_index = String::new();
+    let mut if_alias = String::new();
+
+    for _ in 0..15 {
+        let output_idx = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceIndex",
+                    tunnel_ip_s
+                ),
+            ])
+            .output();
+
+        let output_alias = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceAlias",
+                    tunnel_ip_s
+                ),
+            ])
+            .output();
+
+        if let (Ok(o_idx), Ok(o_alias)) = (output_idx, output_alias) {
+            let idx_str = String::from_utf8_lossy(&o_idx.stdout).trim().to_string();
+            let alias_str = String::from_utf8_lossy(&o_alias.stdout).trim().to_string();
+
+            if !idx_str.is_empty() && !alias_str.is_empty() {
+                if_index = idx_str;
+                if_alias = alias_str;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if if_index.is_empty() || if_alias.is_empty() {
+        anyhow::bail!("could not find Wintun interface");
+    }
+
+    let _ = Command::new("netsh")
+        .args([
+            "interface",
+            "ipv4",
+            "set",
+            "subinterface",
+            &if_alias,
+            &format!("mtu={}", interface_mtu),
+            "store=active",
+        ])
+        .status();
+
+    run_powershell(&format!(
+        "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -InterfaceMetric 1",
+        powershell_quote(&if_alias)
+    ))?;
+
+    let reset_ipv6_metric = config.should_tunnel_ipv6() && tunnel_ipv6.is_some();
+    if reset_ipv6_metric {
+        run_powershell(&format!(
+            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv6 -InterfaceMetric 1",
+            powershell_quote(&if_alias)
+        ))?;
+    }
+
+    let mut state = NetworkState {
+        disabled_ipv6_adapters: if config.should_disable_ipv6() {
+            configure_windows_ipv6_guard(&if_alias)
+        } else {
+            Vec::new()
+        },
+        interface_alias: if_alias.clone(),
+        reset_dns: false,
+        managed_routes: Vec::new(),
+        reset_ipv6_metric,
+    };
+
+    if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
+        let dns_ps = config
+            .dns_servers
+            .iter()
+            .map(|value| format!("'{}'", value))
+            .collect::<Vec<_>>()
+            .join(",");
+        run_powershell(&format!(
+            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
+            powershell_quote(&if_alias),
+            dns_ps
+        ))?;
+        state.reset_dns = true;
+    }
+
+    let server_lookup = find_windows_route(server_addr.ip()).with_context(|| {
+        format!(
+            "failed to resolve current Windows route to {}",
+            server_addr.ip()
+        )
+    })?;
+    let server_route = WindowsManagedRoute {
+        family: socket_family(server_addr),
+        destination_prefix: format!(
+            "{}/{}",
+            server_addr.ip(),
+            socket_family(server_addr).default_prefix_len()
+        ),
+    };
+    delete_windows_route(&server_route);
+    add_windows_host_route(
+        &server_route,
+        &server_lookup.interface,
+        server_lookup.gateway.as_deref(),
+    )?;
+    state.managed_routes.push(server_route);
+
+    match config.tunnel_mode {
+        TunnelMode::Full => {
+            let full_v4 = [
+                WindowsManagedRoute {
+                    family: RouteFamily::Ipv4,
+                    destination_prefix: "0.0.0.0/1".to_string(),
+                },
+                WindowsManagedRoute {
+                    family: RouteFamily::Ipv4,
+                    destination_prefix: "128.0.0.0/1".to_string(),
+                },
+            ];
+            for route in full_v4 {
+                delete_windows_route(&route);
+                add_windows_host_route(&route, &if_index, None)?;
+                state.managed_routes.push(route);
+            }
+
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                let full_v6 = [
+                    WindowsManagedRoute {
+                        family: RouteFamily::Ipv6,
+                        destination_prefix: "::/1".to_string(),
+                    },
+                    WindowsManagedRoute {
+                        family: RouteFamily::Ipv6,
+                        destination_prefix: "8000::/1".to_string(),
+                    },
+                ];
+                for route in full_v6 {
+                    delete_windows_route(&route);
+                    add_windows_host_route(&route, &if_index, None)?;
+                    state.managed_routes.push(route);
+                }
+            }
+        }
+        TunnelMode::Split => {
+            for route in &config.split_routes {
+                let managed = WindowsManagedRoute {
+                    family: RouteFamily::Ipv4,
+                    destination_prefix: route.cidr.clone(),
+                };
+                delete_windows_route(&managed);
+                add_windows_host_route(&managed, &if_index, None)?;
+                state.managed_routes.push(managed);
+            }
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                for route in &config.split_routes_v6 {
+                    let managed = WindowsManagedRoute {
+                        family: RouteFamily::Ipv6,
+                        destination_prefix: route.cidr.clone(),
+                    };
+                    delete_windows_route(&managed);
+                    add_windows_host_route(&managed, &if_index, None)?;
+                    state.managed_routes.push(managed);
+                }
+            }
+        }
+    }
+
+    Ok(state)
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>) {
+    if let Some(state) = state {
+        if state.reset_dns {
+            let _ = run_powershell(&format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+                powershell_quote(&state.interface_alias)
+            ));
+        }
+        let _ = run_powershell(&format!(
+            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -AutomaticMetric Enabled",
+            powershell_quote(&state.interface_alias)
+        ));
+        if state.reset_ipv6_metric {
+            let _ = run_powershell(&format!(
+                "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv6 -AutomaticMetric Enabled",
+                powershell_quote(&state.interface_alias)
+            ));
+        }
+        restore_windows_ipv6_guard(&state.disabled_ipv6_adapters);
+        for route in &state.managed_routes {
+            delete_windows_route(route);
+        }
+    } else if matches!(server_addr, SocketAddr::V4(_) | SocketAddr::V6(_)) {
+        let route = WindowsManagedRoute {
+            family: socket_family(server_addr),
+            destination_prefix: format!(
+                "{}/{}",
+                server_addr.ip(),
+                socket_family(server_addr).default_prefix_len()
+            ),
+        };
+        delete_windows_route(&route);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_route(addr: IpAddr) -> anyhow::Result<RouteLookup> {
+    let output = Command::new("powershell")
+        .args([
+            "-Command",
+            &format!(
+                "Find-NetRoute -RemoteIPAddress '{}' | Select-Object -First 1 InterfaceIndex,NextHop | ConvertTo-Csv -NoTypeInformation",
+                addr
+            ),
+        ])
+        .output()
+        .with_context(|| format!("failed to query Windows route to {addr}"))?;
+
+    parse_windows_route_lookup_csv(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("could not parse Windows route lookup for {addr}"))
+}
+
+#[cfg(target_os = "windows")]
+fn add_windows_host_route(
+    route: &WindowsManagedRoute,
+    interface_index: &str,
+    next_hop: Option<&str>,
+) -> anyhow::Result<()> {
+    run_powershell(&format!(
+        "New-NetRoute -AddressFamily {} -DestinationPrefix '{}' -InterfaceIndex {} -NextHop '{}' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null",
+        route.family.address_family(),
+        route.destination_prefix,
+        interface_index,
+        next_hop.unwrap_or(route.family.default_next_hop())
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn delete_windows_route(route: &WindowsManagedRoute) {
+    let _ = run_powershell(&format!(
+        "Remove-NetRoute -AddressFamily {} -DestinationPrefix '{}' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
+        route.family.address_family(),
+        route.destination_prefix
+    ));
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell(script: &str) -> anyhow::Result<()> {
+    let status = Command::new("powershell")
+        .args(["-Command", script])
+        .status()
+        .with_context(|| format!("failed to run PowerShell: {script}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("PowerShell command failed: {script}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_ipv6_guard(wintun_alias: &str) -> Vec<String> {
+    let list_cmd = format!(
+        "Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -ne '{}' -and $_.InterfaceDescription -notlike '*Wintun*' }} | ForEach-Object {{ $binding = Get-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue; if ($binding -and $binding.Enabled) {{ $_.Name }} }}",
+        powershell_quote(wintun_alias)
+    );
+
+    let Ok(output) = Command::new("powershell")
+        .args(["-Command", &list_cmd])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    let adapters = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    for adapter in &adapters {
+        let _ = run_powershell(&format!(
+            "Disable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
+            powershell_quote(adapter)
+        ));
+    }
+
+    adapters
+}
+
+#[cfg(target_os = "windows")]
+fn restore_windows_ipv6_guard(adapters: &[String]) {
+    for adapter in adapters {
+        let _ = run_powershell(&format!(
+            "Enable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
+            powershell_quote(adapter)
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_network(
+    server_addr: SocketAddr,
+    _tunnel_ip: Ipv4Addr,
+    tunnel_ipv6: Option<Ipv6Addr>,
+    interface_name: Option<&str>,
+    interface_mtu: u16,
+    config: &ClientConfig,
+) -> anyhow::Result<NetworkState> {
+    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
+        anyhow::bail!(
+            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
+        );
+    }
+
+    let interface_name = interface_name.context("failed to determine tunnel interface name")?;
+    run_status("ip", &["link", "set", "dev", interface_name, "up"])?;
+    run_status(
+        "ip",
+        &[
+            "link",
+            "set",
+            "dev",
+            interface_name,
+            "mtu",
+            &interface_mtu.to_string(),
+        ],
+    )?;
+
+    let mut state = NetworkState {
+        interface_name: interface_name.to_string(),
+        dns_configured: false,
+        managed_routes_v4: Vec::new(),
+        managed_routes_v6: Vec::new(),
+    };
+
+    let server_lookup = find_linux_route(server_addr.ip())
+        .with_context(|| format!("failed to resolve Linux route to {}", server_addr.ip()))?;
+    let server_prefix = format!(
+        "{}/{}",
+        server_addr.ip(),
+        socket_family(server_addr).default_prefix_len()
+    );
+    add_linux_route(
+        &server_prefix,
+        socket_family(server_addr),
+        interface_name,
+        server_lookup.gateway.as_deref(),
+    )?;
+    track_route(&mut state, socket_family(server_addr), server_prefix);
+
+    match config.tunnel_mode {
+        TunnelMode::Full => {
+            for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
+                add_linux_route(prefix, RouteFamily::Ipv4, interface_name, None)?;
+                track_route(&mut state, RouteFamily::Ipv4, prefix.to_string());
+            }
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                for prefix in ["::/1", "8000::/1"] {
+                    add_linux_route(prefix, RouteFamily::Ipv6, interface_name, None)?;
+                    track_route(&mut state, RouteFamily::Ipv6, prefix.to_string());
+                }
+            }
+        }
+        TunnelMode::Split => {
+            for route in &config.split_routes {
+                add_linux_route(&route.cidr, RouteFamily::Ipv4, interface_name, None)?;
+                track_route(&mut state, RouteFamily::Ipv4, route.cidr.clone());
+            }
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                for route in &config.split_routes_v6 {
+                    add_linux_route(&route.cidr, RouteFamily::Ipv6, interface_name, None)?;
+                    track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone());
+                }
+            }
+        }
+    }
+
+    if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
+        configure_linux_dns(interface_name, &config.dns_servers)?;
+        state.dns_configured = true;
+    }
+
+    Ok(state)
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_linux_network(server_addr: SocketAddr, state: Option<&NetworkState>) {
+    if let Some(state) = state {
+        for prefix in &state.managed_routes_v4 {
+            let _ = Command::new("ip").args(["route", "del", prefix]).status();
+        }
+        for prefix in &state.managed_routes_v6 {
+            let _ = Command::new("ip")
+                .args(["-6", "route", "del", prefix])
+                .status();
+        }
+        if state.dns_configured {
+            let _ = revert_linux_dns(&state.interface_name);
+        }
+    } else {
+        let prefix = format!(
+            "{}/{}",
+            server_addr.ip(),
+            socket_family(server_addr).default_prefix_len()
+        );
+        match socket_family(server_addr) {
+            RouteFamily::Ipv4 => {
+                let _ = Command::new("ip").args(["route", "del", &prefix]).status();
+            }
+            RouteFamily::Ipv6 => {
+                let _ = Command::new("ip")
+                    .args(["-6", "route", "del", &prefix])
+                    .status();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_route(addr: IpAddr) -> anyhow::Result<RouteLookup> {
+    let output = match addr {
+        IpAddr::V4(ip) => Command::new("ip")
+            .args(["route", "get", &ip.to_string()])
+            .output(),
+        IpAddr::V6(ip) => Command::new("ip")
+            .args(["-6", "route", "get", &ip.to_string()])
+            .output(),
+    }
+    .with_context(|| format!("failed to query Linux route to {addr}"))?;
+
+    parse_linux_route_lookup(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("could not parse Linux route lookup for {addr}"))
+}
+
+#[cfg(target_os = "linux")]
+fn add_linux_route(
+    prefix: &str,
+    family: RouteFamily,
+    interface_name: &str,
+    gateway: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut args = match family {
+        RouteFamily::Ipv4 => vec!["route", "replace", prefix],
+        RouteFamily::Ipv6 => vec!["-6", "route", "replace", prefix],
+    };
+    if let Some(gateway) = gateway {
+        args.extend(["via", gateway]);
+    }
+    args.extend(["dev", interface_name, "metric", "1"]);
+    run_status("ip", &args)
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_dns(interface_name: &str, dns_servers: &[String]) -> anyhow::Result<()> {
+    if let Some(tool) = linux_dns_tool() {
+        match tool {
+            LinuxDnsTool::ResolveCtl => {
+                let mut dns_args = vec!["dns", interface_name];
+                dns_args.extend(dns_servers.iter().map(String::as_str));
+                run_status("resolvectl", &dns_args)?;
+                run_status("resolvectl", &["domain", interface_name, "~."])?;
+                run_status("resolvectl", &["default-route", interface_name, "yes"])?;
+                Ok(())
+            }
+            LinuxDnsTool::SystemdResolve => {
+                let mut args = vec![
+                    format!("--interface={interface_name}"),
+                    "--set-domain=~.".to_string(),
+                ];
+                for server in dns_servers {
+                    args.push(format!("--set-dns={server}"));
+                }
+                let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+                run_status("systemd-resolve", &arg_refs)
+            }
+        }
+    } else {
+        anyhow::bail!(
+            "tunnel DNS requested but neither resolvectl nor systemd-resolve is available"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn revert_linux_dns(interface_name: &str) -> anyhow::Result<()> {
+    if let Some(tool) = linux_dns_tool() {
+        match tool {
+            LinuxDnsTool::ResolveCtl => run_status("resolvectl", &["revert", interface_name]),
+            LinuxDnsTool::SystemdResolve => run_status(
+                "systemd-resolve",
+                &[&format!("--interface={interface_name}"), "--revert"],
+            ),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum LinuxDnsTool {
+    ResolveCtl,
+    SystemdResolve,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_dns_tool() -> Option<LinuxDnsTool> {
+    if Command::new("resolvectl").arg("--version").output().is_ok() {
+        Some(LinuxDnsTool::ResolveCtl)
+    } else if Command::new("systemd-resolve")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        Some(LinuxDnsTool::SystemdResolve)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_network(
+    server_addr: SocketAddr,
+    _tunnel_ip: Ipv4Addr,
+    tunnel_ipv6: Option<Ipv6Addr>,
+    interface_name: Option<&str>,
+    interface_mtu: u16,
+    config: &ClientConfig,
+) -> anyhow::Result<NetworkState> {
+    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
+        anyhow::bail!(
+            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
+        );
+    }
+
+    let interface_name = interface_name.context("failed to determine tunnel interface name")?;
+    run_status(
+        "ifconfig",
+        &[interface_name, "mtu", &interface_mtu.to_string(), "up"],
+    )?;
+
+    let mut state = NetworkState {
+        primary_service: None,
+        previous_dns_servers: None,
+        dns_configured: false,
+        managed_routes_v4: Vec::new(),
+        managed_routes_v6: Vec::new(),
+    };
+
+    let server_lookup = find_macos_route(server_addr.ip())
+        .with_context(|| format!("failed to resolve macOS route to {}", server_addr.ip()))?;
+    let server_prefix = format!(
+        "{}/{}",
+        server_addr.ip(),
+        socket_family(server_addr).default_prefix_len()
+    );
+    add_macos_host_route(&server_prefix, socket_family(server_addr), &server_lookup)?;
+    track_route(&mut state, socket_family(server_addr), server_prefix);
+
+    match config.tunnel_mode {
+        TunnelMode::Full => {
+            for prefix in ["0.0.0.0/1", "128.0.0.0/1"] {
+                add_macos_interface_route(prefix, RouteFamily::Ipv4, interface_name)?;
+                track_route(&mut state, RouteFamily::Ipv4, prefix.to_string());
+            }
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                for prefix in ["::/1", "8000::/1"] {
+                    add_macos_interface_route(prefix, RouteFamily::Ipv6, interface_name)?;
+                    track_route(&mut state, RouteFamily::Ipv6, prefix.to_string());
+                }
+            }
+        }
+        TunnelMode::Split => {
+            for route in &config.split_routes {
+                add_macos_interface_route(&route.cidr, RouteFamily::Ipv4, interface_name)?;
+                track_route(&mut state, RouteFamily::Ipv4, route.cidr.clone());
+            }
+            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+                for route in &config.split_routes_v6 {
+                    add_macos_interface_route(&route.cidr, RouteFamily::Ipv6, interface_name)?;
+                    track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone());
+                }
+            }
+        }
+    }
+
+    if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
+        let primary_service = find_macos_primary_service(&server_lookup.interface)
+            .context("failed to resolve primary macOS network service for DNS")?;
+        let previous_dns_servers = read_macos_dns_servers(&primary_service)?;
+        configure_macos_dns(&primary_service, &config.dns_servers)?;
+        state.primary_service = Some(primary_service);
+        state.previous_dns_servers = Some(previous_dns_servers);
+        state.dns_configured = true;
+    }
+
+    Ok(state)
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_macos_network(server_addr: SocketAddr, state: Option<&NetworkState>) {
+    if let Some(state) = state {
+        for prefix in &state.managed_routes_v4 {
+            let _ = Command::new("route")
+                .args(["-n", "delete", "-net", prefix])
+                .status();
+        }
+        for prefix in &state.managed_routes_v6 {
+            let _ = Command::new("route")
+                .args(["-n", "delete", "-inet6", "-net", prefix])
+                .status();
+        }
+        if state.dns_configured {
+            if let (Some(service), Some(previous)) = (
+                state.primary_service.as_ref(),
+                state.previous_dns_servers.as_ref(),
+            ) {
+                if previous.is_empty() {
+                    let _ = Command::new("networksetup")
+                        .args(["-setdnsservers", service, "empty"])
+                        .status();
+                } else {
+                    let mut args = vec!["-setdnsservers", service.as_str()];
+                    args.extend(previous.iter().map(String::as_str));
+                    let _ = Command::new("networksetup").args(&args).status();
+                }
+            }
+        }
+    } else {
+        match socket_family(server_addr) {
+            RouteFamily::Ipv4 => {
+                let _ = Command::new("route")
+                    .args(["-n", "delete", "-host", &server_addr.ip().to_string()])
+                    .status();
+            }
+            RouteFamily::Ipv6 => {
+                let _ = Command::new("route")
+                    .args([
+                        "-n",
+                        "delete",
+                        "-inet6",
+                        "-host",
+                        &server_addr.ip().to_string(),
+                    ])
+                    .status();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_route(addr: IpAddr) -> anyhow::Result<RouteLookup> {
+    let output = match addr {
+        IpAddr::V4(ip) => Command::new("route")
+            .args(["-n", "get", "-inet", &ip.to_string()])
+            .output(),
+        IpAddr::V6(ip) => Command::new("route")
+            .args(["-n", "get", "-inet6", &ip.to_string()])
+            .output(),
+    }
+    .with_context(|| format!("failed to query macOS route to {addr}"))?;
+
+    parse_macos_route_get(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("could not parse macOS route lookup for {addr}"))
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_host_route(
+    prefix: &str,
+    family: RouteFamily,
+    lookup: &RouteLookup,
+) -> anyhow::Result<()> {
+    let host = prefix.split('/').next().unwrap_or(prefix);
+    let mut args = vec!["-n", "add"];
+    if matches!(family, RouteFamily::Ipv6) {
+        args.push("-inet6");
+    }
+    args.push("-host");
+    args.push(host);
+    if let Some(gateway) = lookup.gateway.as_deref() {
+        args.push(gateway);
+    } else {
+        args.push("-interface");
+        args.push(&lookup.interface);
+    }
+    run_status("route", &args)
+}
+
+#[cfg(target_os = "macos")]
+fn add_macos_interface_route(
+    prefix: &str,
+    family: RouteFamily,
+    interface_name: &str,
+) -> anyhow::Result<()> {
+    let mut args = vec!["-n", "add"];
+    if matches!(family, RouteFamily::Ipv6) {
+        args.push("-inet6");
+    }
+    args.extend(["-net", prefix, "-interface", interface_name]);
+    run_status("route", &args)
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_primary_service(interface: &str) -> anyhow::Result<String> {
+    let output = Command::new("networksetup")
+        .arg("-listnetworkserviceorder")
+        .output()
+        .context("failed to inspect macOS network service order")?;
+    parse_macos_service_order(&String::from_utf8_lossy(&output.stdout), interface).ok_or_else(
+        || anyhow::anyhow!("could not map macOS interface {interface} to a network service"),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_dns_servers(service: &str) -> anyhow::Result<Vec<String>> {
+    let output = Command::new("networksetup")
+        .args(["-getdnsservers", service])
+        .output()
+        .with_context(|| format!("failed to read DNS servers for macOS service {service}"))?;
+    parse_macos_dns_servers(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| anyhow::anyhow!("failed to parse DNS servers for macOS service {service}"))
+}
+
+#[cfg(target_os = "macos")]
+fn configure_macos_dns(service: &str, dns_servers: &[String]) -> anyhow::Result<()> {
+    let mut args = vec!["-setdnsservers", service];
+    args.extend(dns_servers.iter().map(String::as_str));
+    run_status("networksetup", &args)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_status(program: &str, args: &[&str]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to execute {} {:?}", program, args))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("command failed: {} {:?}", program, args);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn track_route(state: &mut NetworkState, family: RouteFamily, prefix: String) {
+    match family {
+        RouteFamily::Ipv4 => state.managed_routes_v4.push(prefix),
+        RouteFamily::Ipv6 => state.managed_routes_v6.push(prefix),
+    }
+}
+
+fn socket_family(addr: SocketAddr) -> RouteFamily {
+    if addr.is_ipv4() {
+        RouteFamily::Ipv4
+    } else {
+        RouteFamily::Ipv6
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_windows_route_lookup_csv() {
+        let lookup = parse_windows_route_lookup_csv(
+            "\"InterfaceIndex\",\"NextHop\"\r\n\"7\",\"fe80::1\"\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(lookup.interface, "7");
+        assert_eq!(lookup.gateway.as_deref(), Some("fe80::1"));
+    }
+
+    #[test]
+    fn parses_linux_route_lookup_output() {
+        let lookup = parse_linux_route_lookup(
+            "2001:db8::10 via fe80::1 dev wlan0 proto ra src 2001:db8::20 metric 600 pref medium",
+        )
+        .unwrap();
+
+        assert_eq!(lookup.interface, "wlan0");
+        assert_eq!(lookup.gateway.as_deref(), Some("fe80::1"));
+    }
+
+    #[test]
+    fn parses_macos_route_get_output() {
+        let lookup = parse_macos_route_get(
+            "\
+   route to: 2001:4860:4860::8888\n\
+destination: default\n\
+       mask: default\n\
+    gateway: fe80::1%en0\n\
+  interface: en0\n",
+        )
+        .unwrap();
+
+        assert_eq!(lookup.interface, "en0");
+        assert_eq!(lookup.gateway.as_deref(), Some("fe80::1%en0"));
+    }
+
+    #[test]
+    fn parses_primary_service_from_networksetup_output() {
+        let service = parse_macos_service_order(
+            "\
+An asterisk (*) denotes that a network service is disabled.\n\
+(1) Wi-Fi\n\
+(Hardware Port: Wi-Fi, Device: en0)\n\
+(2) Thunderbolt Bridge\n\
+(Hardware Port: Thunderbolt Bridge, Device: bridge0)\n",
+            "en0",
+        );
+
+        assert_eq!(service.as_deref(), Some("Wi-Fi"));
+    }
+
+    #[test]
+    fn parses_macos_dns_servers() {
+        assert_eq!(
+            parse_macos_dns_servers("8.8.8.8\n2606:4700:4700::1111\n"),
+            Some(vec![
+                "8.8.8.8".to_string(),
+                "2606:4700:4700::1111".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_macos_dns_servers("There aren't any DNS Servers set on Wi-Fi.\n"),
+            Some(Vec::new())
+        );
+    }
+}
