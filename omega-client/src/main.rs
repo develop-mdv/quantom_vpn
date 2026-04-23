@@ -572,6 +572,7 @@ async fn main() -> anyhow::Result<()> {
         version: HANDSHAKE_VERSION,
         client_mtu: client_config.requested_mtu,
         fec_support: true,
+        supports_tunnel_ipv6: client_config.should_tunnel_ipv6(),
         encaps_key: ek.as_bytes().to_vec(),
         auth: Some(ClientAuth {
             device_id,

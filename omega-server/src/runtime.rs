@@ -50,12 +50,16 @@ pub enum Ipv6Mode {
 
 impl Ipv6Mode {
     pub fn from_env() -> Self {
-        match std::env::var("OMEGA_IPV6_MODE") {
-            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+        let raw = std::env::var("OMEGA_IPV6_MODE")
+            .ok()
+            .or_else(|| std::env::var("OMEGA_VPN_IPV6_MODE").ok());
+
+        match raw {
+            Some(value) => match value.trim().to_ascii_lowercase().as_str() {
                 "nat66" | "enabled" | "tunneled" | "tunnel" => Self::Nat66,
                 _ => Self::Disabled,
             },
-            Err(_) => Self::Disabled,
+            None => Self::Disabled,
         }
     }
 

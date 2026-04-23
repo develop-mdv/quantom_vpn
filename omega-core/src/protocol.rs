@@ -326,6 +326,7 @@ pub struct ClientHello {
     pub version: u8,
     pub client_mtu: u16,
     pub fec_support: bool,
+    pub supports_tunnel_ipv6: bool,
     pub encaps_key: Vec<u8>,
     pub auth: Option<ClientAuth>,
 }
@@ -353,6 +354,9 @@ impl ClientHello {
             buf.push(name_len as u8);
             buf.extend_from_slice(&name[..name_len]);
         }
+        if self.version >= 2 && self.supports_tunnel_ipv6 {
+            buf.push(0x01);
+        }
 
         buf
     }
@@ -364,6 +368,7 @@ impl ClientHello {
 
         let version = buf[0];
         let mut auth = None;
+        let mut supports_tunnel_ipv6 = false;
 
         if version >= 2 {
             let auth_base = 4 + MLKEM768_EK_LEN;
@@ -387,6 +392,10 @@ impl ClientHello {
                 return None;
             }
 
+            if let Some(features) = buf.get(name_end) {
+                supports_tunnel_ipv6 = (features & 0x01) != 0;
+            }
+
             let device_name = std::str::from_utf8(&buf[name_start..name_end])
                 .ok()?
                 .to_string();
@@ -402,6 +411,7 @@ impl ClientHello {
             version,
             client_mtu: ((buf[1] as u16) << 8) | (buf[2] as u16),
             fec_support: buf[3] != 0,
+            supports_tunnel_ipv6,
             encaps_key: buf[4..4 + MLKEM768_EK_LEN].to_vec(),
             auth,
         })
@@ -668,6 +678,7 @@ mod tests {
             version: HANDSHAKE_VERSION,
             client_mtu: 1280,
             fec_support: true,
+            supports_tunnel_ipv6: true,
             encaps_key: vec![0xAA; MLKEM768_EK_LEN],
             auth: Some(ClientAuth {
                 device_id: [0x11; 16],
@@ -681,6 +692,7 @@ mod tests {
         assert_eq!(parsed.version, HANDSHAKE_VERSION);
         assert_eq!(parsed.client_mtu, 1280);
         assert!(parsed.fec_support);
+        assert!(parsed.supports_tunnel_ipv6);
         assert_eq!(parsed.encaps_key.len(), MLKEM768_EK_LEN);
         let auth = parsed.auth.unwrap();
         assert_eq!(auth.device_id, [0x11; 16]);
@@ -695,6 +707,7 @@ mod tests {
             version: 1,
             client_mtu: 1280,
             fec_support: false,
+            supports_tunnel_ipv6: false,
             encaps_key: vec![0xAB; MLKEM768_EK_LEN],
             auth: None,
         };
@@ -702,6 +715,26 @@ mod tests {
         let parsed = ClientHello::deserialize(&serialized).unwrap();
         assert_eq!(parsed.version, 1);
         assert!(parsed.auth.is_none());
+        assert!(!parsed.supports_tunnel_ipv6);
+    }
+
+    #[test]
+    fn test_client_hello_without_feature_trailer_defaults_to_ipv4_only() {
+        let mut serialized = Vec::with_capacity(4 + MLKEM768_EK_LEN + 16 + DEVICE_TOKEN_LEN + 2);
+        serialized.push(HANDSHAKE_VERSION);
+        serialized.push(0x05);
+        serialized.push(0x00);
+        serialized.push(1);
+        serialized.extend_from_slice(&vec![0xAA; MLKEM768_EK_LEN]);
+        serialized.extend_from_slice(&[0x11; 16]);
+        serialized.extend_from_slice(&[0x22; DEVICE_TOKEN_LEN]);
+        serialized.push(DevicePlatform::Windows as u8);
+        serialized.push(7);
+        serialized.extend_from_slice(b"desktop");
+
+        let parsed = ClientHello::deserialize(&serialized).unwrap();
+        assert_eq!(parsed.version, HANDSHAKE_VERSION);
+        assert!(!parsed.supports_tunnel_ipv6);
     }
 
     #[test]

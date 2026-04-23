@@ -214,7 +214,9 @@ pub fn process_client_handshake(
         fec_enabled,
         flow_id,
         tunnel_ip: tunnel_addrs.ipv4,
-        tunnel_ipv6: tunnel_addrs.ipv6,
+        tunnel_ipv6: tunnel_addrs
+            .ipv6
+            .filter(|_| client_hello.supports_tunnel_ipv6),
         ciphertext: ct_bytes.to_vec(),
     };
     let response = StunWrapper::wrap_response(&txn_id, &server_hello.serialize());
