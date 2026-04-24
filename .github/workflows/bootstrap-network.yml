@@ -256,18 +256,19 @@ jobs:
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "chmod +x '$REMOTE_DIR/setup_nat.sh' '$REMOTE_DIR/diagnose_server.sh' && \
-             OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
-             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
-             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
-             OMEGA_VPN_PORT='$VPN_PORT' \
-             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
-             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
-             OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
-             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
-             OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/setup_nat.sh'"
+             sudo env \
+               OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
+               OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+               OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
+               OMEGA_VPN_PORT='$VPN_PORT' \
+               OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
+               OMEGA_SSH_PORT='$SSH_PORT' \
+               OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+               OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+               OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
+               OMEGA_METRICS_PORT='$METRICS_PORT' \
+               '$REMOTE_DIR/setup_nat.sh'"
 
       - name: Run post-bootstrap diagnostics
         env:
@@ -335,19 +336,20 @@ jobs:
           fi
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
-            "OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
-             OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
-             OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
-             OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
-             OMEGA_VPN_PORT='$VPN_PORT' \
-             OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
-             OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
-             OMEGA_SSH_PORT='$SSH_PORT' \
-             OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
-             OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
-             OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
-             OMEGA_METRICS_PORT='$METRICS_PORT' \
-             sudo '$REMOTE_DIR/diagnose_server.sh'"
+            "sudo env \
+               OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
+               OMEGA_PUBLIC_IFACE='$PUBLIC_IFACE' \
+               OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
+               OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
+               OMEGA_VPN_PORT='$VPN_PORT' \
+               OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
+               OMEGA_SSH_PORT='$SSH_PORT' \
+               OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
+               OMEGA_ADMIN_WEB_PORT='$ADMIN_WEB_PORT' \
+               OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
+               OMEGA_METRICS_PORT='$METRICS_PORT' \
+               '$REMOTE_DIR/diagnose_server.sh'"
 
       - name: Verify omega-server status
         run: |
