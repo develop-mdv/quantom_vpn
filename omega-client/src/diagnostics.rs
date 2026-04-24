@@ -167,6 +167,20 @@ impl ClientDiagnostics {
         });
     }
 
+    pub fn write_now(&self) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let payload = {
+            let mut guard = self.snapshot.lock().unwrap();
+            guard.updated_at_ms = now_ms();
+            serde_json::to_string_pretty(&*guard)?
+        };
+        std::fs::write(&self.path, payload)?;
+        Ok(())
+    }
+
     pub fn set_handshake(
         &self,
         tunnel_ip: std::net::Ipv4Addr,
@@ -339,4 +353,55 @@ fn now_ms() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        ClientConfig, ConnectionProfile, DnsPolicy, Ipv6Policy, MorphingPolicy, TunnelMode,
+    };
+
+    fn test_config(path: PathBuf) -> ClientConfig {
+        ClientConfig {
+            profile: ConnectionProfile::Gaming,
+            morphing_policy: MorphingPolicy::Off,
+            tunnel_mode: TunnelMode::Full,
+            dns_policy: DnsPolicy::Tunnel,
+            ipv6_policy: Ipv6Policy::Tunnel,
+            requested_mtu: 1380,
+            keepalive_secs: 25,
+            udp_rcvbuf: 8 * 1024 * 1024,
+            udp_sndbuf: 8 * 1024 * 1024,
+            dns_servers: vec!["1.1.1.1".to_string()],
+            split_routes: Vec::new(),
+            split_routes_v6: Vec::new(),
+            network_diag: true,
+            diagnostics_path: path,
+            handshake_attempts: 5,
+            handshake_timeout_ms: 1500,
+            handshake_backoff_ms: 500,
+        }
+    }
+
+    #[test]
+    fn write_now_persists_latest_status() {
+        let path = std::env::temp_dir().join(format!("omega-client-diag-{}.json", now_ms()));
+        let config = test_config(path.clone());
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &config,
+            "127.0.0.1:443".parse().unwrap(),
+            "test-device",
+            "windows",
+        );
+
+        diagnostics.set_status("routing_failed");
+        diagnostics.write_now().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"status\": \"routing_failed\""));
+
+        let _ = std::fs::remove_file(path);
+    }
 }

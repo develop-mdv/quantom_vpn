@@ -63,6 +63,7 @@ for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$names=@('xra
 if defined OMEGA_CONFLICTING_TUNNELS (
     echo [ERROR] Another tunnel client is still running: !OMEGA_CONFLICTING_TUNNELS!
     echo [ERROR] Stop Amnezia/Xray/tun2socks/other VPN clients before starting Omega.
+    pause
     exit /b 1
 )
 
@@ -86,11 +87,21 @@ echo [INFO] Device Name: %OMEGA_DEVICE_NAME%
 
 if exist "omega-client.exe" (
     omega-client.exe
+    set "OMEGA_CLIENT_EXIT=!ERRORLEVEL!"
 ) else if exist "Cargo.toml" (
     cargo run --release -p omega-client
+    set "OMEGA_CLIENT_EXIT=!ERRORLEVEL!"
 ) else (
     echo [ERROR] omega-client.exe and Cargo.toml not found.
     goto :show_help
+)
+
+if not "%OMEGA_CLIENT_EXIT%"=="0" (
+    echo.
+    echo [ERROR] Omega VPN client exited with code %OMEGA_CLIENT_EXIT%.
+    echo [INFO] Check omega-client\state\diagnostics.json for the latest status.
+    pause
+    exit /b %OMEGA_CLIENT_EXIT%
 )
 
 goto :end

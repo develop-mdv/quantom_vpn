@@ -11,6 +11,13 @@ struct RouteLookup {
     gateway: Option<String>,
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsRoutePrintLookup {
+    interface_addr: Ipv4Addr,
+    gateway: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RouteFamily {
     Ipv4,
@@ -53,6 +60,7 @@ fn normalize_gateway(raw: &str) -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn parse_windows_route_lookup_csv(output: &str) -> Option<RouteLookup> {
     let mut lines = output
         .lines()
@@ -74,6 +82,89 @@ fn parse_windows_route_lookup_csv(output: &str) -> Option<RouteLookup> {
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn ipv4_mask_prefix_len(mask: Ipv4Addr) -> Option<u32> {
+    let bits = u32::from(mask);
+    let inverted = !bits;
+    if inverted & inverted.wrapping_add(1) != 0 {
+        return None;
+    }
+    Some(bits.count_ones())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_route_print_ipv4(
+    output: &str,
+    target: Ipv4Addr,
+) -> Option<WindowsRoutePrintLookup> {
+    let target = u32::from(target);
+    let mut in_active_routes = false;
+    let mut best: Option<(u32, u32, WindowsRoutePrintLookup)> = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("Active Routes:") {
+            in_active_routes = true;
+            continue;
+        }
+        if !in_active_routes {
+            continue;
+        }
+        if trimmed.starts_with("Persistent Routes:") || trimmed.starts_with("===") {
+            break;
+        }
+        if trimmed.is_empty()
+            || trimmed.starts_with("Network Destination")
+            || trimmed.eq_ignore_ascii_case("None")
+        {
+            continue;
+        }
+
+        let cols = trimmed.split_whitespace().collect::<Vec<_>>();
+        if cols.len() < 5 {
+            continue;
+        }
+
+        let Ok(destination) = cols[0].parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let Ok(netmask) = cols[1].parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let Ok(interface_addr) = cols[3].parse::<Ipv4Addr>() else {
+            continue;
+        };
+        let Some(prefix_len) = ipv4_mask_prefix_len(netmask) else {
+            continue;
+        };
+
+        let mask = u32::from(netmask);
+        if target & mask != u32::from(destination) & mask {
+            continue;
+        }
+
+        let metric = cols[4].parse::<u32>().unwrap_or(u32::MAX);
+        let lookup = WindowsRoutePrintLookup {
+            interface_addr,
+            gateway: normalize_gateway(cols[2]),
+        };
+
+        let should_replace = best
+            .as_ref()
+            .map(|(best_prefix_len, best_metric, _)| {
+                prefix_len > *best_prefix_len
+                    || (prefix_len == *best_prefix_len && metric < *best_metric)
+            })
+            .unwrap_or(true);
+        if should_replace {
+            best = Some((prefix_len, metric, lookup));
+        }
+    }
+
+    best.map(|(_, _, lookup)| lookup)
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn parse_linux_route_lookup(output: &str) -> Option<RouteLookup> {
     let cols = output.split_whitespace().collect::<Vec<_>>();
     let interface = cols
@@ -87,6 +178,7 @@ fn parse_linux_route_lookup(output: &str) -> Option<RouteLookup> {
     Some(RouteLookup { interface, gateway })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_route_get(output: &str) -> Option<RouteLookup> {
     let mut interface = None;
     let mut gateway = None;
@@ -108,6 +200,7 @@ fn parse_macos_route_get(output: &str) -> Option<RouteLookup> {
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_service_order(output: &str, interface: &str) -> Option<String> {
     let mut current_service = None;
 
@@ -134,6 +227,7 @@ fn parse_macos_service_order(output: &str, interface: &str) -> Option<String> {
     None
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_macos_dns_servers(output: &str) -> Option<Vec<String>> {
     let trimmed = output.trim();
     if trimmed.is_empty() {
@@ -267,6 +361,18 @@ pub fn cleanup(server_addr: SocketAddr, state: Option<&NetworkState>) {
     }
 }
 
+fn should_configure_tunnel_ipv6(config: &ClientConfig, tunnel_ipv6: Option<Ipv6Addr>) -> bool {
+    config.should_tunnel_ipv6() && tunnel_ipv6.is_some()
+}
+
+fn warn_missing_tunnel_ipv6(config: &ClientConfig, tunnel_ipv6: Option<Ipv6Addr>) {
+    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
+        tracing::warn!(
+            "OMEGA_IPV6_POLICY=tunnel was requested, but the server did not assign an IPv6 tunnel address; continuing with IPv4 tunnel routes"
+        );
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn configure_windows_routing(
     server_addr: SocketAddr,
@@ -277,11 +383,8 @@ fn configure_windows_routing(
 ) -> anyhow::Result<NetworkState> {
     use std::time::Duration;
 
-    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
-        anyhow::bail!(
-            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
-        );
-    }
+    warn_missing_tunnel_ipv6(config, tunnel_ipv6);
+    let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
     tracing::info!(
         %server_addr,
@@ -349,13 +452,23 @@ fn configure_windows_routing(
         powershell_quote(&if_alias)
     ))?;
 
-    let reset_ipv6_metric = config.should_tunnel_ipv6() && tunnel_ipv6.is_some();
-    if reset_ipv6_metric {
-        run_powershell(&format!(
+    let reset_ipv6_metric = if configure_ipv6 {
+        match run_powershell(&format!(
             "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv6 -InterfaceMetric 1",
             powershell_quote(&if_alias)
-        ))?;
-    }
+        )) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to lower Wintun IPv6 metric; continuing with IPv4 tunnel routes"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     let mut state = NetworkState {
         disabled_ipv6_adapters: if config.should_disable_ipv6() {
@@ -424,7 +537,7 @@ fn configure_windows_routing(
                 state.managed_routes.push(route);
             }
 
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 let full_v6 = [
                     WindowsManagedRoute {
                         family: RouteFamily::Ipv6,
@@ -437,8 +550,16 @@ fn configure_windows_routing(
                 ];
                 for route in full_v6 {
                     delete_windows_route(&route);
-                    add_windows_host_route(&route, &if_index, None)?;
-                    state.managed_routes.push(route);
+                    match add_windows_host_route(&route, &if_index, None) {
+                        Ok(()) => state.managed_routes.push(route),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                destination = %route.destination_prefix,
+                                "failed to add Windows IPv6 tunnel route; IPv4 tunnel remains active"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -452,15 +573,23 @@ fn configure_windows_routing(
                 add_windows_host_route(&managed, &if_index, None)?;
                 state.managed_routes.push(managed);
             }
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 for route in &config.split_routes_v6 {
                     let managed = WindowsManagedRoute {
                         family: RouteFamily::Ipv6,
                         destination_prefix: route.cidr.clone(),
                     };
                     delete_windows_route(&managed);
-                    add_windows_host_route(&managed, &if_index, None)?;
-                    state.managed_routes.push(managed);
+                    match add_windows_host_route(&managed, &if_index, None) {
+                        Ok(()) => state.managed_routes.push(managed),
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                destination = %managed.destination_prefix,
+                                "failed to add Windows IPv6 split route; IPv4 tunnel remains active"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -507,19 +636,76 @@ fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>
 
 #[cfg(target_os = "windows")]
 fn find_windows_route(addr: IpAddr) -> anyhow::Result<RouteLookup> {
-    let output = Command::new("powershell")
-        .args([
-            "-Command",
-            &format!(
-                "Find-NetRoute -RemoteIPAddress '{}' | Select-Object -First 1 InterfaceIndex,NextHop | ConvertTo-Csv -NoTypeInformation",
-                addr
-            ),
-        ])
-        .output()
-        .with_context(|| format!("failed to query Windows route to {addr}"))?;
+    match find_windows_route_via_find_net_route(addr) {
+        Ok(lookup) => Ok(lookup),
+        Err(primary_err) => match addr {
+            IpAddr::V4(ipv4) => {
+                tracing::warn!(
+                    error = %primary_err,
+                    %addr,
+                    "Find-NetRoute did not return a usable server route; falling back to route print"
+                );
+                find_windows_route_via_route_print_ipv4(ipv4).with_context(|| {
+                    format!(
+                        "route print fallback also failed after Find-NetRoute failed: {primary_err}"
+                    )
+                })
+            }
+            IpAddr::V6(_) => Err(primary_err),
+        },
+    }
+}
 
-    parse_windows_route_lookup_csv(&String::from_utf8_lossy(&output.stdout))
+#[cfg(target_os = "windows")]
+fn find_windows_route_via_find_net_route(addr: IpAddr) -> anyhow::Result<RouteLookup> {
+    let stdout = run_powershell_output(&format!(
+        "Find-NetRoute -RemoteIPAddress '{}' | Select-Object -First 1 InterfaceIndex,NextHop | ConvertTo-Csv -NoTypeInformation",
+        addr
+    ))
+    .with_context(|| format!("failed to query Windows route to {addr}"))?;
+
+    parse_windows_route_lookup_csv(&stdout)
         .ok_or_else(|| anyhow::anyhow!("could not parse Windows route lookup for {addr}"))
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_route_via_route_print_ipv4(addr: Ipv4Addr) -> anyhow::Result<RouteLookup> {
+    let output = Command::new("route")
+        .args(["print", "-4"])
+        .output()
+        .context("failed to run route print -4")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "route print -4 failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let printed = String::from_utf8_lossy(&output.stdout);
+    let lookup = parse_windows_route_print_ipv4(&printed, addr)
+        .ok_or_else(|| anyhow::anyhow!("could not parse Windows route print for {addr}"))?;
+    let interface = find_windows_interface_index_for_ip(lookup.interface_addr)?;
+
+    Ok(RouteLookup {
+        interface,
+        gateway: lookup.gateway,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_interface_index_for_ip(addr: Ipv4Addr) -> anyhow::Result<String> {
+    let stdout = run_powershell_output(&format!(
+        "Get-NetIPAddress -IPAddress '{}' -AddressFamily IPv4 | Select-Object -First 1 -ExpandProperty InterfaceIndex",
+        addr
+    ))
+    .with_context(|| format!("failed to resolve Windows interface index for {addr}"))?;
+
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("no Windows interface index found for {addr}"))
 }
 
 #[cfg(target_os = "windows")]
@@ -557,6 +743,21 @@ fn run_powershell(script: &str) -> anyhow::Result<()> {
     } else {
         anyhow::bail!("PowerShell command failed: {script}");
     }
+}
+
+#[cfg(target_os = "windows")]
+fn run_powershell_output(script: &str) -> anyhow::Result<String> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .with_context(|| format!("failed to run PowerShell: {script}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "PowerShell command failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -614,11 +815,8 @@ fn configure_linux_network(
     interface_mtu: u16,
     config: &ClientConfig,
 ) -> anyhow::Result<NetworkState> {
-    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
-        anyhow::bail!(
-            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
-        );
-    }
+    warn_missing_tunnel_ipv6(config, tunnel_ipv6);
+    let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
     let interface_name = interface_name.context("failed to determine tunnel interface name")?;
     run_status("ip", &["link", "set", "dev", interface_name, "up"])?;
@@ -662,10 +860,16 @@ fn configure_linux_network(
                 add_linux_route(prefix, RouteFamily::Ipv4, interface_name, None)?;
                 track_route(&mut state, RouteFamily::Ipv4, prefix.to_string());
             }
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 for prefix in ["::/1", "8000::/1"] {
-                    add_linux_route(prefix, RouteFamily::Ipv6, interface_name, None)?;
-                    track_route(&mut state, RouteFamily::Ipv6, prefix.to_string());
+                    match add_linux_route(prefix, RouteFamily::Ipv6, interface_name, None) {
+                        Ok(()) => track_route(&mut state, RouteFamily::Ipv6, prefix.to_string()),
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            prefix,
+                            "failed to add Linux IPv6 tunnel route; IPv4 tunnel remains active"
+                        ),
+                    }
                 }
             }
         }
@@ -674,10 +878,16 @@ fn configure_linux_network(
                 add_linux_route(&route.cidr, RouteFamily::Ipv4, interface_name, None)?;
                 track_route(&mut state, RouteFamily::Ipv4, route.cidr.clone());
             }
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 for route in &config.split_routes_v6 {
-                    add_linux_route(&route.cidr, RouteFamily::Ipv6, interface_name, None)?;
-                    track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone());
+                    match add_linux_route(&route.cidr, RouteFamily::Ipv6, interface_name, None) {
+                        Ok(()) => track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone()),
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            prefix = %route.cidr,
+                            "failed to add Linux IPv6 split route; IPv4 tunnel remains active"
+                        ),
+                    }
                 }
             }
         }
@@ -835,11 +1045,8 @@ fn configure_macos_network(
     interface_mtu: u16,
     config: &ClientConfig,
 ) -> anyhow::Result<NetworkState> {
-    if config.should_tunnel_ipv6() && tunnel_ipv6.is_none() {
-        anyhow::bail!(
-            "server did not assign an IPv6 tunnel address while OMEGA_IPV6_POLICY=tunnel"
-        );
-    }
+    warn_missing_tunnel_ipv6(config, tunnel_ipv6);
+    let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
     let interface_name = interface_name.context("failed to determine tunnel interface name")?;
     run_status(
@@ -871,10 +1078,16 @@ fn configure_macos_network(
                 add_macos_interface_route(prefix, RouteFamily::Ipv4, interface_name)?;
                 track_route(&mut state, RouteFamily::Ipv4, prefix.to_string());
             }
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 for prefix in ["::/1", "8000::/1"] {
-                    add_macos_interface_route(prefix, RouteFamily::Ipv6, interface_name)?;
-                    track_route(&mut state, RouteFamily::Ipv6, prefix.to_string());
+                    match add_macos_interface_route(prefix, RouteFamily::Ipv6, interface_name) {
+                        Ok(()) => track_route(&mut state, RouteFamily::Ipv6, prefix.to_string()),
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            prefix,
+                            "failed to add macOS IPv6 tunnel route; IPv4 tunnel remains active"
+                        ),
+                    }
                 }
             }
         }
@@ -883,10 +1096,17 @@ fn configure_macos_network(
                 add_macos_interface_route(&route.cidr, RouteFamily::Ipv4, interface_name)?;
                 track_route(&mut state, RouteFamily::Ipv4, route.cidr.clone());
             }
-            if config.should_tunnel_ipv6() && tunnel_ipv6.is_some() {
+            if configure_ipv6 {
                 for route in &config.split_routes_v6 {
-                    add_macos_interface_route(&route.cidr, RouteFamily::Ipv6, interface_name)?;
-                    track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone());
+                    match add_macos_interface_route(&route.cidr, RouteFamily::Ipv6, interface_name)
+                    {
+                        Ok(()) => track_route(&mut state, RouteFamily::Ipv6, route.cidr.clone()),
+                        Err(err) => tracing::warn!(
+                            error = %err,
+                            prefix = %route.cidr,
+                            "failed to add macOS IPv6 split route; IPv4 tunnel remains active"
+                        ),
+                    }
                 }
             }
         }
@@ -1068,6 +1288,32 @@ fn socket_family(addr: SocketAddr) -> RouteFamily {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{
+        ConnectionProfile, DnsPolicy, Ipv4Route, Ipv6Policy, Ipv6Route, MorphingPolicy, TunnelMode,
+    };
+    use std::path::PathBuf;
+
+    fn test_config(ipv6_policy: Ipv6Policy) -> ClientConfig {
+        ClientConfig {
+            profile: ConnectionProfile::Gaming,
+            morphing_policy: MorphingPolicy::Off,
+            tunnel_mode: TunnelMode::Full,
+            dns_policy: DnsPolicy::Tunnel,
+            ipv6_policy,
+            requested_mtu: 1380,
+            keepalive_secs: 25,
+            udp_rcvbuf: 8 * 1024 * 1024,
+            udp_sndbuf: 8 * 1024 * 1024,
+            dns_servers: vec!["1.1.1.1".to_string()],
+            split_routes: Vec::<Ipv4Route>::new(),
+            split_routes_v6: Vec::<Ipv6Route>::new(),
+            network_diag: true,
+            diagnostics_path: PathBuf::from("diagnostics.json"),
+            handshake_attempts: 5,
+            handshake_timeout_ms: 1500,
+            handshake_backoff_ms: 500,
+        }
+    }
 
     #[test]
     fn parses_windows_route_lookup_csv() {
@@ -1078,6 +1324,34 @@ mod tests {
 
         assert_eq!(lookup.interface, "7");
         assert_eq!(lookup.gateway.as_deref(), Some("fe80::1"));
+    }
+
+    #[test]
+    fn parses_windows_route_print_ipv4_best_match() {
+        let lookup = parse_windows_route_print_ipv4(
+            "\
+===========================================================================
+Interface List
+ 16...04 92 26 15 4e 53 ......Realtek PCIe GbE Family Controller #2
+===========================================================================
+
+IPv4 Route Table
+===========================================================================
+Active Routes:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.168.1.1      192.168.1.4     55
+     72.56.80.236  255.255.255.255      192.168.1.1      192.168.1.4     56
+      192.168.1.0    255.255.255.0         On-link       192.168.1.4    311
+===========================================================================
+Persistent Routes:
+  None
+",
+            "72.56.88.224".parse().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(lookup.interface_addr, Ipv4Addr::new(192, 168, 1, 4));
+        assert_eq!(lookup.gateway.as_deref(), Some("192.168.1.1"));
     }
 
     #[test]
@@ -1135,5 +1409,23 @@ An asterisk (*) denotes that a network service is disabled.\n\
             parse_macos_dns_servers("There aren't any DNS Servers set on Wi-Fi.\n"),
             Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn tunnel_ipv6_routing_requires_policy_and_assigned_address() {
+        let assigned = Some("fd70:7::2".parse().unwrap());
+
+        assert!(should_configure_tunnel_ipv6(
+            &test_config(Ipv6Policy::Tunnel),
+            assigned
+        ));
+        assert!(!should_configure_tunnel_ipv6(
+            &test_config(Ipv6Policy::Tunnel),
+            None
+        ));
+        assert!(!should_configure_tunnel_ipv6(
+            &test_config(Ipv6Policy::Disabled),
+            assigned
+        ));
     }
 }

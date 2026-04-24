@@ -583,7 +583,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let keepalive_secs = client_config.keepalive_secs;
-    let handshake = perform_handshake(&udp, server_addr, &client_hello, &client_config).await?;
+    let handshake = match perform_handshake(&udp, server_addr, &client_hello, &client_config).await
+    {
+        Ok(handshake) => handshake,
+        Err(err) => {
+            diagnostics.set_status("handshake_failed");
+            let _ = diagnostics.write_now();
+            return Err(err);
+        }
+    };
     let server_hello = handshake.hello;
 
     let ct_array: &ml_kem::Ciphertext<MlKem768> = server_hello
@@ -617,7 +625,14 @@ async fn main() -> anyhow::Result<()> {
     if let Some(tun_ipv6_addr) = tun_ipv6 {
         tun_builder = tun_builder.ipv6(tun_ipv6_addr.to_string(), DEFAULT_TUN_PREFIX_V6);
     }
-    let tun: Arc<tun_rs::AsyncDevice> = Arc::new(tun_builder.build_async()?);
+    let tun: Arc<tun_rs::AsyncDevice> = match tun_builder.build_async() {
+        Ok(device) => Arc::new(device),
+        Err(err) => {
+            diagnostics.set_status("tun_failed");
+            let _ = diagnostics.write_now();
+            return Err(err.into());
+        }
+    };
     let interface_name = tun.name().ok();
     if let Some(interface_name) = interface_name.as_ref() {
         diagnostics.set_interface_name(interface_name.clone());
@@ -655,6 +670,7 @@ async fn main() -> anyhow::Result<()> {
         Ok(state) => state,
         Err(err) => {
             diagnostics.set_status("routing_failed");
+            let _ = diagnostics.write_now();
             return Err(err);
         }
     };
