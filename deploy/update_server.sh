@@ -16,6 +16,9 @@ KEEP_RELEASES="${OMEGA_KEEP_RELEASES:-5}"
 RELEASE_ID="${OMEGA_RELEASE_ID:-$(date +%Y%m%d%H%M%S)}"
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
 PREVIOUS_UNIT=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIAGNOSE_SCRIPT="${OMEGA_DIAGNOSE_SCRIPT:-$SCRIPT_DIR/diagnose_server.sh}"
+DEPLOY_HEALTHCHECK="${OMEGA_DEPLOY_HEALTHCHECK:-1}"
 
 cleanup() {
   if [[ -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
@@ -84,6 +87,21 @@ wait_for_active() {
   return 1
 }
 
+run_deploy_healthcheck() {
+  if [[ "$DEPLOY_HEALTHCHECK" == "0" || "$DEPLOY_HEALTHCHECK" == "false" ]]; then
+    echo "[WARN] Deploy healthcheck disabled by OMEGA_DEPLOY_HEALTHCHECK=$DEPLOY_HEALTHCHECK"
+    return 0
+  fi
+
+  if [[ ! -x "$DIAGNOSE_SCRIPT" ]]; then
+    echo "[WARN] Deploy healthcheck skipped: diagnostics script is not executable at $DIAGNOSE_SCRIPT"
+    return 0
+  fi
+
+  echo "[INFO] Running deploy healthcheck: $DIAGNOSE_SCRIPT"
+  "$DIAGNOSE_SCRIPT"
+}
+
 rollback() {
   echo "[WARN] Rolling back deployment..."
 
@@ -124,6 +142,13 @@ fi
 
 if ! wait_for_active 20 1; then
   echo "[ERROR] Service is not active after restart"
+  print_diagnostics
+  rollback
+  exit 1
+fi
+
+if ! run_deploy_healthcheck; then
+  echo "[ERROR] Deploy healthcheck failed"
   print_diagnostics
   rollback
   exit 1

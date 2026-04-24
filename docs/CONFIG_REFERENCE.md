@@ -40,10 +40,14 @@
 | Переменная | Default | Значение |
 | --- | --- | --- |
 | `OMEGA_TUN_MTU` | по профилю | MTU туннеля. `gaming=1380`, `general=1360`, `restricted=1280`, затем clamp `1200..1420`. |
+| `OMEGA_MTU_POLICY` | `auto` | `auto` включает encrypted PMTU probe после handshake и до создания TUN; `fixed` использует negotiated MTU без probe. |
+| `OMEGA_MTU_PROBE_TIMEOUT_MS` | `450` | Timeout каждого PMTU probe-кандидата, clamp `150..2000`. |
 | `OMEGA_KEEPALIVE_SECS` | по профилю | Интервал keepalive. `gaming=25`, `general=15`, `restricted=10`, минимум `5`. |
 | `OMEGA_DNS_POLICY` | зависит от tunnel mode | `tunnel` для full-tunnel по умолчанию, `system` для split-tunnel. |
 | `OMEGA_DNS_SERVERS` | `1.1.1.1,8.8.8.8` | DNS servers для tunnel DNS policy. Поддерживаются IPv4 и IPv6 адреса. |
 | `OMEGA_IPV6_POLICY` | зависит от tunnel mode | `disabled` для full-tunnel, `passthrough` для split-tunnel. Можно явно включить `tunnel`, чтобы клиент поднимал dual-stack TUN, принимал IPv6 lease из handshake и ставил IPv6 routes на Windows/Linux/macOS. |
+| `OMEGA_DNS_LEAK_GUARD` | `warn` | `off`, `warn`, `strict`. В `strict` клиент падает, если tunnel DNS нельзя назначить; в `warn` продолжает работу и помечает diagnostics degraded. |
+| `OMEGA_KILL_SWITCH` | `soft` | `off`, `soft`, `strict`. Сейчас `soft` включает self-heal stale route cleanup и fail-fast при полунастроенной маршрутизации; strict зарезервирован для opt-in hard blocking. |
 | `OMEGA_NETWORK_DIAG` | `true` | Включает post-connect UDP DNS diagnostic. |
 | `OMEGA_DIAGNOSTICS_PATH` | `omega-client/state/diagnostics.json` | Путь к JSON diagnostics snapshot. |
 

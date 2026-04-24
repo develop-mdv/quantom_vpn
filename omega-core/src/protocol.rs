@@ -87,6 +87,10 @@ pub enum PacketType {
     Nack = 0x04,
     /// FEC negotiation / control.
     FecControl = 0x05,
+    /// Encrypted path MTU probe.
+    PathProbe = 0x06,
+    /// Encrypted path MTU probe echo reply.
+    PathProbeReply = 0x07,
 }
 
 impl PacketType {
@@ -98,6 +102,8 @@ impl PacketType {
             0x03 => Some(Self::Close),
             0x04 => Some(Self::Nack),
             0x05 => Some(Self::FecControl),
+            0x06 => Some(Self::PathProbe),
+            0x07 => Some(Self::PathProbeReply),
             _ => None,
         }
     }
@@ -620,6 +626,12 @@ mod tests {
         assert_eq!(parsed.flow_id, hdr.flow_id);
         assert_eq!(parsed.seq, 0x12345678);
         assert_eq!(parsed.packet_type, PacketType::Data);
+    }
+
+    #[test]
+    fn test_path_probe_packet_types() {
+        assert_eq!(PacketType::from_u8(0x06), Some(PacketType::PathProbe));
+        assert_eq!(PacketType::from_u8(0x07), Some(PacketType::PathProbeReply));
     }
 
     #[test]

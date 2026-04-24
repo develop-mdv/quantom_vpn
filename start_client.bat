@@ -67,6 +67,17 @@ if defined OMEGA_CONFLICTING_TUNNELS (
     exit /b 1
 )
 
+set "OMEGA_EXISTING_CLIENT="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "Get-Process omega-client -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id -First 1"`) do (
+    set "OMEGA_EXISTING_CLIENT=%%P"
+)
+if defined OMEGA_EXISTING_CLIENT (
+    echo [ERROR] Omega VPN client is already running with PID !OMEGA_EXISTING_CLIENT!.
+    echo [ERROR] Stop the existing Omega client before starting a new one.
+    pause
+    exit /b 1
+)
+
 REM 5) Ensure wintun.dll exists
 if not exist "wintun.dll" (
     echo [WARN] wintun.dll not found, downloading...
@@ -123,6 +134,8 @@ echo   OMEGA_PLATFORM=windows
 echo   OMEGA_PROFILE=gaming
 echo   OMEGA_TUNNEL_MODE=full
 echo   OMEGA_TUN_MTU=1380
+echo   OMEGA_MTU_POLICY=auto
+echo   OMEGA_MTU_PROBE_TIMEOUT_MS=450
 echo   OMEGA_MORPHING=off
 echo   OMEGA_KEEPALIVE_SECS=25
 echo   OMEGA_UDP_RCVBUF=8388608
@@ -130,6 +143,8 @@ echo   OMEGA_UDP_SNDBUF=8388608
 echo   OMEGA_DNS_POLICY=tunnel
 echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
 echo   OMEGA_IPV6_POLICY=disabled
+echo   OMEGA_DNS_LEAK_GUARD=warn
+echo   OMEGA_KILL_SWITCH=soft
 echo   OMEGA_NETWORK_DIAG=1
 echo   OMEGA_DIAGNOSTICS_PATH=omega-client/state/diagnostics.json
 
@@ -142,6 +157,8 @@ echo   OMEGA_DEVICE_NAME=home-pc
 echo   OMEGA_PROFILE=gaming
 echo   OMEGA_TUNNEL_MODE=full
 echo   OMEGA_TUN_MTU=1380
+echo   OMEGA_MTU_POLICY=auto
+echo   OMEGA_MTU_PROBE_TIMEOUT_MS=450
 echo   OMEGA_MORPHING=off
 echo   OMEGA_KEEPALIVE_SECS=25
 echo   OMEGA_UDP_RCVBUF=8388608
@@ -149,6 +166,8 @@ echo   OMEGA_UDP_SNDBUF=8388608
 echo   OMEGA_DNS_POLICY=tunnel
 echo   OMEGA_DNS_SERVERS=1.1.1.1,8.8.8.8
 echo   OMEGA_IPV6_POLICY=disabled
+echo   OMEGA_DNS_LEAK_GUARD=warn
+echo   OMEGA_KILL_SWITCH=soft
 echo   OMEGA_NETWORK_DIAG=1
 pause
 goto :end

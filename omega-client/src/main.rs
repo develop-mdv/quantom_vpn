@@ -18,8 +18,8 @@ use omega_core::replay::ReplayFilter;
 use tokio::net::UdpSocket;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{ClientConfig, MorphingPolicy};
-use crate::diagnostics::ClientDiagnostics;
+use crate::config::{ClientConfig, DnsLeakGuardPolicy, MorphingPolicy, MtuPolicy};
+use crate::diagnostics::{ClientDiagnostics, HealthCheckKind};
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
 const DEFAULT_TUN_PREFIX: u8 = 16;
@@ -200,6 +200,113 @@ fn get_ip_packet_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
+fn mtu_probe_candidates(requested_mtu: u16) -> Vec<u16> {
+    let mut candidates = vec![requested_mtu.clamp(1200, 1420), 1360, 1320, 1280, 1200];
+    candidates.sort_by(|a, b| b.cmp(a));
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter(|candidate| *candidate <= requested_mtu && *candidate >= 1200)
+        .collect()
+}
+
+fn build_encrypted_control_packet(
+    keys: &mut SessionKeys,
+    flow_id: FlowId,
+    seq: u32,
+    packet_type: PacketType,
+    ssrc: u32,
+    payload_len: usize,
+) -> anyhow::Result<Bytes> {
+    let rtp = RtpHeader::opus(seq as u16, seq.wrapping_mul(960), ssrc);
+    let omega = OmegaHeader {
+        flow_id,
+        seq,
+        packet_type,
+    };
+
+    let mut out = BytesMut::with_capacity(TOTAL_HEADER_LEN + payload_len + AEAD_TAG_LEN);
+    out.resize(TOTAL_HEADER_LEN, 0);
+    rtp.write_to(&mut out[..RTP_HEADER_LEN]);
+    omega.write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
+
+    let aad = &out[..TOTAL_HEADER_LEN];
+    let mut payload = vec![0xA5; payload_len];
+    keys.encrypt_in_place(&mut payload, aad)
+        .map_err(|err| anyhow::anyhow!("failed to encrypt control packet: {err}"))?;
+    out.extend_from_slice(&payload);
+    Ok(out.freeze())
+}
+
+async fn run_path_mtu_probe(
+    udp: &UdpSocket,
+    server_addr: SocketAddr,
+    flow_id: FlowId,
+    shared_secret: &[u8],
+    keys_send: &mut SessionKeys,
+    ssrc: u32,
+    requested_mtu: u16,
+    timeout_ms: u64,
+) -> anyhow::Result<(u16, Vec<u16>, usize)> {
+    let candidates = mtu_probe_candidates(requested_mtu);
+    let mut probes_sent = 0usize;
+    let mut keys_recv = SessionKeys::from_shared_secret(shared_secret, false)
+        .map_err(|err| anyhow::anyhow!("failed to derive MTU probe receive keys: {err}"))?;
+    let mut buf = vec![0u8; 2048];
+
+    for candidate in &candidates {
+        let seq = keys_send.send_nonce() as u32;
+        let packet = build_encrypted_control_packet(
+            keys_send,
+            flow_id,
+            seq,
+            PacketType::PathProbe,
+            ssrc,
+            *candidate as usize,
+        )?;
+        probes_sent += 1;
+        udp.send_to(packet.as_ref(), server_addr).await?;
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if remaining.is_zero() {
+                break;
+            }
+
+            let recv = tokio::time::timeout(remaining, udp.recv_from(&mut buf)).await;
+            let Ok(Ok((n, _src))) = recv else {
+                break;
+            };
+            if n < TOTAL_HEADER_LEN + AEAD_TAG_LEN {
+                continue;
+            }
+            let Some(omega) = OmegaHeader::read_from(&buf[RTP_HEADER_LEN..TOTAL_HEADER_LEN]) else {
+                continue;
+            };
+            if omega.flow_id != flow_id || omega.packet_type != PacketType::PathProbeReply {
+                continue;
+            }
+
+            let (aad, ciphertext) = buf[..n].split_at_mut(TOTAL_HEADER_LEN);
+            let plaintext = match keys_recv.decrypt_in_place(ciphertext, omega.seq as u64, aad) {
+                Ok(plaintext) => plaintext,
+                Err(_) => continue,
+            };
+            if plaintext.len() == *candidate as usize {
+                return Ok((*candidate, candidates, probes_sent));
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "no MTU probe reply received for candidates {:?}",
+        candidates
+    ))
+}
+
 fn detect_platform() -> DevicePlatform {
     #[cfg(target_os = "windows")]
     {
@@ -291,13 +398,42 @@ fn build_dns_query(hostname: &str, txid: u16) -> Vec<u8> {
     query
 }
 
-async fn run_udp_dns_diagnostic(
+async fn udp_dns_probe(target: SocketAddr) -> anyhow::Result<SocketAddr> {
+    let socket = match target {
+        SocketAddr::V4(_) => UdpSocket::bind("0.0.0.0:0").await?,
+        SocketAddr::V6(_) => UdpSocket::bind("[::]:0").await?,
+    };
+    let txid: u16 = rand::random();
+    let query = build_dns_query("example.com", txid);
+    let mut buf = [0u8; 1500];
+
+    socket.send_to(&query, target).await?;
+    let (n, src) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf))
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for UDP DNS response from {target}"))??;
+
+    if n >= 4 && u16::from_be_bytes([buf[0], buf[1]]) == txid && (buf[2] & 0x80) != 0 {
+        Ok(src)
+    } else {
+        Err(anyhow::anyhow!(
+            "unexpected UDP DNS response from {src}; bytes={n}"
+        ))
+    }
+}
+
+async fn run_post_connect_health_checks(
     dns_servers: Vec<String>,
     enabled: bool,
+    ipv6_required: bool,
+    dns_leak_guard_policy: DnsLeakGuardPolicy,
     diagnostics: ClientDiagnostics,
 ) {
     if !enabled {
-        diagnostics.udp_check_failed("disabled by OMEGA_NETWORK_DIAG=0");
+        diagnostics.health_check_skipped(HealthCheckKind::Ipv4Egress, "OMEGA_NETWORK_DIAG=0");
+        diagnostics.health_check_skipped(HealthCheckKind::Ipv6Egress, "OMEGA_NETWORK_DIAG=0");
+        diagnostics.health_check_skipped(HealthCheckKind::Dns, "OMEGA_NETWORK_DIAG=0");
+        diagnostics.health_check_skipped(HealthCheckKind::DnsLeakGuard, "OMEGA_NETWORK_DIAG=0");
+        diagnostics.refresh_connection_health(ipv6_required);
         return;
     }
 
@@ -310,88 +446,79 @@ async fn run_udp_dns_diagnostic(
     if targets.is_empty() {
         tracing::warn!("UDP diagnostic skipped: no valid DNS servers");
         diagnostics.udp_check_failed("no valid DNS servers configured");
+        diagnostics.health_check_failed(HealthCheckKind::Dns, "no valid DNS servers configured");
+        diagnostics.health_check_failed(
+            HealthCheckKind::DnsLeakGuard,
+            "cannot verify tunnel DNS because no valid DNS servers are configured",
+        );
+        diagnostics.refresh_connection_health(ipv6_required);
         return;
     }
 
-    let txid: u16 = rand::random();
-    let query = build_dns_query("example.com", txid);
-    let mut buf = [0u8; 1500];
-    let mut socket_v4 = None;
-    let mut socket_v6 = None;
+    let ipv4_target: SocketAddr = "1.1.1.1:53".parse().unwrap();
+    match udp_dns_probe(ipv4_target).await {
+        Ok(src) => diagnostics.health_check_passed(HealthCheckKind::Ipv4Egress, src.to_string()),
+        Err(err) => {
+            tracing::warn!(error = %err, %ipv4_target, "IPv4 egress health check failed");
+            diagnostics.health_check_failed(HealthCheckKind::Ipv4Egress, err.to_string());
+        }
+    }
 
+    let mut dns_passed = false;
     for dns_ip in targets {
         let target = SocketAddr::from((dns_ip, 53));
-        let socket = match dns_ip {
-            std::net::IpAddr::V4(_) => {
-                if socket_v4.is_none() {
-                    socket_v4 = Some(match UdpSocket::bind("0.0.0.0:0").await {
-                        Ok(socket) => socket,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "UDP diagnostic failed to bind IPv4 socket");
-                            diagnostics
-                                .udp_check_failed(format!("failed to bind IPv4 socket: {err}"));
-                            return;
-                        }
-                    });
-                }
-                socket_v4.as_ref().unwrap()
+        match udp_dns_probe(target).await {
+            Ok(src) => {
+                tracing::info!(%src, dns_server = %target, "UDP DNS diagnostic passed");
+                diagnostics.udp_check_passed(target, src);
+                diagnostics.health_check_passed(HealthCheckKind::Dns, target.to_string());
+                dns_passed = true;
+                break;
             }
-            std::net::IpAddr::V6(_) => {
-                if socket_v6.is_none() {
-                    socket_v6 = Some(match UdpSocket::bind("[::]:0").await {
-                        Ok(socket) => socket,
-                        Err(err) => {
-                            tracing::warn!(error = %err, "UDP diagnostic failed to bind IPv6 socket");
-                            diagnostics
-                                .udp_check_failed(format!("failed to bind IPv6 socket: {err}"));
-                            return;
-                        }
-                    });
-                }
-                socket_v6.as_ref().unwrap()
-            }
-        };
-        if let Err(err) = socket.send_to(&query, target).await {
-            tracing::warn!(error = %err, %target, "UDP diagnostic send failed");
-            continue;
+            Err(err) => tracing::warn!(error = %err, %target, "DNS health check failed"),
         }
+    }
+    if !dns_passed {
+        diagnostics.udp_check_failed("all UDP DNS checks timed out or returned unexpected replies");
+        diagnostics.health_check_failed(
+            HealthCheckKind::Dns,
+            "all UDP DNS checks timed out or returned unexpected replies",
+        );
+    }
 
-        match tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, src))) => {
-                if n >= 4 && u16::from_be_bytes([buf[0], buf[1]]) == txid && (buf[2] & 0x80) != 0 {
-                    tracing::info!(
-                        %src,
-                        dns_server = %target,
-                        "UDP DNS diagnostic passed; generic UDP through the tunnel works"
-                    );
-                    diagnostics.udp_check_passed(target, src);
-                    return;
-                }
-                tracing::warn!(
-                    %src,
-                    dns_server = %target,
-                    bytes = n,
-                    "UDP diagnostic got an unexpected reply"
-                );
+    if ipv6_required {
+        let ipv6_target: SocketAddr = "[2606:4700:4700::1111]:53".parse().unwrap();
+        match udp_dns_probe(ipv6_target).await {
+            Ok(src) => {
+                diagnostics.health_check_passed(HealthCheckKind::Ipv6Egress, src.to_string())
             }
-            Ok(Err(err)) => {
-                tracing::warn!(error = %err, %target, "UDP diagnostic receive failed");
+            Err(err) => {
+                tracing::warn!(error = %err, %ipv6_target, "IPv6 egress health check failed");
+                diagnostics.health_check_failed(HealthCheckKind::Ipv6Egress, err.to_string());
             }
-            Err(_) => {
-                tracing::warn!(
-                    %target,
-                    "UDP diagnostic timed out; generic UDP through the tunnel may be blocked"
+        }
+    } else {
+        diagnostics.health_check_skipped(HealthCheckKind::Ipv6Egress, "IPv6 tunnel not requested");
+    }
+
+    match dns_leak_guard_policy {
+        DnsLeakGuardPolicy::Off => {
+            diagnostics.health_check_skipped(HealthCheckKind::DnsLeakGuard, "disabled");
+        }
+        DnsLeakGuardPolicy::Warn | DnsLeakGuardPolicy::Strict => {
+            if dns_passed {
+                diagnostics
+                    .health_check_passed(HealthCheckKind::DnsLeakGuard, "tunnel DNS responded");
+            } else {
+                diagnostics.health_check_failed(
+                    HealthCheckKind::DnsLeakGuard,
+                    "tunnel DNS did not respond; DNS leak risk is elevated",
                 );
             }
         }
     }
 
-    tracing::warn!(
-        "all UDP DNS diagnostics failed; if websites still open, the remaining problem is likely blocked outbound UDP on the VPS/provider side"
-    );
-    diagnostics.udp_check_failed(
-        "all UDP DNS checks timed out or returned unexpected replies".to_string(),
-    );
+    diagnostics.refresh_connection_health(ipv6_required);
 }
 
 struct HandshakeResult {
@@ -564,6 +691,7 @@ async fn main() -> anyhow::Result<()> {
     let std_socket: std::net::UdpSocket = socket.into();
     let udp = Arc::new(UdpSocket::from_std(std_socket)?);
     tracing::info!(local_addr = %udp.local_addr()?, "UDP socket bound");
+    network::cleanup_stale(server_addr, &client_config);
 
     let mut rng = rand::thread_rng();
     let (dk, ek) = MlKem768::generate(&mut rng);
@@ -608,13 +736,54 @@ async fn main() -> anyhow::Result<()> {
     let flow_id = FlowId(flow_id_bytes);
     let chaos_seed = u64::from_le_bytes(ss_bytes[0..8].try_into().unwrap());
     let ssrc = u32::from_be_bytes(flow_id_bytes[0..4].try_into().unwrap());
+    let mut keys_send = SessionKeys::from_shared_secret(ss_bytes, false)
+        .map_err(|err| anyhow::anyhow!("key derivation failed: {err}"))?;
 
     let tun_ip = server_hello.tunnel_ip;
     let tun_ipv6 = server_hello.tunnel_ipv6;
+    let effective_mtu = match client_config.mtu_policy {
+        MtuPolicy::Fixed => {
+            diagnostics.mtu_probe_fixed(server_hello.server_mtu);
+            server_hello.server_mtu
+        }
+        MtuPolicy::Auto => match run_path_mtu_probe(
+            &udp,
+            server_addr,
+            flow_id,
+            ss_bytes,
+            &mut keys_send,
+            ssrc,
+            server_hello.server_mtu,
+            client_config.mtu_probe_timeout_ms,
+        )
+        .await
+        {
+            Ok((selected_mtu, candidates, probes_sent)) => {
+                diagnostics.mtu_probe_selected(selected_mtu, candidates, probes_sent);
+                tracing::info!(
+                    selected_mtu,
+                    probes_sent,
+                    "path MTU probe selected tunnel MTU"
+                );
+                selected_mtu
+            }
+            Err(err) => {
+                let fallback_mtu = server_hello.server_mtu.min(1280);
+                let candidates = mtu_probe_candidates(server_hello.server_mtu);
+                diagnostics.mtu_probe_failed(fallback_mtu, candidates, err.to_string());
+                tracing::warn!(
+                    error = %err,
+                    fallback_mtu,
+                    "path MTU probe failed; using conservative tunnel MTU"
+                );
+                fallback_mtu
+            }
+        },
+    };
     let tun_ip_s = tun_ip.to_string();
     let mut tun_builder = tun_rs::DeviceBuilder::new()
         .ipv4(tun_ip_s.clone(), DEFAULT_TUN_PREFIX, None)
-        .mtu(server_hello.server_mtu)
+        .mtu(effective_mtu)
         .with(|builder| {
             #[cfg(target_os = "windows")]
             {
@@ -640,18 +809,18 @@ async fn main() -> anyhow::Result<()> {
             %interface_name,
             %tun_ip,
             tunnel_ipv6 = ?tun_ipv6,
-            server_mtu = server_hello.server_mtu,
+            tun_mtu = effective_mtu,
             "handshake complete"
         );
     } else {
         tracing::info!(
             %tun_ip,
             tunnel_ipv6 = ?tun_ipv6,
-            server_mtu = server_hello.server_mtu,
+            tun_mtu = effective_mtu,
             "handshake complete"
         );
     }
-    diagnostics.set_handshake(tun_ip, tun_ipv6, server_hello.server_mtu, handshake.rtt_ms);
+    diagnostics.set_handshake(tun_ip, tun_ipv6, effective_mtu, handshake.rtt_ms);
     diagnostics.update_path_metrics(
         0.0,
         DEFAULT_INITIAL_ARQ_RTT_MS,
@@ -664,7 +833,7 @@ async fn main() -> anyhow::Result<()> {
         tun_ip,
         tun_ipv6,
         interface_name.as_deref(),
-        server_hello.server_mtu,
+        effective_mtu,
         &client_config,
     ) {
         Ok(state) => state,
@@ -677,22 +846,29 @@ async fn main() -> anyhow::Result<()> {
 
     let diag_dns_servers = client_config.dns_servers.clone();
     let diag_enabled = client_config.network_diag;
+    let diag_ipv6_required = client_config.should_tunnel_ipv6();
+    let diag_dns_leak_guard_policy = client_config.dns_leak_guard_policy;
     let diag_handle = diagnostics.clone();
     tokio::spawn(async move {
-        run_udp_dns_diagnostic(diag_dns_servers, diag_enabled, diag_handle).await;
+        run_post_connect_health_checks(
+            diag_dns_servers,
+            diag_enabled,
+            diag_ipv6_required,
+            diag_dns_leak_guard_policy,
+            diag_handle,
+        )
+        .await;
     });
 
-    let state = Arc::new(Mutex::new(ClientState::new(
-        ssrc,
-        chaos_seed,
-        client_config.morphing_policy,
-    )));
+    let mut initial_client_state =
+        ClientState::new(ssrc, chaos_seed, client_config.morphing_policy);
+    initial_client_state.send_seq = keys_send.send_nonce() as u32;
+    let state = Arc::new(Mutex::new(initial_client_state));
     let ss_owned = ss_bytes.to_vec();
 
     let tun_r = tun.clone();
     let udp_r = udp.clone();
     let flow_id_copy = flow_id;
-    let ss_for_send = ss_owned.clone();
     let state_send = state.clone();
     let diagnostics_send = diagnostics.clone();
 
@@ -702,13 +878,7 @@ async fn main() -> anyhow::Result<()> {
     keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     tokio::spawn(async move {
-        let mut keys_send = match SessionKeys::from_shared_secret(&ss_for_send, false) {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::error!(error = %e, "key derivation failed");
-                return;
-            }
-        };
+        let mut keys_send = keys_send;
 
         let mut buf = vec![0u8; 1500];
 
@@ -1076,5 +1246,12 @@ mod tests {
         }
         assert!(emitted_nack, "gap should eventually trigger a nack");
         assert!(state.loss_ratio() > 0.0);
+    }
+
+    #[test]
+    fn mtu_probe_candidates_are_descending_unique_and_safe() {
+        let candidates = mtu_probe_candidates(1380);
+
+        assert_eq!(candidates, vec![1380, 1360, 1320, 1280, 1200]);
     }
 }

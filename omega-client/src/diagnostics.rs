@@ -23,6 +23,44 @@ pub enum UdpCheckStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum MtuProbeStatus {
+    Pending,
+    Fixed {
+        mtu: u16,
+    },
+    Selected {
+        selected_mtu: u16,
+        candidates: Vec<u16>,
+        probes_sent: usize,
+        checked_at_ms: u64,
+    },
+    Failed {
+        fallback_mtu: u16,
+        candidates: Vec<u16>,
+        reason: String,
+        checked_at_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HealthCheckStatus {
+    Pending,
+    Skipped { reason: String, checked_at_ms: u64 },
+    Passed { target: String, checked_at_ms: u64 },
+    Failed { reason: String, checked_at_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HealthCheckKind {
+    Ipv4Egress,
+    Ipv6Egress,
+    Dns,
+    DnsLeakGuard,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ClientDiagnosticsSnapshot {
     pub status: String,
     pub started_at_ms: u64,
@@ -35,7 +73,12 @@ pub struct ClientDiagnosticsSnapshot {
     pub tunnel_mode: crate::config::TunnelMode,
     pub dns_policy: crate::config::DnsPolicy,
     pub ipv6_policy: crate::config::Ipv6Policy,
+    pub kill_switch_policy: crate::config::KillSwitchPolicy,
+    pub dns_leak_guard_policy: crate::config::DnsLeakGuardPolicy,
     pub requested_mtu: u16,
+    pub effective_mtu: u16,
+    pub mtu_policy: crate::config::MtuPolicy,
+    pub mtu_probe: MtuProbeStatus,
     pub negotiated_mtu: Option<u16>,
     pub keepalive_secs: u64,
     pub udp_rcvbuf: usize,
@@ -50,6 +93,10 @@ pub struct ClientDiagnosticsSnapshot {
     pub tunnel_ip: Option<String>,
     pub tunnel_ipv6: Option<String>,
     pub udp_dns_check: UdpCheckStatus,
+    pub ipv4_egress_check: HealthCheckStatus,
+    pub ipv6_egress_check: HealthCheckStatus,
+    pub dns_check: HealthCheckStatus,
+    pub dns_leak_check: HealthCheckStatus,
     pub estimated_rx_loss_ratio: f64,
     pub estimated_rx_loss_percent: f64,
     pub arq_rtt_ms: u64,
@@ -93,7 +140,12 @@ impl ClientDiagnostics {
                 tunnel_mode: config.tunnel_mode,
                 dns_policy: config.dns_policy,
                 ipv6_policy: config.ipv6_policy,
+                kill_switch_policy: config.kill_switch_policy,
+                dns_leak_guard_policy: config.dns_leak_guard_policy,
                 requested_mtu: config.requested_mtu,
+                effective_mtu: config.requested_mtu,
+                mtu_policy: config.mtu_policy,
+                mtu_probe: MtuProbeStatus::Pending,
                 negotiated_mtu: None,
                 keepalive_secs: config.keepalive_secs,
                 udp_rcvbuf: config.udp_rcvbuf,
@@ -112,6 +164,10 @@ impl ClientDiagnostics {
                 tunnel_ip: None,
                 tunnel_ipv6: None,
                 udp_dns_check: UdpCheckStatus::Pending,
+                ipv4_egress_check: HealthCheckStatus::Pending,
+                ipv6_egress_check: HealthCheckStatus::Pending,
+                dns_check: HealthCheckStatus::Pending,
+                dns_leak_check: HealthCheckStatus::Pending,
                 estimated_rx_loss_ratio: 0.0,
                 estimated_rx_loss_percent: 0.0,
                 arq_rtt_ms: 350,
@@ -200,6 +256,42 @@ impl ClientDiagnostics {
         });
     }
 
+    pub fn mtu_probe_fixed(&self, mtu: u16) {
+        self.with_snapshot(|snapshot| {
+            snapshot.effective_mtu = mtu;
+            snapshot.mtu_probe = MtuProbeStatus::Fixed { mtu };
+        });
+    }
+
+    pub fn mtu_probe_selected(&self, selected_mtu: u16, candidates: Vec<u16>, probes_sent: usize) {
+        self.with_snapshot(|snapshot| {
+            snapshot.effective_mtu = selected_mtu;
+            snapshot.mtu_probe = MtuProbeStatus::Selected {
+                selected_mtu,
+                candidates,
+                probes_sent,
+                checked_at_ms: now_ms(),
+            };
+        });
+    }
+
+    pub fn mtu_probe_failed(
+        &self,
+        fallback_mtu: u16,
+        candidates: Vec<u16>,
+        reason: impl Into<String>,
+    ) {
+        self.with_snapshot(|snapshot| {
+            snapshot.effective_mtu = fallback_mtu;
+            snapshot.mtu_probe = MtuProbeStatus::Failed {
+                fallback_mtu,
+                candidates,
+                reason: reason.into(),
+                checked_at_ms: now_ms(),
+            };
+        });
+    }
+
     pub fn set_interface_name(&self, interface_name: String) {
         self.with_snapshot(|snapshot| {
             snapshot.interface_name = Some(interface_name);
@@ -264,6 +356,63 @@ impl ClientDiagnostics {
         });
     }
 
+    pub fn health_check_passed(&self, kind: HealthCheckKind, target: impl Into<String>) {
+        self.with_snapshot(|snapshot| {
+            *health_slot(snapshot, kind) = HealthCheckStatus::Passed {
+                target: target.into(),
+                checked_at_ms: now_ms(),
+            };
+        });
+    }
+
+    pub fn health_check_failed(&self, kind: HealthCheckKind, reason: impl Into<String>) {
+        self.with_snapshot(|snapshot| {
+            *health_slot(snapshot, kind) = HealthCheckStatus::Failed {
+                reason: reason.into(),
+                checked_at_ms: now_ms(),
+            };
+        });
+    }
+
+    pub fn health_check_skipped(&self, kind: HealthCheckKind, reason: impl Into<String>) {
+        self.with_snapshot(|snapshot| {
+            *health_slot(snapshot, kind) = HealthCheckStatus::Skipped {
+                reason: reason.into(),
+                checked_at_ms: now_ms(),
+            };
+        });
+    }
+
+    pub fn refresh_connection_health(&self, ipv6_required: bool) {
+        self.with_snapshot(|snapshot| {
+            let required = [
+                &snapshot.ipv4_egress_check,
+                &snapshot.dns_check,
+                &snapshot.dns_leak_check,
+            ];
+            let required_ok = required.iter().all(|status| {
+                matches!(
+                    status,
+                    HealthCheckStatus::Passed { .. } | HealthCheckStatus::Skipped { .. }
+                )
+            });
+            let ipv6_ok = if ipv6_required {
+                matches!(snapshot.ipv6_egress_check, HealthCheckStatus::Passed { .. })
+            } else {
+                matches!(
+                    snapshot.ipv6_egress_check,
+                    HealthCheckStatus::Passed { .. } | HealthCheckStatus::Skipped { .. }
+                )
+            };
+
+            snapshot.status = if required_ok && ipv6_ok {
+                "connected_healthy".to_string()
+            } else {
+                "connected_degraded".to_string()
+            };
+        });
+    }
+
     pub fn update_path_metrics(
         &self,
         loss_ratio: f64,
@@ -292,6 +441,18 @@ impl ClientDiagnostics {
         let mut guard = self.snapshot.lock().unwrap();
         f(&mut guard);
         guard.updated_at_ms = now_ms();
+    }
+}
+
+fn health_slot(
+    snapshot: &mut ClientDiagnosticsSnapshot,
+    kind: HealthCheckKind,
+) -> &mut HealthCheckStatus {
+    match kind {
+        HealthCheckKind::Ipv4Egress => &mut snapshot.ipv4_egress_check,
+        HealthCheckKind::Ipv6Egress => &mut snapshot.ipv6_egress_check,
+        HealthCheckKind::Dns => &mut snapshot.dns_check,
+        HealthCheckKind::DnsLeakGuard => &mut snapshot.dns_leak_check,
     }
 }
 
@@ -359,7 +520,8 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::{
-        ClientConfig, ConnectionProfile, DnsPolicy, Ipv6Policy, MorphingPolicy, TunnelMode,
+        ClientConfig, ConnectionProfile, DnsLeakGuardPolicy, DnsPolicy, Ipv6Policy,
+        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TunnelMode,
     };
 
     fn test_config(path: PathBuf) -> ClientConfig {
@@ -369,7 +531,11 @@ mod tests {
             tunnel_mode: TunnelMode::Full,
             dns_policy: DnsPolicy::Tunnel,
             ipv6_policy: Ipv6Policy::Tunnel,
+            mtu_policy: MtuPolicy::Auto,
+            kill_switch_policy: KillSwitchPolicy::Soft,
+            dns_leak_guard_policy: DnsLeakGuardPolicy::Warn,
             requested_mtu: 1380,
+            mtu_probe_timeout_ms: 450,
             keepalive_secs: 25,
             udp_rcvbuf: 8 * 1024 * 1024,
             udp_sndbuf: 8 * 1024 * 1024,
@@ -401,6 +567,54 @@ mod tests {
 
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"status\": \"routing_failed\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn write_now_persists_mtu_probe_result() {
+        let path = std::env::temp_dir().join(format!("omega-client-diag-mtu-{}.json", now_ms()));
+        let config = test_config(path.clone());
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &config,
+            "127.0.0.1:443".parse().unwrap(),
+            "test-device",
+            "windows",
+        );
+
+        diagnostics.mtu_probe_selected(1320, vec![1380, 1360, 1320], 2);
+        diagnostics.write_now().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"effective_mtu\": 1320"));
+        assert!(raw.contains("\"status\": \"selected\""));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn health_checks_drive_connected_status() {
+        let path = std::env::temp_dir().join(format!("omega-client-diag-health-{}.json", now_ms()));
+        let config = test_config(path.clone());
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &config,
+            "127.0.0.1:443".parse().unwrap(),
+            "test-device",
+            "windows",
+        );
+
+        diagnostics.health_check_passed(HealthCheckKind::Ipv4Egress, "1.1.1.1:53");
+        diagnostics.health_check_passed(HealthCheckKind::Dns, "1.1.1.1:53");
+        diagnostics.health_check_skipped(HealthCheckKind::Ipv6Egress, "IPv6 tunnel not requested");
+        diagnostics.health_check_passed(HealthCheckKind::DnsLeakGuard, "tunnel DNS assigned");
+        diagnostics.refresh_connection_health(false);
+        diagnostics.write_now().unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"status\": \"connected_healthy\""));
+        assert!(raw.contains("\"ipv4_egress_check\""));
 
         let _ = std::fs::remove_file(path);
     }

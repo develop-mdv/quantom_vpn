@@ -21,6 +21,13 @@ const MAX_RETRANSMIT_BURST: usize = 24;
 const RETRANSMIT_PACING_US: u64 = 500;
 const REDUNDANCY_PACING_US: u64 = 200;
 
+fn path_probe_reply_type(packet_type: PacketType) -> Option<PacketType> {
+    match packet_type {
+        PacketType::PathProbe => Some(PacketType::PathProbeReply),
+        _ => None,
+    }
+}
+
 pub async fn tun_to_udp_loop(
     tun: Arc<tun_rs::AsyncDevice>,
     udp: Arc<UdpSocket>,
@@ -189,7 +196,12 @@ pub async fn udp_to_tun_loop(
         };
 
         match omega.packet_type {
-            PacketType::Data | PacketType::Nack | PacketType::KeepAlive | PacketType::Close => {
+            PacketType::Data
+            | PacketType::Nack
+            | PacketType::KeepAlive
+            | PacketType::Close
+            | PacketType::PathProbe
+            | PacketType::PathProbeReply => {
                 if !session.replay_filter.check(omega.seq as u64) {
                     tracing::trace!(seq = omega.seq, "replay detected");
                     continue;
@@ -318,6 +330,40 @@ pub async fn udp_to_tun_loop(
                                 session_manager.terminate_session(&fid);
                                 tracing::info!("session closed by client");
                             }
+                            PacketType::PathProbe => {
+                                let probe_payload = plaintext.to_vec();
+                                let reply_type = path_probe_reply_type(omega.packet_type);
+                                if let Some(packet_type) = reply_type {
+                                    let reply_seq = session.next_send_seq();
+                                    let reply_omega = OmegaHeader {
+                                        flow_id: omega.flow_id,
+                                        seq: reply_seq,
+                                        packet_type,
+                                    };
+                                    let rtp_seq = session.next_rtp_seq();
+                                    let rtp_ts = session.rtp_timestamp;
+                                    let rtp = RtpHeader::opus(rtp_seq, rtp_ts, session.ssrc);
+                                    let mut out = BytesMut::with_capacity(
+                                        TOTAL_HEADER_LEN + probe_payload.len() + AEAD_TAG_LEN,
+                                    );
+                                    out.resize(TOTAL_HEADER_LEN, 0);
+                                    rtp.write_to(&mut out[..RTP_HEADER_LEN]);
+                                    reply_omega
+                                        .write_to(&mut out[RTP_HEADER_LEN..TOTAL_HEADER_LEN]);
+                                    let aad = &out[..TOTAL_HEADER_LEN];
+                                    let mut payload = probe_payload;
+                                    if session.keys.encrypt_in_place(&mut payload, aad).is_ok() {
+                                        out.extend_from_slice(&payload);
+                                        let addr = session.client_addr;
+                                        let data = out.freeze();
+                                        let udp_clone = udp.clone();
+                                        tokio::spawn(async move {
+                                            let _ = udp_clone.send_to(data.as_ref(), addr).await;
+                                        });
+                                    }
+                                }
+                            }
+                            PacketType::PathProbeReply => {}
                             PacketType::KeepAlive => {}
                             _ => {}
                         }
@@ -439,7 +485,8 @@ fn now_ms() -> u64 {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use super::extract_tunnel_destination;
+    use super::{extract_tunnel_destination, path_probe_reply_type};
+    use omega_core::protocol::PacketType;
 
     #[test]
     fn extracts_ipv4_destination_from_inner_packet() {
@@ -461,5 +508,15 @@ mod tests {
             extract_tunnel_destination(&packet),
             Some(IpAddr::V6(Ipv6Addr::new(0xfd70, 0x0007, 0, 0, 0, 0, 0, 2)))
         );
+    }
+
+    #[test]
+    fn path_probe_echoes_only_as_probe_reply() {
+        assert_eq!(
+            path_probe_reply_type(PacketType::PathProbe),
+            Some(PacketType::PathProbeReply)
+        );
+        assert_eq!(path_probe_reply_type(PacketType::Data), None);
+        assert_eq!(path_probe_reply_type(PacketType::KeepAlive), None);
     }
 }

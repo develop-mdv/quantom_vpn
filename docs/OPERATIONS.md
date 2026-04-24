@@ -180,6 +180,17 @@ sudo bash deploy/diagnose_server.sh
 
 Для IPv6 full-tunnel клиенту нужен `OMEGA_IPV6_POLICY=tunnel`, а серверу `OMEGA_IPV6_MODE=nat66`.
 
+Post-connect diagnostics теперь разделяют состояние туннеля на конкретные проверки:
+
+- IPv4 egress через туннель
+- IPv6 egress через туннель, если включен `OMEGA_IPV6_POLICY=tunnel`
+- tunnel DNS
+- DNS leak guard
+- выбранный effective MTU после `OMEGA_MTU_POLICY=auto`
+
+Клиент пишет `connected_healthy`, когда обязательные проверки прошли, и `connected_degraded`,
+когда туннель поднят, но качество или leak-check требуют внимания.
+
 ## Метрики
 
 Сервер публикует Prometheus exporter через `metrics-exporter-prometheus`.
@@ -202,6 +213,10 @@ sudo bash deploy/diagnose_server.sh
 ### Systemd
 
 В репозитории есть пример unit-файла `deploy/omega-server.service`.
+
+`deploy/update_server.sh` после рестарта сервиса может запускать `diagnose_server.sh`.
+Если diagnostics возвращает ошибку, deploy script откатывает symlink на предыдущий server binary.
+Отключение gate для аварийных ручных операций: `OMEGA_DEPLOY_HEALTHCHECK=0`.
 
 Он по умолчанию предполагает:
 

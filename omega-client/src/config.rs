@@ -155,6 +155,76 @@ impl Ipv6Policy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MtuPolicy {
+    Fixed,
+    Auto,
+}
+
+impl MtuPolicy {
+    pub fn from_raw(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "pmtu" | "probe" => Self::Auto,
+            _ => Self::Fixed,
+        }
+    }
+
+    fn from_env(default: Self) -> Self {
+        std::env::var("OMEGA_MTU_POLICY")
+            .map(|value| Self::from_raw(&value))
+            .unwrap_or(default)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KillSwitchPolicy {
+    Off,
+    Soft,
+    Strict,
+}
+
+impl KillSwitchPolicy {
+    pub fn from_raw(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" | "block" => Self::Strict,
+            "off" | "disabled" | "0" | "false" => Self::Off,
+            _ => Self::Soft,
+        }
+    }
+
+    fn from_env(default: Self) -> Self {
+        std::env::var("OMEGA_KILL_SWITCH")
+            .map(|value| Self::from_raw(&value))
+            .unwrap_or(default)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsLeakGuardPolicy {
+    Off,
+    Warn,
+    Strict,
+}
+
+impl DnsLeakGuardPolicy {
+    pub fn from_raw(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" | "fail" => Self::Strict,
+            "off" | "disabled" | "0" | "false" => Self::Off,
+            _ => Self::Warn,
+        }
+    }
+
+    fn from_env(default: Self) -> Self {
+        std::env::var("OMEGA_DNS_LEAK_GUARD")
+            .map(|value| Self::from_raw(&value))
+            .unwrap_or(default)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Ipv4Route {
     pub cidr: String,
@@ -270,7 +340,11 @@ pub struct ClientConfig {
     pub tunnel_mode: TunnelMode,
     pub dns_policy: DnsPolicy,
     pub ipv6_policy: Ipv6Policy,
+    pub mtu_policy: MtuPolicy,
+    pub kill_switch_policy: KillSwitchPolicy,
+    pub dns_leak_guard_policy: DnsLeakGuardPolicy,
     pub requested_mtu: u16,
+    pub mtu_probe_timeout_ms: u64,
     pub keepalive_secs: u64,
     pub udp_rcvbuf: usize,
     pub udp_sndbuf: usize,
@@ -321,6 +395,11 @@ impl ClientConfig {
             .and_then(|value| value.parse::<u16>().ok())
             .map(|value| value.clamp(1200, 1420))
             .unwrap_or_else(|| profile.default_mtu());
+        let mtu_probe_timeout_ms = std::env::var("OMEGA_MTU_PROBE_TIMEOUT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(450)
+            .clamp(150, 2000);
         let keepalive_secs = std::env::var("OMEGA_KEEPALIVE_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -355,7 +434,11 @@ impl ClientConfig {
             tunnel_mode,
             dns_policy: DnsPolicy::from_env(dns_policy_default),
             ipv6_policy: Ipv6Policy::from_env(ipv6_policy_default),
+            mtu_policy: MtuPolicy::from_env(MtuPolicy::Auto),
+            kill_switch_policy: KillSwitchPolicy::from_env(KillSwitchPolicy::Soft),
+            dns_leak_guard_policy: DnsLeakGuardPolicy::from_env(DnsLeakGuardPolicy::Warn),
             requested_mtu,
+            mtu_probe_timeout_ms,
             keepalive_secs,
             udp_rcvbuf,
             udp_sndbuf,
@@ -451,5 +534,19 @@ mod tests {
             servers,
             vec!["1.1.1.1".to_string(), "2606:4700:4700::1111".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_reliability_policies() {
+        assert!(matches!(MtuPolicy::from_raw("auto"), MtuPolicy::Auto));
+        assert!(matches!(MtuPolicy::from_raw("fixed"), MtuPolicy::Fixed));
+        assert!(matches!(
+            KillSwitchPolicy::from_raw("strict"),
+            KillSwitchPolicy::Strict
+        ));
+        assert!(matches!(
+            DnsLeakGuardPolicy::from_raw("warn"),
+            DnsLeakGuardPolicy::Warn
+        ));
     }
 }

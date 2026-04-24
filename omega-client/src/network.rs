@@ -3,7 +3,7 @@ use std::process::Command;
 
 use anyhow::Context;
 
-use crate::config::{ClientConfig, TunnelMode};
+use crate::config::{ClientConfig, DnsLeakGuardPolicy, TunnelMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteLookup {
@@ -361,6 +361,17 @@ pub fn cleanup(server_addr: SocketAddr, state: Option<&NetworkState>) {
     }
 }
 
+pub fn cleanup_stale(server_addr: SocketAddr, config: &ClientConfig) {
+    #[cfg(target_os = "windows")]
+    {
+        cleanup_stale_windows(server_addr, config);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (server_addr, config);
+    }
+}
+
 fn should_configure_tunnel_ipv6(config: &ClientConfig, tunnel_ipv6: Option<Ipv6Addr>) -> bool {
     config.should_tunnel_ipv6() && tunnel_ipv6.is_some()
 }
@@ -482,117 +493,138 @@ fn configure_windows_routing(
         reset_ipv6_metric,
     };
 
-    if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
-        let dns_ps = config
-            .dns_servers
-            .iter()
-            .map(|value| format!("'{}'", value))
-            .collect::<Vec<_>>()
-            .join(",");
-        run_powershell(&format!(
-            "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
-            powershell_quote(&if_alias),
-            dns_ps
-        ))?;
-        state.reset_dns = true;
-    }
-
-    let server_lookup = find_windows_route(server_addr.ip()).with_context(|| {
-        format!(
-            "failed to resolve current Windows route to {}",
-            server_addr.ip()
-        )
-    })?;
-    let server_route = WindowsManagedRoute {
-        family: socket_family(server_addr),
-        destination_prefix: format!(
-            "{}/{}",
-            server_addr.ip(),
-            socket_family(server_addr).default_prefix_len()
-        ),
-    };
-    delete_windows_route(&server_route);
-    add_windows_host_route(
-        &server_route,
-        &server_lookup.interface,
-        server_lookup.gateway.as_deref(),
-    )?;
-    state.managed_routes.push(server_route);
-
-    match config.tunnel_mode {
-        TunnelMode::Full => {
-            let full_v4 = [
-                WindowsManagedRoute {
-                    family: RouteFamily::Ipv4,
-                    destination_prefix: "0.0.0.0/1".to_string(),
-                },
-                WindowsManagedRoute {
-                    family: RouteFamily::Ipv4,
-                    destination_prefix: "128.0.0.0/1".to_string(),
-                },
-            ];
-            for route in full_v4 {
-                delete_windows_route(&route);
-                add_windows_host_route(&route, &if_index, None)?;
-                state.managed_routes.push(route);
+    let configure_result: anyhow::Result<()> = (|| {
+        if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
+            let dns_ps = config
+                .dns_servers
+                .iter()
+                .map(|value| format!("'{}'", value))
+                .collect::<Vec<_>>()
+                .join(",");
+            let dns_result = run_powershell(&format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses @({})",
+                powershell_quote(&if_alias),
+                dns_ps
+            ));
+            match dns_result {
+                Ok(()) => state.reset_dns = true,
+                Err(err) if matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict) => {
+                    return Err(err);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to set tunnel DNS; continuing because OMEGA_DNS_LEAK_GUARD is not strict"
+                    );
+                }
             }
+        }
 
-            if configure_ipv6 {
-                let full_v6 = [
+        let server_lookup = find_windows_route(server_addr.ip()).with_context(|| {
+            format!(
+                "failed to resolve current Windows route to {}",
+                server_addr.ip()
+            )
+        })?;
+        let server_route = WindowsManagedRoute {
+            family: socket_family(server_addr),
+            destination_prefix: format!(
+                "{}/{}",
+                server_addr.ip(),
+                socket_family(server_addr).default_prefix_len()
+            ),
+        };
+        delete_windows_route(&server_route);
+        add_windows_host_route(
+            &server_route,
+            &server_lookup.interface,
+            server_lookup.gateway.as_deref(),
+        )?;
+        state.managed_routes.push(server_route);
+
+        match config.tunnel_mode {
+            TunnelMode::Full => {
+                let full_v4 = [
                     WindowsManagedRoute {
-                        family: RouteFamily::Ipv6,
-                        destination_prefix: "::/1".to_string(),
+                        family: RouteFamily::Ipv4,
+                        destination_prefix: "0.0.0.0/1".to_string(),
                     },
                     WindowsManagedRoute {
-                        family: RouteFamily::Ipv6,
-                        destination_prefix: "8000::/1".to_string(),
+                        family: RouteFamily::Ipv4,
+                        destination_prefix: "128.0.0.0/1".to_string(),
                     },
                 ];
-                for route in full_v6 {
+                for route in full_v4 {
                     delete_windows_route(&route);
-                    match add_windows_host_route(&route, &if_index, None) {
-                        Ok(()) => state.managed_routes.push(route),
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                destination = %route.destination_prefix,
-                                "failed to add Windows IPv6 tunnel route; IPv4 tunnel remains active"
-                            );
+                    add_windows_host_route(&route, &if_index, None)?;
+                    state.managed_routes.push(route);
+                }
+
+                if configure_ipv6 {
+                    let full_v6 = [
+                        WindowsManagedRoute {
+                            family: RouteFamily::Ipv6,
+                            destination_prefix: "::/1".to_string(),
+                        },
+                        WindowsManagedRoute {
+                            family: RouteFamily::Ipv6,
+                            destination_prefix: "8000::/1".to_string(),
+                        },
+                    ];
+                    for route in full_v6 {
+                        delete_windows_route(&route);
+                        match add_windows_host_route(&route, &if_index, None) {
+                            Ok(()) => state.managed_routes.push(route),
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    destination = %route.destination_prefix,
+                                    "failed to add Windows IPv6 tunnel route; IPv4 tunnel remains active"
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
-        TunnelMode::Split => {
-            for route in &config.split_routes {
-                let managed = WindowsManagedRoute {
-                    family: RouteFamily::Ipv4,
-                    destination_prefix: route.cidr.clone(),
-                };
-                delete_windows_route(&managed);
-                add_windows_host_route(&managed, &if_index, None)?;
-                state.managed_routes.push(managed);
-            }
-            if configure_ipv6 {
-                for route in &config.split_routes_v6 {
+            TunnelMode::Split => {
+                for route in &config.split_routes {
                     let managed = WindowsManagedRoute {
-                        family: RouteFamily::Ipv6,
+                        family: RouteFamily::Ipv4,
                         destination_prefix: route.cidr.clone(),
                     };
                     delete_windows_route(&managed);
-                    match add_windows_host_route(&managed, &if_index, None) {
-                        Ok(()) => state.managed_routes.push(managed),
-                        Err(err) => {
-                            tracing::warn!(
-                                error = %err,
-                                destination = %managed.destination_prefix,
-                                "failed to add Windows IPv6 split route; IPv4 tunnel remains active"
-                            );
+                    add_windows_host_route(&managed, &if_index, None)?;
+                    state.managed_routes.push(managed);
+                }
+                if configure_ipv6 {
+                    for route in &config.split_routes_v6 {
+                        let managed = WindowsManagedRoute {
+                            family: RouteFamily::Ipv6,
+                            destination_prefix: route.cidr.clone(),
+                        };
+                        delete_windows_route(&managed);
+                        match add_windows_host_route(&managed, &if_index, None) {
+                            Ok(()) => state.managed_routes.push(managed),
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    destination = %managed.destination_prefix,
+                                    "failed to add Windows IPv6 split route; IPv4 tunnel remains active"
+                                );
+                            }
                         }
                     }
                 }
             }
         }
+
+        Ok(())
+    })();
+
+    if let Err(err) = configure_result {
+        tracing::warn!(error = %err, "Windows network configuration failed; rolling back partial changes");
+        cleanup_windows_routing(server_addr, Some(&state));
+        return Err(err);
     }
 
     Ok(state)
@@ -632,6 +664,68 @@ fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>
         };
         delete_windows_route(&route);
     }
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_stale_windows(server_addr: SocketAddr, config: &ClientConfig) {
+    for route in stale_windows_routes(server_addr, config) {
+        delete_windows_route(&route);
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn stale_windows_routes(
+    server_addr: SocketAddr,
+    config: &ClientConfig,
+) -> Vec<WindowsManagedRoute> {
+    let mut routes = vec![WindowsManagedRoute {
+        family: socket_family(server_addr),
+        destination_prefix: format!(
+            "{}/{}",
+            server_addr.ip(),
+            socket_family(server_addr).default_prefix_len()
+        ),
+    }];
+
+    match config.tunnel_mode {
+        TunnelMode::Full => {
+            routes.push(WindowsManagedRoute {
+                family: RouteFamily::Ipv4,
+                destination_prefix: "0.0.0.0/1".to_string(),
+            });
+            routes.push(WindowsManagedRoute {
+                family: RouteFamily::Ipv4,
+                destination_prefix: "128.0.0.0/1".to_string(),
+            });
+            if config.should_tunnel_ipv6() {
+                routes.push(WindowsManagedRoute {
+                    family: RouteFamily::Ipv6,
+                    destination_prefix: "::/1".to_string(),
+                });
+                routes.push(WindowsManagedRoute {
+                    family: RouteFamily::Ipv6,
+                    destination_prefix: "8000::/1".to_string(),
+                });
+            }
+        }
+        TunnelMode::Split => {
+            routes.extend(config.split_routes.iter().map(|route| WindowsManagedRoute {
+                family: RouteFamily::Ipv4,
+                destination_prefix: route.cidr.clone(),
+            }));
+            routes.extend(
+                config
+                    .split_routes_v6
+                    .iter()
+                    .map(|route| WindowsManagedRoute {
+                        family: RouteFamily::Ipv6,
+                        destination_prefix: route.cidr.clone(),
+                    }),
+            );
+        }
+    }
+
+    routes
 }
 
 #[cfg(target_os = "windows")]
@@ -1289,7 +1383,8 @@ fn socket_family(addr: SocketAddr) -> RouteFamily {
 mod tests {
     use super::*;
     use crate::config::{
-        ConnectionProfile, DnsPolicy, Ipv4Route, Ipv6Policy, Ipv6Route, MorphingPolicy, TunnelMode,
+        ConnectionProfile, DnsLeakGuardPolicy, DnsPolicy, Ipv4Route, Ipv6Policy, Ipv6Route,
+        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TunnelMode,
     };
     use std::path::PathBuf;
 
@@ -1300,7 +1395,11 @@ mod tests {
             tunnel_mode: TunnelMode::Full,
             dns_policy: DnsPolicy::Tunnel,
             ipv6_policy,
+            mtu_policy: MtuPolicy::Auto,
+            kill_switch_policy: KillSwitchPolicy::Soft,
+            dns_leak_guard_policy: DnsLeakGuardPolicy::Warn,
             requested_mtu: 1380,
+            mtu_probe_timeout_ms: 450,
             keepalive_secs: 25,
             udp_rcvbuf: 8 * 1024 * 1024,
             udp_sndbuf: 8 * 1024 * 1024,
@@ -1427,5 +1526,23 @@ An asterisk (*) denotes that a network service is disabled.\n\
             &test_config(Ipv6Policy::Disabled),
             assigned
         ));
+    }
+
+    #[test]
+    fn stale_windows_routes_include_server_and_full_tunnel_prefixes() {
+        let routes = stale_windows_routes(
+            "72.56.88.224:443".parse().unwrap(),
+            &test_config(Ipv6Policy::Tunnel),
+        );
+        let prefixes = routes
+            .iter()
+            .map(|route| route.destination_prefix.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(prefixes.contains(&"72.56.88.224/32"));
+        assert!(prefixes.contains(&"0.0.0.0/1"));
+        assert!(prefixes.contains(&"128.0.0.0/1"));
+        assert!(prefixes.contains(&"::/1"));
+        assert!(prefixes.contains(&"8000::/1"));
     }
 }
