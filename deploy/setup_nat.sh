@@ -175,7 +175,11 @@ render_nft_config() {
     fi
     if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
         ipv6_mss_rule="        oifname \"${IFACE}\" ip6 saddr ${CLIENT_CIDR_V6} tcp flags syn / syn,rst tcp option maxseg size set rt mtu"
-        ipv6_forward_rules=$'        iifname "'"${TUN_IFACE_PATTERN}"'" oifname "'"${IFACE}"'" ip6 saddr '"${CLIENT_CIDR_V6}"' counter accept\n        iifname "'"${IFACE}"'" oifname "'"${TUN_IFACE_PATTERN}"'" ip6 daddr '"${CLIENT_CIDR_V6}"' ct state established,related counter accept'
+        ipv6_forward_rules=$(cat <<EOF
+        iifname "${TUN_IFACE_PATTERN}" oifname "${IFACE}" ip6 saddr ${CLIENT_CIDR_V6} counter accept
+        iifname "${IFACE}" oifname "${TUN_IFACE_PATTERN}" ip6 daddr ${CLIENT_CIDR_V6} ct state established,related counter accept
+EOF
+)
         nat6_table=$(cat <<EOF
 table ip6 ${NFT_NAT6_TABLE} {
     chain postrouting {
@@ -260,6 +264,12 @@ persist_sysctl "net.netfilter.nf_conntrack_udp_timeout_stream" "$CONNTRACK_UDP_S
 echo "[INFO] Writing nftables rules to ${NFT_CONF}"
 ensure_nft_include
 render_nft_config
+
+echo "[INFO] Validating nftables rules..."
+if ! nft -c -f "$NFT_CONF"; then
+    echo "[ERROR] Generated nftables config is invalid; existing rules were left untouched."
+    exit 1
+fi
 
 nft delete table inet "$NFT_INET_TABLE" >/dev/null 2>&1 || true
 nft delete table ip "$NFT_NAT_TABLE" >/dev/null 2>&1 || true
