@@ -8,6 +8,7 @@ to the "UDP-first, MTU-aware, diagnosable" target from the Dota/Steam VPN spec.
 - `OMEGA_PROFILE=gaming|general|restricted`
 - `OMEGA_MORPHING=balanced|full|off`
 - `OMEGA_TUNNEL_MODE=full|split`
+- `OMEGA_TRANSPORT=udp|tcp|auto`
 - `OMEGA_SPLIT_ROUTES_V6` for IPv6 split-tunnel destinations
 - `OMEGA_TUN_MTU` for explicit tunnel MTU selection
 - `OMEGA_DNS_POLICY=tunnel|system`
@@ -26,6 +27,7 @@ Client:
 OMEGA_PROFILE=gaming
 OMEGA_MORPHING=off
 OMEGA_TUNNEL_MODE=full
+OMEGA_TRANSPORT=udp
 OMEGA_TUN_MTU=1380
 OMEGA_KEEPALIVE_SECS=25
 OMEGA_DNS_POLICY=tunnel
@@ -40,6 +42,8 @@ OMEGA_PROFILE=gaming
 OMEGA_MORPHING=off
 OMEGA_TUN_MTU=1380
 OMEGA_BIND=[::]:443
+OMEGA_TCP_ENABLE=1
+OMEGA_TCP_BIND=[::]:443
 OMEGA_IPV6_MODE=nat66
 OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
 ```
@@ -84,7 +88,7 @@ step back up to `OMEGA_MORPHING=balanced`.
 The repository still does **not** meet the spec completely:
 
 - The datapath is still a custom Omega UDP tunnel, not WireGuard.
-- There is no real OpenVPN TCP fallback implementation.
+- There is now a framed TCP fallback for Omega packets (`OMEGA_TRANSPORT=tcp|auto` on the client, `OMEGA_TCP_ENABLE=1` on the server). It is not OpenVPN TCP and it is not HTTPS/TLS camouflage yet.
 - IPv6 now works as an inner dual-stack tunnel, but the current server deploy model is still NAT66 rather than routed-prefix IPv6.
 - Split tunnel route selection exists for both IPv4 and IPv6 on the client, but true split-DNS behavior is still intentionally limited.
 

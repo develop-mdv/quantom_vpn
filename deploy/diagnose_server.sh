@@ -14,7 +14,9 @@ Environment:
   OMEGA_CLIENT_CIDR            VPN client subnet (default: 10.7.0.0/16)
   OMEGA_CLIENT_CIDR_V6         VPN client IPv6 prefix (default: fd70:7::/64)
   OMEGA_VPN_PORT               public UDP port (default: 443)
-  OMEGA_VPN_PROTO              expected transport, should stay udp (default: udp)
+  OMEGA_VPN_PROTO              expected primary transport, should stay udp (default: udp)
+  OMEGA_TCP_ENABLE             1/0, expect framed TCP fallback listener (default: 1)
+  OMEGA_TCP_PORT               framed TCP fallback port (default: OMEGA_VPN_PORT)
   OMEGA_VPN_IPV6_MODE          expected IPv6 mode: disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port that must remain reachable (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expect public admin web UI (default: 0)
@@ -37,6 +39,8 @@ CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
 CLIENT_CIDR_V6="${OMEGA_CLIENT_CIDR_V6:-fd70:7::/64}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
+TCP_ENABLE="${OMEGA_TCP_ENABLE:-1}"
+TCP_PORT="${OMEGA_TCP_PORT:-$VPN_PORT}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-${OMEGA_IPV6_MODE:-disabled}}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
 ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-0}"
@@ -48,6 +52,8 @@ RUNTIME_SNAPSHOT="${OMEGA_RUNTIME_SNAPSHOT:-/opt/omega/state/runtime.json}"
 NFT_INET_TABLE="omega_vpn"
 NFT_NAT_TABLE="omega_vpn_nat"
 NFT_NAT6_TABLE="omega_vpn_nat6"
+NFT_CONF="${OMEGA_NFT_CONF:-/etc/nftables.d/omega-vpn.nft}"
+IPV6_EGRESS_TARGET="${OMEGA_IPV6_EGRESS_TARGET:-2606:4700:4700::1111}"
 
 if [[ -z "$IFACE" ]]; then
     IFACE="$(ip -o route show to default 2>/dev/null | awk 'NR == 1 { print $5 }')"
@@ -76,6 +82,13 @@ cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_enabled() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 if [[ -z "$IFACE" ]]; then
     fail "Could not detect the public interface."
 fi
@@ -85,6 +98,7 @@ echo "[INFO] Tunnel interface pattern: ${TUN_IFACE_PATTERN}"
 echo "[INFO] Client subnet: ${CLIENT_CIDR}"
 echo "[INFO] Client IPv6 prefix: ${CLIENT_CIDR_V6}"
 echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
+echo "[INFO] TCP fallback: ${TCP_ENABLE}/${TCP_PORT}"
 echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
 echo "[INFO] Runtime snapshot: ${RUNTIME_SNAPSHOT}"
 echo
@@ -167,6 +181,16 @@ if cmd_exists nft; then
     nat_table="$(nft list table ip "$NFT_NAT_TABLE" 2>/dev/null || true)"
     nat6_table="$(nft list table ip6 "$NFT_NAT6_TABLE" 2>/dev/null || true)"
 
+    if [[ -f "$NFT_CONF" ]]; then
+        if nft -c -f "$NFT_CONF" >/dev/null 2>&1; then
+            pass "Persisted nftables config validates cleanly."
+        else
+            fail "Persisted nftables config ${NFT_CONF} is invalid."
+        fi
+    else
+        warn "Persisted nftables config ${NFT_CONF} is missing; live table checks continue."
+    fi
+
     [[ -n "$inet_table" ]] \
         && pass "nftables inet table ${NFT_INET_TABLE} is loaded." \
         || fail "nftables inet table ${NFT_INET_TABLE} is missing."
@@ -210,6 +234,14 @@ if cmd_exists nft; then
             fail "NAT66 rule for ${CLIENT_CIDR_V6} is missing."
         fi
     fi
+
+    if is_enabled "$TCP_ENABLE"; then
+        if grep -Fq "tcp dport ${TCP_PORT}" <<<"$inet_table"; then
+            pass "TCP fallback input rule for ${TCP_PORT} is present."
+        else
+            fail "TCP fallback input rule for ${TCP_PORT} is missing."
+        fi
+    fi
 else
     fail "nft is not installed."
 fi
@@ -220,6 +252,28 @@ else
     fail "systemd service ${SERVICE_NAME} is not active."
 fi
 
+if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
+    if cmd_exists ip; then
+        if ip -6 route get "$IPV6_EGRESS_TARGET" >/dev/null 2>&1; then
+            pass "Server IPv6 route to ${IPV6_EGRESS_TARGET} is available."
+        else
+            fail "Server IPv6 route to ${IPV6_EGRESS_TARGET} is unavailable."
+        fi
+    else
+        fail "ip tool is not available for IPv6 route validation."
+    fi
+
+    if cmd_exists ping; then
+        if ping -6 -c 1 -W 3 "$IPV6_EGRESS_TARGET" >/dev/null 2>&1; then
+            pass "Server IPv6 egress probe to ${IPV6_EGRESS_TARGET} passed."
+        else
+            fail "Server IPv6 egress probe to ${IPV6_EGRESS_TARGET} failed."
+        fi
+    else
+        warn "ping is not available; IPv6 ICMP egress probe skipped."
+    fi
+fi
+
 if cmd_exists ss; then
     if ss -H -lun 2>/dev/null | awk '{print $4}' | grep -Eq "[:.]${VPN_PORT}$"; then
         pass "UDP listener is present on port ${VPN_PORT}."
@@ -227,7 +281,15 @@ if cmd_exists ss; then
         fail "UDP listener on port ${VPN_PORT} is not visible."
     fi
 
-    if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    if is_enabled "$TCP_ENABLE"; then
+        if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${TCP_PORT}$"; then
+            pass "TCP fallback listener is present on port ${TCP_PORT}."
+        else
+            fail "TCP fallback listener on port ${TCP_PORT} is not visible."
+        fi
+    fi
+
+    if is_enabled "$ADMIN_WEB_PUBLIC"; then
         if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${ADMIN_WEB_PORT}$"; then
             pass "Admin web UI is exposed publicly on port ${ADMIN_WEB_PORT}."
         else
@@ -237,7 +299,7 @@ if cmd_exists ss; then
         warn "Admin web public exposure is disabled by default; that is safer for production."
     fi
 
-    if [[ "$METRICS_PUBLIC" == "1" ]]; then
+    if is_enabled "$METRICS_PUBLIC"; then
         if ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|\\[::\\]:|0\\.0\\.0\\.0:|\\*:)${METRICS_PORT}$"; then
             pass "Prometheus metrics are exposed publicly on port ${METRICS_PORT}."
         else
@@ -256,25 +318,25 @@ if [[ -f "$RUNTIME_SNAPSHOT" ]]; then
         if grep -Fq '"tunnel_family": "dual_stack"' "$RUNTIME_SNAPSHOT"; then
             pass "Runtime snapshot confirms dual-stack tunnel family."
         else
-            warn "Runtime snapshot does not show tunnel_family=dual_stack."
+            fail "Runtime snapshot does not show tunnel_family=dual_stack."
         fi
 
         if grep -Fq '"ipv6_mode": "nat66"' "$RUNTIME_SNAPSHOT"; then
             pass "Runtime snapshot confirms IPv6 nat66 mode."
         else
-            warn "Runtime snapshot does not confirm ipv6_mode=nat66."
+            fail "Runtime snapshot does not confirm ipv6_mode=nat66."
         fi
     else
         if grep -Fq '"tunnel_family": "ipv4"' "$RUNTIME_SNAPSHOT"; then
             pass "Runtime snapshot confirms IPv4 tunnel family."
         else
-            warn "Runtime snapshot does not show tunnel_family=ipv4."
+            fail "Runtime snapshot does not show tunnel_family=ipv4."
         fi
 
         if grep -Fq '"ipv6_mode": "disabled"' "$RUNTIME_SNAPSHOT"; then
             pass "Runtime snapshot confirms IPv6 is disabled."
         else
-            warn "Runtime snapshot does not confirm ipv6_mode=disabled."
+            fail "Runtime snapshot does not confirm ipv6_mode=disabled."
         fi
     fi
 

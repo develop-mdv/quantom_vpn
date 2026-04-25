@@ -13,13 +13,20 @@ on:
         default: "443"
         type: string
       vpn_protocol:
-        description: Public VPN listener protocol.
+        description: Primary VPN listener protocol. Keep udp; TCP fallback is controlled separately.
         required: true
         default: udp
-        type: choice
-        options:
-          - udp
-          - tcp
+        type: string
+      tcp_fallback:
+        description: Expose framed TCP fallback alongside the UDP primary listener.
+        required: true
+        default: true
+        type: boolean
+      tcp_port:
+        description: Public framed TCP fallback listener port.
+        required: true
+        default: "443"
+        type: string
       ssh_port:
         description: SSH port to keep allowed. Leave blank to reuse DEPLOY_PORT or 22.
         required: false
@@ -176,6 +183,8 @@ jobs:
           PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
           VPN_PORT_INPUT: ${{ inputs.vpn_port }}
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
+          TCP_FALLBACK_INPUT: ${{ inputs.tcp_fallback }}
+          TCP_PORT_INPUT: ${{ inputs.tcp_port }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
           CLIENT_CIDR_V6_INPUT: ${{ inputs.client_cidr_v6 }}
@@ -193,6 +202,8 @@ jobs:
           PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_FALLBACK="$(printf '%s' "$TCP_FALLBACK_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_PORT="$(printf '%s' "$TCP_PORT_INPUT" | tr -d '\r\n\t ')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
           CLIENT_CIDR_V6="$(printf '%s' "$CLIENT_CIDR_V6_INPUT" | tr -d '\r\n\t ')"
@@ -204,6 +215,14 @@ jobs:
 
           if [ -z "$SSH_PORT" ]; then
             SSH_PORT="22"
+          fi
+
+          if [ -z "$TCP_FALLBACK" ]; then
+            TCP_FALLBACK="true"
+          fi
+
+          if [ -z "$TCP_PORT" ]; then
+            TCP_PORT="$VPN_PORT"
           fi
 
           if [ -z "$CLIENT_CIDR" ]; then
@@ -239,6 +258,11 @@ jobs:
             exit 1
           fi
 
+          if ! echo "$TCP_PORT" | grep -Eq '^[0-9]+$'; then
+            echo "tcp_port must be numeric"
+            exit 1
+          fi
+
           if ! echo "$SSH_PORT" | grep -Eq '^[0-9]+$'; then
             echo "ssh_port must be numeric"
             exit 1
@@ -249,8 +273,8 @@ jobs:
             exit 1
           fi
 
-          if [ "$VPN_PROTOCOL" != "udp" ] && [ "$VPN_PROTOCOL" != "tcp" ]; then
-            echo "vpn_protocol must be udp or tcp"
+          if [ "$VPN_PROTOCOL" != "udp" ]; then
+            echo "vpn_protocol must stay udp; use tcp_fallback to expose framed TCP fallback"
             exit 1
           fi
 
@@ -262,6 +286,8 @@ jobs:
                OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
                OMEGA_VPN_PORT='$VPN_PORT' \
                OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_TCP_ENABLE='$TCP_FALLBACK' \
+               OMEGA_TCP_PORT='$TCP_PORT' \
                OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
                OMEGA_SSH_PORT='$SSH_PORT' \
                OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
@@ -276,6 +302,8 @@ jobs:
           PUBLIC_INTERFACE_INPUT: ${{ inputs.public_interface }}
           VPN_PORT_INPUT: ${{ inputs.vpn_port }}
           VPN_PROTOCOL_INPUT: ${{ inputs.vpn_protocol }}
+          TCP_FALLBACK_INPUT: ${{ inputs.tcp_fallback }}
+          TCP_PORT_INPUT: ${{ inputs.tcp_port }}
           SSH_PORT_INPUT: ${{ inputs.ssh_port }}
           CLIENT_CIDR_INPUT: ${{ inputs.client_cidr }}
           CLIENT_CIDR_V6_INPUT: ${{ inputs.client_cidr_v6 }}
@@ -294,6 +322,8 @@ jobs:
           PUBLIC_IFACE="$(printf '%s' "$PUBLIC_INTERFACE_INPUT" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "$VPN_PORT_INPUT" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "$VPN_PROTOCOL_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_FALLBACK="$(printf '%s' "$TCP_FALLBACK_INPUT" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_PORT="$(printf '%s' "$TCP_PORT_INPUT" | tr -d '\r\n\t ')"
           SSH_PORT="$(printf '%s' "${SSH_PORT_INPUT:-$DEPLOY_PORT_CLEAN}" | tr -d '\r\n\t ')"
           CLIENT_CIDR="$(printf '%s' "$CLIENT_CIDR_INPUT" | tr -d '\r\n\t ')"
           CLIENT_CIDR_V6="$(printf '%s' "$CLIENT_CIDR_V6_INPUT" | tr -d '\r\n\t ')"
@@ -305,6 +335,14 @@ jobs:
 
           if [ -z "$SSH_PORT" ]; then
             SSH_PORT="22"
+          fi
+
+          if [ -z "$TCP_FALLBACK" ]; then
+            TCP_FALLBACK="true"
+          fi
+
+          if [ -z "$TCP_PORT" ]; then
+            TCP_PORT="$VPN_PORT"
           fi
 
           if [ -z "$CLIENT_CIDR" ]; then
@@ -343,6 +381,8 @@ jobs:
                OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
                OMEGA_VPN_PORT='$VPN_PORT' \
                OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_TCP_ENABLE='$TCP_FALLBACK' \
+               OMEGA_TCP_PORT='$TCP_PORT' \
                OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
                OMEGA_SSH_PORT='$SSH_PORT' \
                OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \

@@ -155,18 +155,24 @@ sudo bash deploy/diagnose_server.sh
 `setup_nat.sh` делает:
 
 - `ip_forward=1`
+- `net.ipv6.conf.all.forwarding=1`, если `OMEGA_VPN_IPV6_MODE=nat66`
 - loose `rp_filter`
 - `nftables` rules
 - `MASQUERADE` для клиентской подсети
+- NAT66 для клиентского IPv6 prefix, если включен `nat66`
 - MSS clamping
 - увеличенные UDP conntrack timeouts
+- input rule для framed TCP fallback, если `OMEGA_TCP_ENABLE=1`
 
 `diagnose_server.sh` проверяет:
 
 - sysctl tuning
-- nftables rules
+- persisted nftables config через `nft -c -f`
+- live nftables rules, включая NAT66 и TCP fallback input rule
+- IPv6 route/egress сервера при `OMEGA_VPN_IPV6_MODE=nat66`
 - systemd service status
 - UDP listener
+- TCP fallback listener, если `OMEGA_TCP_ENABLE=1`
 - runtime snapshot
 - профиль, IPv6 mode и morphing policy
 
@@ -190,6 +196,24 @@ Post-connect diagnostics теперь разделяют состояние ту
 
 Клиент пишет `connected_healthy`, когда обязательные проверки прошли, и `connected_degraded`,
 когда туннель поднят, но качество или leak-check требуют внимания.
+
+### DNS leak guard и strict kill switch
+
+`OMEGA_DNS_LEAK_GUARD=strict` теперь не просто смотрит на факт вызова команды настройки DNS: клиент читает DNS обратно с tunnel interface и падает, если ожидаемые DNS не закрепились. В `warn` режиме это остается warning + degraded diagnostics.
+
+`OMEGA_KILL_SWITCH=strict` сейчас намеренно узкий и безопасный: поддержан только Windows full-tunnel. Он чистит старые Omega firewall rules, fail-fast'ит unsupported modes и ставит firewall block на DNS TCP/UDP 53 для физических адаптеров, чтобы DNS не ушел мимо tunnel DNS. Linux/macOS strict пока возвращает ошибку вместо иллюзии защиты.
+
+### TCP fallback
+
+UDP остается основным транспортом для gaming profile. Framed TCP fallback включается на сервере через `OMEGA_TCP_ENABLE=1` и `OMEGA_TCP_BIND`, открывается в `setup_nat.sh` через `OMEGA_TCP_PORT`, а на клиенте выбирается через:
+
+```env
+OMEGA_TRANSPORT=udp   # default, быстрый путь
+OMEGA_TRANSPORT=tcp   # принудительно framed TCP
+OMEGA_TRANSPORT=auto  # UDP handshake, затем TCP fallback
+```
+
+Это именно framed TCP fallback для случаев, где UDP заблокирован или нестабилен. HTTPS/TLS camouflage пока не реализован и должен добавляться отдельным слоем поверх этой базы.
 
 ## Метрики
 
@@ -223,6 +247,7 @@ Post-connect diagnostics теперь разделяют состояние ту
 - бинарник в `/opt/omega/omega-server`
 - profile `gaming`
 - bind `[::]:443` для внешнего dual-stack UDP listener
+- framed TCP fallback listener `[::]:443`
 - `OMEGA_IPV6_MODE=nat66`
 - built-in admin на публичном `:8081`
 - metrics только на localhost
@@ -275,8 +300,14 @@ Workflow:
 - `DEPLOY_INSTALL_DIR`
 - `DEPLOY_KEEP_RELEASES`
 - `DEPLOY_CLIENT_CIDR`
+- `DEPLOY_CLIENT_CIDR_V6`
 - `DEPLOY_VPN_PORT`
 - `DEPLOY_VPN_PROTOCOL`
+- `DEPLOY_VPN_IPV6_MODE`
+- `DEPLOY_TCP_ENABLE`
+- `DEPLOY_TCP_PORT`
+- `DEPLOY_ADMIN_WEB_PUBLIC`
+- `DEPLOY_ADMIN_WEB_PORT`
 - `DEPLOY_METRICS_PORT`
 
 #### `bootstrap-network.yml`

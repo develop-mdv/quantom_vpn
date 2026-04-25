@@ -13,7 +13,7 @@
 Сейчас проект нужно воспринимать так:
 
 - это **не** WireGuard и не OpenVPN, а собственный `Omega` protocol;
-- datapath сейчас **UDP-only**;
+- datapath по умолчанию **UDP-first**, плюс есть framed TCP fallback для `OMEGA_TRANSPORT=tcp|auto`;
 - tunnel family теперь умеет **dual-stack IPv4 + IPv6** при `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте;
 - client networking теперь сам ставит и убирает dual-stack full/split routes на Windows, Linux и macOS;
 - рабочая надежность сегодня строится вокруг **ARQ/NACK + retransmit cache + adaptive redundancy**;

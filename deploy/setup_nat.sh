@@ -14,7 +14,9 @@ Environment:
   OMEGA_CLIENT_CIDR            VPN client subnet (default: 10.7.0.0/16)
   OMEGA_CLIENT_CIDR_V6         VPN client IPv6 prefix (default: fd70:7::/64)
   OMEGA_VPN_PORT               public UDP port (default: 443)
-  OMEGA_VPN_PROTO              must stay udp for the current Omega datapath (default: udp)
+  OMEGA_VPN_PROTO              primary transport; keep udp for gaming profile (default: udp)
+  OMEGA_TCP_ENABLE             1/0, expose framed TCP fallback on OMEGA_TCP_PORT (default: 1)
+  OMEGA_TCP_PORT               framed TCP fallback port (default: OMEGA_VPN_PORT)
   OMEGA_VPN_IPV6_MODE          disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port to preserve (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expose built-in admin UI publicly (default: 0)
@@ -48,6 +50,8 @@ CLIENT_CIDR="${OMEGA_CLIENT_CIDR:-10.7.0.0/16}"
 CLIENT_CIDR_V6="${OMEGA_CLIENT_CIDR_V6:-fd70:7::/64}"
 VPN_PORT="${OMEGA_VPN_PORT:-443}"
 VPN_PROTO="${OMEGA_VPN_PROTO:-udp}"
+TCP_ENABLE="${OMEGA_TCP_ENABLE:-1}"
+TCP_PORT="${OMEGA_TCP_PORT:-$VPN_PORT}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-${OMEGA_IPV6_MODE:-disabled}}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
 ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-0}"
@@ -89,8 +93,16 @@ require_numeric() {
     fi
 }
 
+is_enabled() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 for pair in \
     "$VPN_PORT OMEGA_VPN_PORT" \
+    "$TCP_PORT OMEGA_TCP_PORT" \
     "$SSH_PORT OMEGA_SSH_PORT" \
     "$ADMIN_WEB_PORT OMEGA_ADMIN_WEB_PORT" \
     "$METRICS_PORT OMEGA_METRICS_PORT" \
@@ -105,7 +117,7 @@ for pair in \
 done
 
 if [[ "$VPN_PROTO" != "udp" ]]; then
-    echo "[ERROR] The current Omega datapath is UDP-only; do not bootstrap a TCP gaming profile here."
+    echo "[ERROR] Keep OMEGA_VPN_PROTO=udp as the primary gaming transport; enable fallback with OMEGA_TCP_ENABLE=1."
     exit 1
 fi
 
@@ -156,6 +168,7 @@ EOF
 
 render_nft_config() {
     local vpn_input_rule
+    local tcp_input_rule=""
     local admin_rule=""
     local metrics_rule=""
     local trace_rule=""
@@ -164,13 +177,16 @@ render_nft_config() {
     local nat6_table=""
 
     vpn_input_rule="udp dport ${VPN_PORT} counter accept"
-    if [[ "$ADMIN_WEB_PUBLIC" == "1" ]]; then
+    if is_enabled "$TCP_ENABLE"; then
+        tcp_input_rule="tcp dport ${TCP_PORT} counter accept"
+    fi
+    if is_enabled "$ADMIN_WEB_PUBLIC"; then
         admin_rule="tcp dport ${ADMIN_WEB_PORT} counter accept"
     fi
-    if [[ "$METRICS_PUBLIC" == "1" ]]; then
+    if is_enabled "$METRICS_PUBLIC"; then
         metrics_rule="tcp dport ${METRICS_PORT} counter accept"
     fi
-    if [[ "$NFT_TRACE" == "1" ]]; then
+    if is_enabled "$NFT_TRACE"; then
         trace_rule="iifname \"${TUN_IFACE_PATTERN}\" meta nftrace set 1"
     fi
     if [[ "$VPN_IPV6_MODE" == "nat66" ]]; then
@@ -200,6 +216,7 @@ table inet ${NFT_INET_TABLE} {
         ct state established,related accept
         tcp dport ${SSH_PORT} counter accept
         ${vpn_input_rule}
+        ${tcp_input_rule}
         ${admin_rule}
         ${metrics_rule}
     }
@@ -240,6 +257,7 @@ echo "[INFO] Tunnel interface pattern: ${TUN_IFACE_PATTERN}"
 echo "[INFO] VPN client subnet: ${CLIENT_CIDR}"
 echo "[INFO] VPN client IPv6 prefix: ${CLIENT_CIDR_V6}"
 echo "[INFO] VPN transport: ${VPN_PROTO}/${VPN_PORT}"
+echo "[INFO] TCP fallback: ${TCP_ENABLE}/${TCP_PORT}"
 echo "[INFO] IPv6 mode: ${VPN_IPV6_MODE}"
 
 echo "[INFO] Applying sysctl tuning for UDP-first VPN traffic..."

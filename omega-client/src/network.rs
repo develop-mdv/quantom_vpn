@@ -3,7 +3,7 @@ use std::process::Command;
 
 use anyhow::Context;
 
-use crate::config::{ClientConfig, DnsLeakGuardPolicy, TunnelMode};
+use crate::config::{ClientConfig, DnsLeakGuardPolicy, KillSwitchPolicy, TunnelMode};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteLookup {
@@ -258,6 +258,7 @@ pub struct NetworkState {
     disabled_ipv6_adapters: Vec<String>,
     interface_alias: String,
     reset_dns: bool,
+    firewall_rules_configured: bool,
     managed_routes: Vec<WindowsManagedRoute>,
     reset_ipv6_metric: bool,
 }
@@ -384,6 +385,43 @@ fn warn_missing_tunnel_ipv6(config: &ClientConfig, tunnel_ipv6: Option<Ipv6Addr>
     }
 }
 
+fn normalize_dns_server(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase()
+}
+
+fn dns_servers_cover_expected(actual: &[String], expected: &[String]) -> bool {
+    let actual = actual
+        .iter()
+        .map(|value| normalize_dns_server(value))
+        .collect::<std::collections::HashSet<_>>();
+
+    expected
+        .iter()
+        .map(|value| normalize_dns_server(value))
+        .all(|value| actual.contains(&value))
+}
+
+fn strict_kill_switch_supported(config: &ClientConfig) -> bool {
+    if !matches!(config.kill_switch_policy, KillSwitchPolicy::Strict) {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        matches!(config.tunnel_mode, TunnelMode::Full)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn configure_windows_routing(
     server_addr: SocketAddr,
@@ -489,11 +527,22 @@ fn configure_windows_routing(
         },
         interface_alias: if_alias.clone(),
         reset_dns: false,
+        firewall_rules_configured: false,
         managed_routes: Vec::new(),
         reset_ipv6_metric,
     };
 
     let configure_result: anyhow::Result<()> = (|| {
+        if !strict_kill_switch_supported(config) {
+            anyhow::bail!(
+                "OMEGA_KILL_SWITCH=strict is currently supported only for Windows full-tunnel mode"
+            );
+        }
+
+        if matches!(config.kill_switch_policy, KillSwitchPolicy::Strict) {
+            remove_windows_firewall_rules();
+        }
+
         if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
             let dns_ps = config
                 .dns_servers
@@ -507,7 +556,10 @@ fn configure_windows_routing(
                 dns_ps
             ));
             match dns_result {
-                Ok(()) => state.reset_dns = true,
+                Ok(()) => {
+                    state.reset_dns = true;
+                    verify_windows_tunnel_dns(&if_alias, &config.dns_servers, config)?;
+                }
                 Err(err) if matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict) => {
                     return Err(err);
                 }
@@ -518,6 +570,13 @@ fn configure_windows_routing(
                     );
                 }
             }
+        }
+
+        if matches!(config.kill_switch_policy, KillSwitchPolicy::Strict)
+            || matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict)
+        {
+            configure_windows_dns_firewall(&if_alias)?;
+            state.firewall_rules_configured = true;
         }
 
         let server_lookup = find_windows_route(server_addr.ip()).with_context(|| {
@@ -633,6 +692,9 @@ fn configure_windows_routing(
 #[cfg(target_os = "windows")]
 fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>) {
     if let Some(state) = state {
+        if state.firewall_rules_configured {
+            remove_windows_firewall_rules();
+        }
         if state.reset_dns {
             let _ = run_powershell(&format!(
                 "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
@@ -668,6 +730,7 @@ fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>
 
 #[cfg(target_os = "windows")]
 fn cleanup_stale_windows(server_addr: SocketAddr, config: &ClientConfig) {
+    remove_windows_firewall_rules();
     for route in stale_windows_routes(server_addr, config) {
         delete_windows_route(&route);
     }
@@ -827,6 +890,100 @@ fn delete_windows_route(route: &WindowsManagedRoute) {
 }
 
 #[cfg(target_os = "windows")]
+const OMEGA_FIREWALL_GROUP: &str = "Omega VPN";
+
+#[cfg(target_os = "windows")]
+fn remove_windows_firewall_rules() {
+    let _ = run_powershell(&format!(
+        "Remove-NetFirewallRule -DisplayGroup '{}' -ErrorAction SilentlyContinue | Out-Null",
+        OMEGA_FIREWALL_GROUP
+    ));
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_dns_servers(interface_alias: &str) -> anyhow::Result<Vec<String>> {
+    let output = run_powershell_output(&format!(
+        "Get-DnsClientServerAddress -InterfaceAlias '{}' -ErrorAction Stop | ForEach-Object {{ $_.ServerAddresses }}",
+        powershell_quote(interface_alias)
+    ))?;
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_tunnel_dns(
+    interface_alias: &str,
+    expected: &[String],
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
+    let actual = read_windows_dns_servers(interface_alias)
+        .with_context(|| format!("failed to read tunnel DNS servers from {interface_alias}"))?;
+
+    if dns_servers_cover_expected(&actual, expected) {
+        return Ok(());
+    }
+
+    let message = format!(
+        "tunnel DNS readback mismatch on {interface_alias}: expected {:?}, actual {:?}",
+        expected, actual
+    );
+    if matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict) {
+        anyhow::bail!("OMEGA_DNS_LEAK_GUARD=strict: {message}");
+    }
+
+    tracing::warn!(%message, "tunnel DNS readback mismatch; continuing because DNS leak guard is not strict");
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_physical_adapter_aliases(wintun_alias: &str) -> Vec<String> {
+    let list_cmd = format!(
+        "Get-NetAdapter | Where-Object {{ $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -ne '{}' -and $_.InterfaceDescription -notlike '*Wintun*' }} | Select-Object -ExpandProperty Name",
+        powershell_quote(wintun_alias)
+    );
+
+    let Ok(output) = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &list_cmd])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_dns_firewall(wintun_alias: &str) -> anyhow::Result<()> {
+    remove_windows_firewall_rules();
+
+    for adapter in windows_physical_adapter_aliases(wintun_alias) {
+        let adapter = powershell_quote(&adapter);
+        for (proto, name) in [("UDP", "UDP"), ("TCP", "TCP")] {
+            run_powershell(&format!(
+                "New-NetFirewallRule -DisplayGroup '{}' -DisplayName 'Omega VPN DNS Leak Guard {} {}' -Direction Outbound -Action Block -Protocol {} -RemotePort 53 -InterfaceAlias '{}' -Profile Any | Out-Null",
+                OMEGA_FIREWALL_GROUP,
+                name,
+                adapter,
+                proto,
+                adapter
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn run_powershell(script: &str) -> anyhow::Result<()> {
     let status = Command::new("powershell")
         .args(["-Command", script])
@@ -910,6 +1067,11 @@ fn configure_linux_network(
     config: &ClientConfig,
 ) -> anyhow::Result<NetworkState> {
     warn_missing_tunnel_ipv6(config, tunnel_ipv6);
+    if !strict_kill_switch_supported(config) {
+        anyhow::bail!(
+            "OMEGA_KILL_SWITCH=strict is currently implemented only on Windows full-tunnel mode"
+        );
+    }
     let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
     let interface_name = interface_name.context("failed to determine tunnel interface name")?;
@@ -989,6 +1151,7 @@ fn configure_linux_network(
 
     if config.should_set_tunnel_dns() && !config.dns_servers.is_empty() {
         configure_linux_dns(interface_name, &config.dns_servers)?;
+        verify_linux_tunnel_dns(interface_name, &config.dns_servers, config)?;
         state.dns_configured = true;
     }
 
@@ -1109,6 +1272,41 @@ fn revert_linux_dns(interface_name: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+fn verify_linux_tunnel_dns(
+    interface_name: &str,
+    expected: &[String],
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
+    if !matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict) {
+        return Ok(());
+    }
+
+    let Some(LinuxDnsTool::ResolveCtl) = linux_dns_tool() else {
+        return Ok(());
+    };
+
+    let output = Command::new("resolvectl")
+        .args(["dns", interface_name])
+        .output()
+        .with_context(|| format!("failed to read Linux DNS servers for {interface_name}"))?;
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let actual = raw
+        .split_whitespace()
+        .filter(|value| value.parse::<IpAddr>().is_ok())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if dns_servers_cover_expected(&actual, expected) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "OMEGA_DNS_LEAK_GUARD=strict: tunnel DNS readback mismatch on {interface_name}: expected {:?}, actual {:?}",
+            expected,
+            actual
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum LinuxDnsTool {
     ResolveCtl,
@@ -1140,6 +1338,11 @@ fn configure_macos_network(
     config: &ClientConfig,
 ) -> anyhow::Result<NetworkState> {
     warn_missing_tunnel_ipv6(config, tunnel_ipv6);
+    if !strict_kill_switch_supported(config) {
+        anyhow::bail!(
+            "OMEGA_KILL_SWITCH=strict is currently implemented only on Windows full-tunnel mode"
+        );
+    }
     let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
     let interface_name = interface_name.context("failed to determine tunnel interface name")?;
@@ -1211,6 +1414,7 @@ fn configure_macos_network(
             .context("failed to resolve primary macOS network service for DNS")?;
         let previous_dns_servers = read_macos_dns_servers(&primary_service)?;
         configure_macos_dns(&primary_service, &config.dns_servers)?;
+        verify_macos_tunnel_dns(&primary_service, &config.dns_servers, config)?;
         state.primary_service = Some(primary_service);
         state.previous_dns_servers = Some(previous_dns_servers);
         state.dns_configured = true;
@@ -1350,6 +1554,34 @@ fn configure_macos_dns(service: &str, dns_servers: &[String]) -> anyhow::Result<
     run_status("networksetup", &args)
 }
 
+#[cfg(target_os = "macos")]
+fn verify_macos_tunnel_dns(
+    service: &str,
+    expected: &[String],
+    config: &ClientConfig,
+) -> anyhow::Result<()> {
+    let actual = read_macos_dns_servers(service)?;
+    if dns_servers_cover_expected(&actual, expected) {
+        return Ok(());
+    }
+
+    if matches!(config.dns_leak_guard_policy, DnsLeakGuardPolicy::Strict) {
+        anyhow::bail!(
+            "OMEGA_DNS_LEAK_GUARD=strict: tunnel DNS readback mismatch on {service}: expected {:?}, actual {:?}",
+            expected,
+            actual
+        );
+    }
+
+    tracing::warn!(
+        service,
+        expected = ?expected,
+        actual = ?actual,
+        "tunnel DNS readback mismatch; continuing because DNS leak guard is not strict"
+    );
+    Ok(())
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_status(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let status = Command::new(program)
@@ -1384,7 +1616,7 @@ mod tests {
     use super::*;
     use crate::config::{
         ConnectionProfile, DnsLeakGuardPolicy, DnsPolicy, Ipv4Route, Ipv6Policy, Ipv6Route,
-        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TunnelMode,
+        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TransportPolicy, TunnelMode,
     };
     use std::path::PathBuf;
 
@@ -1396,6 +1628,7 @@ mod tests {
             dns_policy: DnsPolicy::Tunnel,
             ipv6_policy,
             mtu_policy: MtuPolicy::Auto,
+            transport_policy: TransportPolicy::Udp,
             kill_switch_policy: KillSwitchPolicy::Soft,
             dns_leak_guard_policy: DnsLeakGuardPolicy::Warn,
             requested_mtu: 1380,
@@ -1508,6 +1741,37 @@ An asterisk (*) denotes that a network service is disabled.\n\
             parse_macos_dns_servers("There aren't any DNS Servers set on Wi-Fi.\n"),
             Some(Vec::new())
         );
+    }
+
+    #[test]
+    fn dns_server_readback_matches_expected_subset() {
+        let actual = vec![
+            "1.1.1.1".to_string(),
+            "[2606:4700:4700::1111]".to_string(),
+            "8.8.8.8".to_string(),
+        ];
+        let expected = vec!["2606:4700:4700::1111".to_string(), "1.1.1.1".to_string()];
+
+        assert!(dns_servers_cover_expected(&actual, &expected));
+        assert!(!dns_servers_cover_expected(
+            &actual,
+            &["9.9.9.9".to_string()]
+        ));
+    }
+
+    #[test]
+    fn strict_kill_switch_support_is_platform_and_mode_scoped() {
+        let mut config = test_config(Ipv6Policy::Tunnel);
+        config.kill_switch_policy = KillSwitchPolicy::Strict;
+        config.tunnel_mode = TunnelMode::Full;
+
+        #[cfg(target_os = "windows")]
+        assert!(strict_kill_switch_supported(&config));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!strict_kill_switch_supported(&config));
+
+        config.tunnel_mode = TunnelMode::Split;
+        assert!(!strict_kill_switch_supported(&config));
     }
 
     #[test]

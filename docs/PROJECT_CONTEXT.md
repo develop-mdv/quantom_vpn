@@ -17,6 +17,7 @@
 - Handshake v2 использует `ML-KEM-768` и device auth (`device_id` + `device_token`).
 - Data plane использует `RTP header + Omega header + ChaCha20-Poly1305`.
 - Реально работающая надежность в текущем datapath - это `ARQ/NACK`, retransmit cache и adaptive extra redundancy.
+- Транспорт по умолчанию остается UDP, но есть framed TCP fallback: сервер может слушать TCP рядом с UDP, клиент умеет `OMEGA_TRANSPORT=tcp|auto`.
 - `ChaosPrng` используется для выбора целевых размеров пакетов и управления padding budget.
 - Сервер ведет multi-user / multi-device identity store с audit trail.
 - Клиент пишет runtime diagnostics в JSON, сервер пишет session/runtime snapshots и Prometheus metrics.
@@ -31,8 +32,9 @@
 ## Важные ограничения текущей версии
 
 - Проект в alpha-stage и не скрывает этого.
-- Реального TCP fallback в клиенте/сервере нет.
+- TCP fallback уже есть как framed Omega packets over TCP. HTTPS/TLS camouflage поверх него пока не реализован.
 - Inner IPv6 теперь есть в handshake/session/datapath/TUN bootstrap, но deploy-модель пока только `nat66`, без routed-prefix orchestration.
+- Strict kill switch пока не является полноценной WFP/global outbound политикой: production-safe first pass поддержан на Windows full-tunnel и закрывает DNS leakage на физических адаптерах; Linux/macOS strict fail-fast.
 - В `omega-core` есть `RaptorQ/FEC` примитивы и флаги handshake, но живой datapath их пока не использует как полноценный FEC packet path.
 - Split tunnel теперь умеет IPv4 и IPv6 route selection, но полноценного split-DNS orchestration все еще нет.
 

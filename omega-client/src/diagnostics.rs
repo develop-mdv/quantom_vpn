@@ -73,6 +73,7 @@ pub struct ClientDiagnosticsSnapshot {
     pub tunnel_mode: crate::config::TunnelMode,
     pub dns_policy: crate::config::DnsPolicy,
     pub ipv6_policy: crate::config::Ipv6Policy,
+    pub transport_policy: crate::config::TransportPolicy,
     pub kill_switch_policy: crate::config::KillSwitchPolicy,
     pub dns_leak_guard_policy: crate::config::DnsLeakGuardPolicy,
     pub requested_mtu: u16,
@@ -140,6 +141,7 @@ impl ClientDiagnostics {
                 tunnel_mode: config.tunnel_mode,
                 dns_policy: config.dns_policy,
                 ipv6_policy: config.ipv6_policy,
+                transport_policy: config.transport_policy,
                 kill_switch_policy: config.kill_switch_policy,
                 dns_leak_guard_policy: config.dns_leak_guard_policy,
                 requested_mtu: config.requested_mtu,
@@ -521,7 +523,7 @@ mod tests {
     use super::*;
     use crate::config::{
         ClientConfig, ConnectionProfile, DnsLeakGuardPolicy, DnsPolicy, Ipv6Policy,
-        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TunnelMode,
+        KillSwitchPolicy, MorphingPolicy, MtuPolicy, TransportPolicy, TunnelMode,
     };
 
     fn test_config(path: PathBuf) -> ClientConfig {
@@ -532,6 +534,7 @@ mod tests {
             dns_policy: DnsPolicy::Tunnel,
             ipv6_policy: Ipv6Policy::Tunnel,
             mtu_policy: MtuPolicy::Auto,
+            transport_policy: TransportPolicy::Udp,
             kill_switch_policy: KillSwitchPolicy::Soft,
             dns_leak_guard_policy: DnsLeakGuardPolicy::Warn,
             requested_mtu: 1380,

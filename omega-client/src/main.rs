@@ -15,10 +15,13 @@ use omega_core::chaos::ChaosPrng;
 use omega_core::crypto::{derive_flow_id, SessionKeys};
 use omega_core::protocol::*;
 use omega_core::replay::ReplayFilter;
-use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpStream, UdpSocket};
+use tokio::sync::Mutex as AsyncMutex;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{ClientConfig, DnsLeakGuardPolicy, MorphingPolicy, MtuPolicy};
+use crate::config::{ClientConfig, DnsLeakGuardPolicy, MorphingPolicy, MtuPolicy, TransportPolicy};
 use crate::diagnostics::{ClientDiagnostics, HealthCheckKind};
 
 const DEFAULT_SERVER: &str = "127.0.0.1:51820";
@@ -33,6 +36,92 @@ const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
 const REDUNDANCY_EXTRA_MAX: u8 = 2;
 const REDUNDANCY_DECAY_SECS: u64 = 8;
 const REDUNDANCY_PACING_US: u64 = 200;
+const TCP_FRAME_MAX: usize = 4096;
+
+#[derive(Clone)]
+enum ClientTransport {
+    Udp {
+        socket: Arc<UdpSocket>,
+        server_addr: SocketAddr,
+    },
+    Tcp(Arc<TcpClientTransport>),
+}
+
+struct TcpClientTransport {
+    reader: AsyncMutex<OwnedReadHalf>,
+    writer: AsyncMutex<OwnedWriteHalf>,
+    peer_addr: SocketAddr,
+}
+
+impl ClientTransport {
+    async fn send(&self, packet: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Udp {
+                socket,
+                server_addr,
+            } => {
+                socket.send_to(packet, *server_addr).await?;
+                Ok(())
+            }
+            Self::Tcp(tcp) => {
+                let mut writer = tcp.writer.lock().await;
+                write_tcp_frame(&mut *writer, packet).await?;
+                Ok(())
+            }
+        }
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> anyhow::Result<(usize, SocketAddr)> {
+        match self {
+            Self::Udp { socket, .. } => Ok(socket.recv_from(buf).await?),
+            Self::Tcp(tcp) => {
+                let mut reader = tcp.reader.lock().await;
+                let n = read_tcp_frame(&mut *reader, buf).await?;
+                Ok((n, tcp.peer_addr))
+            }
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Udp { .. } => "udp",
+            Self::Tcp(_) => "tcp",
+        }
+    }
+}
+
+async fn write_tcp_frame<W>(writer: &mut W, packet: &[u8]) -> std::io::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if packet.len() > u16::MAX as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TCP frame too large",
+        ));
+    }
+    writer
+        .write_all(&(packet.len() as u16).to_be_bytes())
+        .await?;
+    writer.write_all(packet).await
+}
+
+async fn read_tcp_frame<R>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 2];
+    reader.read_exact(&mut len_buf).await?;
+    let len = u16::from_be_bytes(len_buf) as usize;
+    if len == 0 || len > TCP_FRAME_MAX || len > buf.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid TCP frame length",
+        ));
+    }
+    reader.read_exact(&mut buf[..len]).await?;
+    Ok(len)
+}
 
 struct ClientState {
     retransmit_queue: RetransmitQueue,
@@ -239,8 +328,7 @@ fn build_encrypted_control_packet(
 }
 
 async fn run_path_mtu_probe(
-    udp: &UdpSocket,
-    server_addr: SocketAddr,
+    transport: &ClientTransport,
     flow_id: FlowId,
     shared_secret: &[u8],
     keys_send: &mut SessionKeys,
@@ -265,7 +353,7 @@ async fn run_path_mtu_probe(
             *candidate as usize,
         )?;
         probes_sent += 1;
-        udp.send_to(packet.as_ref(), server_addr).await?;
+        transport.send(packet.as_ref()).await?;
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         loop {
@@ -276,7 +364,7 @@ async fn run_path_mtu_probe(
                 break;
             }
 
-            let recv = tokio::time::timeout(remaining, udp.recv_from(&mut buf)).await;
+            let recv = tokio::time::timeout(remaining, transport.recv(&mut buf)).await;
             let Ok(Ok((n, _src))) = recv else {
                 break;
             };
@@ -610,6 +698,65 @@ async fn perform_handshake(
     ))
 }
 
+async fn perform_tcp_handshake(
+    server_addr: SocketAddr,
+    client_hello: &ClientHello,
+    config: &ClientConfig,
+) -> anyhow::Result<(HandshakeResult, ClientTransport)> {
+    let timeout_ms = config.handshake_timeout_ms;
+    let stream = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        TcpStream::connect(server_addr),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!("TCP connect to {server_addr} timed out after {timeout_ms} ms")
+    })??;
+    let peer_addr = stream.peer_addr().unwrap_or(server_addr);
+    let (mut reader, mut writer) = stream.into_split();
+
+    let txn_id: [u8; 12] = rand::random();
+    let request = StunWrapper::wrap_request(&txn_id, &client_hello.serialize());
+    let sent_at = Instant::now();
+    write_tcp_frame(&mut writer, &request).await?;
+    tracing::info!(%server_addr, "TCP handshake request sent");
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        read_tcp_frame(&mut reader, &mut buf),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("TCP handshake timed out after {timeout_ms} ms"))??;
+
+    let Some((is_request, resp_txn, resp_payload)) = StunWrapper::parse(&buf[..n]) else {
+        anyhow::bail!("malformed TCP handshake response");
+    };
+    if is_request || resp_txn != txn_id {
+        anyhow::bail!("unexpected TCP handshake transaction");
+    }
+
+    if let Some(hello) = ServerHello::deserialize(resp_payload) {
+        let transport = ClientTransport::Tcp(Arc::new(TcpClientTransport {
+            reader: AsyncMutex::new(reader),
+            writer: AsyncMutex::new(writer),
+            peer_addr,
+        }));
+        return Ok((
+            HandshakeResult {
+                hello,
+                rtt_ms: sent_at.elapsed().as_millis() as u64,
+            },
+            transport,
+        ));
+    }
+    if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
+        anyhow::bail!("TCP handshake rejected by server: {:?}", reject.reason);
+    }
+
+    anyhow::bail!("malformed TCP handshake response payload")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -711,15 +858,51 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let keepalive_secs = client_config.keepalive_secs;
-    let handshake = match perform_handshake(&udp, server_addr, &client_hello, &client_config).await
-    {
-        Ok(handshake) => handshake,
-        Err(err) => {
-            diagnostics.set_status("handshake_failed");
-            let _ = diagnostics.write_now();
-            return Err(err);
+    let udp_transport = ClientTransport::Udp {
+        socket: udp.clone(),
+        server_addr,
+    };
+    let (handshake, transport) = match client_config.transport_policy {
+        TransportPolicy::Udp => {
+            match perform_handshake(&udp, server_addr, &client_hello, &client_config).await {
+                Ok(handshake) => (handshake, udp_transport.clone()),
+                Err(err) => {
+                    diagnostics.set_status("handshake_failed");
+                    let _ = diagnostics.write_now();
+                    return Err(err);
+                }
+            }
+        }
+        TransportPolicy::Tcp => {
+            match perform_tcp_handshake(server_addr, &client_hello, &client_config).await {
+                Ok(result) => result,
+                Err(err) => {
+                    diagnostics.set_status("handshake_failed");
+                    let _ = diagnostics.write_now();
+                    return Err(err);
+                }
+            }
+        }
+        TransportPolicy::Auto => {
+            match perform_handshake(&udp, server_addr, &client_hello, &client_config).await {
+                Ok(handshake) => (handshake, udp_transport.clone()),
+                Err(udp_err) => {
+                    tracing::warn!(error = %udp_err, "UDP handshake failed; trying TCP fallback");
+                    match perform_tcp_handshake(server_addr, &client_hello, &client_config).await {
+                        Ok(result) => result,
+                        Err(tcp_err) => {
+                            diagnostics.set_status("handshake_failed");
+                            let _ = diagnostics.write_now();
+                            return Err(anyhow::anyhow!(
+                                "UDP handshake failed ({udp_err}); TCP fallback failed ({tcp_err})"
+                            ));
+                        }
+                    }
+                }
+            }
         }
     };
+    tracing::info!(transport = transport.label(), "transport selected");
     let server_hello = handshake.hello;
 
     let ct_array: &ml_kem::Ciphertext<MlKem768> = server_hello
@@ -747,8 +930,7 @@ async fn main() -> anyhow::Result<()> {
             server_hello.server_mtu
         }
         MtuPolicy::Auto => match run_path_mtu_probe(
-            &udp,
-            server_addr,
+            &transport,
             flow_id,
             ss_bytes,
             &mut keys_send,
@@ -867,7 +1049,8 @@ async fn main() -> anyhow::Result<()> {
     let ss_owned = ss_bytes.to_vec();
 
     let tun_r = tun.clone();
-    let udp_r = udp.clone();
+    let transport_send = transport.clone();
+    let transport_send_is_tcp = matches!(&transport_send, ClientTransport::Tcp(_));
     let flow_id_copy = flow_id;
     let state_send = state.clone();
     let diagnostics_send = diagnostics.clone();
@@ -916,7 +1099,7 @@ async fn main() -> anyhow::Result<()> {
                             s.retransmit_queue.cache_packet(seq, packet.clone(), now);
                             s.retransmit_queue.purge_expired(now);
                         }
-                        let _ = udp_r.send_to(packet.as_ref(), server_addr).await;
+                        let _ = transport_send.send(packet.as_ref()).await;
                     }
                 }
                 Some(nack) = nack_rx.recv() => {
@@ -954,7 +1137,7 @@ async fn main() -> anyhow::Result<()> {
                             s.retransmit_queue.purge_expired(now);
                         }
                         diagnostics_send.record_nack_sent();
-                        let _ = udp_r.send_to(packet.as_ref(), server_addr).await;
+                        let _ = transport_send.send(packet.as_ref()).await;
                     }
                 }
                 res = tun_r.recv(&mut buf) => {
@@ -978,7 +1161,11 @@ async fn main() -> anyhow::Result<()> {
                         s.rtp_timestamp = s.rtp_timestamp.wrapping_add(if is_small { 960 } else { 3000 });
                         let target_size = s.chaos.get_target_size() as usize;
                         let padding_budget = s.current_padding_budget();
-                        let redundancy_extra = s.current_redundancy_extra();
+                        let redundancy_extra = if transport_send_is_tcp {
+                            0
+                        } else {
+                            s.current_redundancy_extra()
+                        };
 
                         (
                             seq,
@@ -1033,13 +1220,13 @@ async fn main() -> anyhow::Result<()> {
                         s.retransmit_queue.purge_expired(now);
                     }
 
-                    if let Err(e) = udp_r.send_to(packet.as_ref(), server_addr).await {
-                        tracing::error!(error = %e, "UDP send failed");
+                    if let Err(e) = transport_send.send(packet.as_ref()).await {
+                        tracing::error!(error = %e, "transport send failed");
                     } else {
                         for _ in 0..redundancy_extra {
                             tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
-                            if let Err(e) = udp_r.send_to(packet.as_ref(), server_addr).await {
-                                tracing::trace!(error = %e, "UDP redundant send failed");
+                            if let Err(e) = transport_send.send(packet.as_ref()).await {
+                                tracing::trace!(error = %e, "transport redundant send failed");
                                 break;
                             }
                         }
@@ -1050,7 +1237,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let tun_w = tun.clone();
-    let udp_w = udp.clone();
+    let transport_recv = transport.clone();
     let ss_for_recv = ss_owned.clone();
     let state_recv = state.clone();
     let diagnostics_recv = diagnostics.clone();
@@ -1068,10 +1255,10 @@ async fn main() -> anyhow::Result<()> {
         let mut buf = vec![0u8; 2048];
 
         loop {
-            let (n, _src) = match udp_w.recv_from(&mut buf).await {
+            let (n, _src) = match transport_recv.recv(&mut buf).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::error!(error = %e, "UDP recv failed");
+                    tracing::error!(error = %e, "transport recv failed");
                     continue;
                 }
             };
@@ -1178,7 +1365,7 @@ async fn main() -> anyhow::Result<()> {
                                         let packets_len = packets.len();
                                         diagnostics_recv.record_retransmits(packets_len);
                                         for (idx, pkt) in packets.into_iter().enumerate() {
-                                            let _ = udp_w.send_to(pkt.as_ref(), server_addr).await;
+                                            let _ = transport_recv.send(pkt.as_ref()).await;
                                             if idx + 1 < packets_len {
                                                 tokio::time::sleep(Duration::from_micros(
                                                     RETRANSMIT_PACING_US,
@@ -1253,5 +1440,18 @@ mod tests {
         let candidates = mtu_probe_candidates(1380);
 
         assert_eq!(candidates, vec![1380, 1360, 1320, 1280, 1200]);
+    }
+
+    #[tokio::test]
+    async fn tcp_frame_helpers_round_trip_packet_bytes() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let packet = vec![1, 2, 3, 4, 5];
+
+        write_tcp_frame(&mut client, &packet).await.unwrap();
+
+        let mut out = [0u8; 16];
+        let n = read_tcp_frame(&mut server, &mut out).await.unwrap();
+        assert_eq!(n, packet.len());
+        assert_eq!(&out[..n], packet.as_slice());
     }
 }

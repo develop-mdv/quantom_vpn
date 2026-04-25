@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use omega_core::arq::{GapDetector, LossEstimator, RetransmitQueue};
 use omega_core::chaos::ChaosPrng;
@@ -10,6 +11,7 @@ use omega_core::crypto::SessionKeys;
 use omega_core::protocol::{FlowId, NackMessage};
 use omega_core::replay::ReplayFilter;
 use serde::Serialize;
+use tokio::sync::mpsc;
 
 #[cfg(feature = "fec")]
 use omega_core::raptorq_mgr::{FecConfig, FecDecoder, FecState};
@@ -49,6 +51,7 @@ pub struct SessionState {
     pub ssrc: u32,
     pub morphing_policy: crate::runtime::MorphingPolicy,
     pub client_addr: SocketAddr,
+    pub tcp_egress: Option<mpsc::Sender<Bytes>>,
     pub tunnel_ip: Ipv4Addr,
     pub tunnel_ipv6: Option<Ipv6Addr>,
     pub user_id: String,
@@ -104,6 +107,7 @@ impl SessionState {
             ssrc,
             morphing_policy,
             client_addr,
+            tcp_egress: None,
             tunnel_ip,
             tunnel_ipv6,
             user_id,
@@ -184,6 +188,14 @@ impl SessionState {
 
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
+    }
+
+    pub fn set_tcp_egress(&mut self, tx: mpsc::Sender<Bytes>) {
+        self.tcp_egress = Some(tx);
+    }
+
+    pub fn clear_tcp_egress(&mut self) {
+        self.tcp_egress = None;
     }
 
     pub fn current_padding_budget(&mut self) -> usize {

@@ -69,6 +69,8 @@ async fn run_server() -> anyhow::Result<()> {
     let profile = runtime::ServerProfile::from_env();
     let morphing_policy = runtime::MorphingPolicy::from_env(profile);
     let bind_addr = std::env::var("OMEGA_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
+    let tcp_enabled = env_bool("OMEGA_TCP_ENABLE");
+    let tcp_bind = env_string("OMEGA_TCP_BIND").unwrap_or_else(|| bind_addr.clone());
     let metrics_bind = resolve_bind(
         "OMEGA_METRICS_BIND",
         "OMEGA_METRICS_PUBLIC",
@@ -141,7 +143,11 @@ async fn run_server() -> anyhow::Result<()> {
         tunnel_mtu,
         udp_rcvbuf,
         udp_sndbuf,
-        transport: "udp".to_string(),
+        transport: if tcp_enabled {
+            "udp,tcp".to_string()
+        } else {
+            "udp".to_string()
+        },
         tunnel_family: if ipv6_mode.is_enabled() {
             "dual_stack".to_string()
         } else {
@@ -227,6 +233,30 @@ async fn run_server() -> anyhow::Result<()> {
         )
         .await;
     });
+
+    if tcp_enabled {
+        let tun_tcp = tun.clone();
+        let udp_tcp = udp.clone();
+        let sessions_tcp = session_manager.clone();
+        let identity_tcp = identity_store.clone();
+        let tcp_bind_addr = tcp_bind.clone();
+        tokio::spawn(async move {
+            if let Err(err) = datapath::tcp_listener_loop(
+                tcp_bind_addr,
+                tun_tcp,
+                udp_tcp,
+                sessions_tcp,
+                identity_tcp,
+                tunnel_mtu,
+                allow_legacy_v1,
+                morphing_policy,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "TCP fallback listener stopped");
+            }
+        });
+    }
 
     tracing::info!("data path running, press Ctrl+C to stop");
     tokio::signal::ctrl_c().await?;

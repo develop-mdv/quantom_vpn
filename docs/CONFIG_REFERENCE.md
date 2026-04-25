@@ -40,14 +40,15 @@
 | Переменная | Default | Значение |
 | --- | --- | --- |
 | `OMEGA_TUN_MTU` | по профилю | MTU туннеля. `gaming=1380`, `general=1360`, `restricted=1280`, затем clamp `1200..1420`. |
+| `OMEGA_TRANSPORT` | `udp` | `udp`, `tcp`, `auto`. `udp` остается основным быстрым режимом; `tcp` использует framed TCP fallback; `auto` сначала пробует UDP handshake, затем TCP. |
 | `OMEGA_MTU_POLICY` | `auto` | `auto` включает encrypted PMTU probe после handshake и до создания TUN; `fixed` использует negotiated MTU без probe. |
 | `OMEGA_MTU_PROBE_TIMEOUT_MS` | `450` | Timeout каждого PMTU probe-кандидата, clamp `150..2000`. |
 | `OMEGA_KEEPALIVE_SECS` | по профилю | Интервал keepalive. `gaming=25`, `general=15`, `restricted=10`, минимум `5`. |
 | `OMEGA_DNS_POLICY` | зависит от tunnel mode | `tunnel` для full-tunnel по умолчанию, `system` для split-tunnel. |
 | `OMEGA_DNS_SERVERS` | `1.1.1.1,8.8.8.8` | DNS servers для tunnel DNS policy. Поддерживаются IPv4 и IPv6 адреса. |
 | `OMEGA_IPV6_POLICY` | зависит от tunnel mode | `disabled` для full-tunnel, `passthrough` для split-tunnel. Можно явно включить `tunnel`, чтобы клиент поднимал dual-stack TUN, принимал IPv6 lease из handshake и ставил IPv6 routes на Windows/Linux/macOS. |
-| `OMEGA_DNS_LEAK_GUARD` | `warn` | `off`, `warn`, `strict`. В `strict` клиент падает, если tunnel DNS нельзя назначить; в `warn` продолжает работу и помечает diagnostics degraded. |
-| `OMEGA_KILL_SWITCH` | `soft` | `off`, `soft`, `strict`. Сейчас `soft` включает self-heal stale route cleanup и fail-fast при полунастроенной маршрутизации; strict зарезервирован для opt-in hard blocking. |
+| `OMEGA_DNS_LEAK_GUARD` | `warn` | `off`, `warn`, `strict`. В `strict` клиент не продолжает работу, если tunnel DNS нельзя назначить или readback не подтверждает ожидаемые DNS. В `warn` пишет warning/diagnostics degraded и продолжает. |
+| `OMEGA_KILL_SWITCH` | `soft` | `off`, `soft`, `strict`. `strict` сейчас поддержан только на Windows full-tunnel: клиент чистит stale routes/firewall rules, fail-fast'ит unsupported modes и блокирует DNS на физических адаптерах. Linux/macOS strict пока намеренно fail-fast. |
 | `OMEGA_NETWORK_DIAG` | `true` | Включает post-connect UDP DNS diagnostic. |
 | `OMEGA_DIAGNOSTICS_PATH` | `omega-client/state/diagnostics.json` | Путь к JSON diagnostics snapshot. |
 
@@ -66,6 +67,8 @@
 | Переменная | Default | Значение |
 | --- | --- | --- |
 | `OMEGA_BIND` | `0.0.0.0:51820` | UDP bind address сервера. |
+| `OMEGA_TCP_ENABLE` | `false` в коде, `1` в production unit | Включает framed TCP fallback listener. UDP остается основным datapath. |
+| `OMEGA_TCP_BIND` | значение `OMEGA_BIND` | Bind address framed TCP fallback listener, например `[::]:443`. |
 | `OMEGA_PROFILE` | `gaming` | Профиль сервера: `gaming`, `general`, `restricted`. |
 | `OMEGA_MORPHING` | profile-based | `full`, `balanced`, `off`. Default рассчитывается от профиля. |
 | `OMEGA_TUN_MTU` | по профилю | MTU серверного TUN. |
@@ -108,7 +111,9 @@
 | `OMEGA_CLIENT_CIDR` | `10.7.0.0/16` | Подсеть VPN-клиентов для NAT и forward rules. |
 | `OMEGA_CLIENT_CIDR_V6` | `fd70:7::/64` | IPv6 prefix VPN-клиентов для NAT66 и forward rules. |
 | `OMEGA_VPN_PORT` | `443` | Публичный VPN port для firewall/bootstrap. |
-| `OMEGA_VPN_PROTO` | `udp` | Текущий datapath должен оставаться `udp`. |
+| `OMEGA_VPN_PROTO` | `udp` | Primary datapath должен оставаться `udp`; framed TCP fallback включается отдельными `OMEGA_TCP_*`. |
+| `OMEGA_TCP_ENABLE` | `1` | Открывать и проверять framed TCP fallback port в nftables/diagnostics. |
+| `OMEGA_TCP_PORT` | `OMEGA_VPN_PORT` | Публичный TCP fallback port для firewall/bootstrap. Должен совпадать с портом в `OMEGA_TCP_BIND`. |
 | `OMEGA_VPN_IPV6_MODE` | `disabled` | `disabled` или `nat66` для deploy-скриптов. В `nat66` скрипты включают IPv6 forwarding, `ip6` forward rules и NAT66 для `OMEGA_CLIENT_CIDR_V6`. |
 | `OMEGA_SSH_PORT` | `22` | SSH port, который нельзя потерять при bootstrap. |
 | `OMEGA_ADMIN_WEB_PUBLIC` | `0` | Публиковать ли built-in admin web наружу. |
@@ -141,6 +146,7 @@
 - Самый важный production override на сервере - это `OMEGA_TOKEN_PEPPER`.
 - Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`, `OMEGA_SPLIT_ROUTES_V6` или обе переменные сразу.
 - Для полноценного inner IPv6 нужно согласованно включать `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте.
+- Для TCP fallback нужно включить серверный listener (`OMEGA_TCP_ENABLE=1`, `OMEGA_TCP_BIND=[::]:443`), открыть порт через `setup_nat.sh`, а на клиенте выбрать `OMEGA_TRANSPORT=tcp` или `auto`.
 - `OMEGA_PROFILE=gaming` теперь по умолчанию выбирает `OMEGA_MORPHING=off`, чтобы не тратить throughput на padding и лишнюю избыточность.
 - Если `OMEGA_MORPHING=off`, latency и throughput обычно становятся лучше, но traffic cover будет слабее.
 - `OMEGA_ALLOW_LEGACY_V1` не стоит считать полноценной backward compatibility feature.

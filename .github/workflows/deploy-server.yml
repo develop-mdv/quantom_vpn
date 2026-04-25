@@ -179,6 +179,8 @@ jobs:
           DEPLOY_CLIENT_CIDR_V6: ${{ secrets.DEPLOY_CLIENT_CIDR_V6 }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_TCP_ENABLE_VALUE: ${{ secrets.DEPLOY_TCP_ENABLE }}
+          DEPLOY_TCP_PORT_VALUE: ${{ secrets.DEPLOY_TCP_PORT }}
           DEPLOY_VPN_IPV6_MODE_VALUE: ${{ secrets.DEPLOY_VPN_IPV6_MODE }}
           DEPLOY_ADMIN_WEB_PUBLIC_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PUBLIC }}
           DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
@@ -195,6 +197,8 @@ jobs:
           CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_ENABLE="$(printf '%s' "${DEPLOY_TCP_ENABLE_VALUE:-1}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_PORT="$(printf '%s' "${DEPLOY_TCP_PORT_VALUE:-$VPN_PORT}" | tr -d '\r\n\t ')"
           VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
           ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
@@ -208,6 +212,8 @@ jobs:
                OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
                OMEGA_VPN_PORT='$VPN_PORT' \
                OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_TCP_ENABLE='$TCP_ENABLE' \
+               OMEGA_TCP_PORT='$TCP_PORT' \
                OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
                OMEGA_SSH_PORT='${PORT}' \
                OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \
@@ -224,6 +230,8 @@ jobs:
           DEPLOY_CLIENT_CIDR_V6: ${{ secrets.DEPLOY_CLIENT_CIDR_V6 }}
           DEPLOY_VPN_PORT_VALUE: ${{ secrets.DEPLOY_VPN_PORT }}
           DEPLOY_VPN_PROTOCOL_VALUE: ${{ secrets.DEPLOY_VPN_PROTOCOL }}
+          DEPLOY_TCP_ENABLE_VALUE: ${{ secrets.DEPLOY_TCP_ENABLE }}
+          DEPLOY_TCP_PORT_VALUE: ${{ secrets.DEPLOY_TCP_PORT }}
           DEPLOY_VPN_IPV6_MODE_VALUE: ${{ secrets.DEPLOY_VPN_IPV6_MODE }}
           DEPLOY_ADMIN_WEB_PUBLIC_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PUBLIC }}
           DEPLOY_ADMIN_WEB_PORT_VALUE: ${{ secrets.DEPLOY_ADMIN_WEB_PORT }}
@@ -240,6 +248,8 @@ jobs:
           CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
           VPN_PORT="$(printf '%s' "${DEPLOY_VPN_PORT_VALUE:-443}" | tr -d '\r\n\t ')"
           VPN_PROTOCOL="$(printf '%s' "${DEPLOY_VPN_PROTOCOL_VALUE:-udp}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_ENABLE="$(printf '%s' "${DEPLOY_TCP_ENABLE_VALUE:-1}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
+          TCP_PORT="$(printf '%s' "${DEPLOY_TCP_PORT_VALUE:-$VPN_PORT}" | tr -d '\r\n\t ')"
           VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
           ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
@@ -256,6 +266,14 @@ jobs:
 
           if [ -z "$VPN_PROTOCOL" ]; then
             VPN_PROTOCOL="udp"
+          fi
+
+          if [ -z "$TCP_ENABLE" ]; then
+            TCP_ENABLE="1"
+          fi
+
+          if [ -z "$TCP_PORT" ]; then
+            TCP_PORT="$VPN_PORT"
           fi
 
           if [ -z "$VPN_IPV6_MODE" ]; then
@@ -290,6 +308,8 @@ jobs:
                OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
                OMEGA_VPN_PORT='$VPN_PORT' \
                OMEGA_VPN_PROTO='$VPN_PROTOCOL' \
+               OMEGA_TCP_ENABLE='$TCP_ENABLE' \
+               OMEGA_TCP_PORT='$TCP_PORT' \
                OMEGA_VPN_IPV6_MODE='$VPN_IPV6_MODE' \
                OMEGA_SSH_PORT='${PORT}' \
                OMEGA_ADMIN_WEB_PUBLIC='$ADMIN_WEB_PUBLIC' \

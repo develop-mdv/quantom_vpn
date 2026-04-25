@@ -11,6 +11,8 @@ WorkingDirectory=/opt/omega
 ExecStart=/opt/omega/omega-server
 Environment=RUST_LOG=info
 Environment=OMEGA_BIND=[::]:443
+Environment=OMEGA_TCP_ENABLE=1
+Environment=OMEGA_TCP_BIND=[::]:443
 Environment=OMEGA_PROFILE=gaming
 Environment=OMEGA_TUN_MTU=1380
 Environment=OMEGA_IPV6_MODE=nat66

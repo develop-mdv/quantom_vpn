@@ -225,6 +225,30 @@ impl DnsLeakGuardPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportPolicy {
+    Udp,
+    Tcp,
+    Auto,
+}
+
+impl TransportPolicy {
+    pub fn from_raw(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tcp" | "tcp_fallback" | "tcp-fallback" => Self::Tcp,
+            "auto" | "fallback" => Self::Auto,
+            _ => Self::Udp,
+        }
+    }
+
+    fn from_env(default: Self) -> Self {
+        std::env::var("OMEGA_TRANSPORT")
+            .map(|value| Self::from_raw(&value))
+            .unwrap_or(default)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Ipv4Route {
     pub cidr: String,
@@ -341,6 +365,7 @@ pub struct ClientConfig {
     pub dns_policy: DnsPolicy,
     pub ipv6_policy: Ipv6Policy,
     pub mtu_policy: MtuPolicy,
+    pub transport_policy: TransportPolicy,
     pub kill_switch_policy: KillSwitchPolicy,
     pub dns_leak_guard_policy: DnsLeakGuardPolicy,
     pub requested_mtu: u16,
@@ -435,6 +460,7 @@ impl ClientConfig {
             dns_policy: DnsPolicy::from_env(dns_policy_default),
             ipv6_policy: Ipv6Policy::from_env(ipv6_policy_default),
             mtu_policy: MtuPolicy::from_env(MtuPolicy::Auto),
+            transport_policy: TransportPolicy::from_env(TransportPolicy::Udp),
             kill_switch_policy: KillSwitchPolicy::from_env(KillSwitchPolicy::Soft),
             dns_leak_guard_policy: DnsLeakGuardPolicy::from_env(DnsLeakGuardPolicy::Warn),
             requested_mtu,
@@ -547,6 +573,14 @@ mod tests {
         assert!(matches!(
             DnsLeakGuardPolicy::from_raw("warn"),
             DnsLeakGuardPolicy::Warn
+        ));
+        assert!(matches!(
+            TransportPolicy::from_raw("auto"),
+            TransportPolicy::Auto
+        ));
+        assert!(matches!(
+            TransportPolicy::from_raw("tcp"),
+            TransportPolicy::Tcp
         ));
     }
 }
