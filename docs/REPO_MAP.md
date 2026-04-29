@@ -11,6 +11,7 @@
 - `resource_budget.md` - ресурсные оценки и пропускная способность.
 - `.env.example` - пример env для клиента.
 - `start_client.bat` - Windows entrypoint для клиента.
+- `omega-client-app/` - WPF/.NET Windows GUI, setup app и package script для portable/installer артефактов.
 - `docker-compose.yml` и `Dockerfile.dev` - dev container / local Linux sandbox.
 
 ## `omega-core/`
@@ -76,6 +77,23 @@
 - нужно поменять split/full tunnel behavior;
 - нужно править Windows routes/DNS/IPv6 guard;
 - нужно расширить diagnostics.
+
+## `omega-client-app/`
+
+Windows GUI поверх существующего клиента.
+
+- `src/Omega.Client.App.Core/` - настройки, validation, env generation, diagnostics mapping, lifecycle/control helpers.
+- `src/Omega.Client.App/` - WPF окно, tray icon, connect/disconnect workflow.
+- `src/Omega.Client.Setup/` - setup executable для копирования payload в `%ProgramFiles%\Omega VPN`, ярлыков и scheduled task.
+- `tests/Omega.Client.App.Tests/` - offline console test harness без внешних NuGet test packages.
+- `package-windows-client.ps1` - сборка portable и installer package.
+
+Когда идти сюда:
+
+- меняется Windows GUI;
+- меняется упаковка portable/installer;
+- нужно поменять UX connect/disconnect;
+- нужно расширить отображение diagnostics без изменения VPN datapath.
 
 ## `deploy/`
 

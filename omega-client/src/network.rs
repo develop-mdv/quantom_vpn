@@ -98,24 +98,14 @@ fn parse_windows_route_print_ipv4(
     target: Ipv4Addr,
 ) -> Option<WindowsRoutePrintLookup> {
     let target = u32::from(target);
-    let mut in_active_routes = false;
     let mut best: Option<(u32, u32, WindowsRoutePrintLookup)> = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case("Active Routes:") {
-            in_active_routes = true;
-            continue;
-        }
-        if !in_active_routes {
-            continue;
-        }
-        if trimmed.starts_with("Persistent Routes:") || trimmed.starts_with("===") {
-            break;
-        }
         if trimmed.is_empty()
             || trimmed.starts_with("Network Destination")
             || trimmed.eq_ignore_ascii_case("None")
+            || trimmed.starts_with("===")
         {
             continue;
         }
@@ -1676,6 +1666,34 @@ Network Destination        Netmask          Gateway       Interface  Metric
       192.168.1.0    255.255.255.0         On-link       192.168.1.4    311
 ===========================================================================
 Persistent Routes:
+  None
+",
+            "72.56.88.224".parse().unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(lookup.interface_addr, Ipv4Addr::new(192, 168, 1, 4));
+        assert_eq!(lookup.gateway.as_deref(), Some("192.168.1.1"));
+    }
+
+    #[test]
+    fn parses_windows_route_print_ipv4_without_english_active_routes_header() {
+        let lookup = parse_windows_route_print_ipv4(
+            "\
+===========================================================================
+Interface List
+ 16...04 92 26 15 4e 53 ......Realtek PCIe GbE Family Controller #2
+===========================================================================
+
+IPv4 Route Table
+===========================================================================
+Localized Active Routes Header:
+Network Destination        Netmask          Gateway       Interface  Metric
+          0.0.0.0          0.0.0.0      192.168.1.1      192.168.1.4     55
+     72.56.88.224  255.255.255.255      192.168.1.1      192.168.1.4     56
+      192.168.1.0    255.255.255.0         On-link       192.168.1.4    311
+===========================================================================
+Localized Persistent Routes Header:
   None
 ",
             "72.56.88.224".parse().unwrap(),

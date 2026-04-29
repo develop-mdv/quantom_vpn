@@ -64,6 +64,35 @@ OMEGA_DEVICE_NAME="laptop" \
 cargo run -p omega-client
 ```
 
+## Windows GUI client
+
+Для пользовательского запуска на Windows есть отдельная WPF-оболочка
+`omega-client-app`. Она не заменяет VPN runtime, а запускает существующий
+`omega-client.exe`, сама формирует env-настройки, читает diagnostics и просит
+runtime остановиться через `OMEGA_CONTROL_PATH`.
+
+Сборка portable и installer package:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client.ps1
+```
+
+Результат:
+
+- `omega-client-app/artifacts/windows-client/portable/OmegaVPN`
+- `omega-client-app/artifacts/windows-client/installer`
+
+Portable-папку удобно использовать для тестов: запустить `Omega.Client.App.exe`
+от имени администратора, заполнить server/device id/token и нажать
+`Подключить`.
+
+GUI-клиент по умолчанию запускает runtime с `OMEGA_IPV6_POLICY=tunnel`, поэтому
+IPv6-трафик идет через туннель при серверном `OMEGA_IPV6_MODE=nat66`.
+
+Installer package содержит `Omega.Client.Setup.exe` и `payload/`. Setup копирует
+payload в `%ProgramFiles%\Omega VPN`, создает ярлыки и scheduled task для
+elevated autostart.
+
 ## Windows-клиент через `.env`
 
 Рекомендуемый путь:

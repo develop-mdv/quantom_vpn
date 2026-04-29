@@ -51,6 +51,7 @@
 | `OMEGA_KILL_SWITCH` | `soft` | `off`, `soft`, `strict`. `strict` сейчас поддержан только на Windows full-tunnel: клиент чистит stale routes/firewall rules, fail-fast'ит unsupported modes и блокирует DNS на физических адаптерах. Linux/macOS strict пока намеренно fail-fast. |
 | `OMEGA_NETWORK_DIAG` | `true` | Включает post-connect UDP DNS diagnostic. |
 | `OMEGA_DIAGNOSTICS_PATH` | `omega-client/state/diagnostics.json` | Путь к JSON diagnostics snapshot. |
+| `OMEGA_CONTROL_PATH` | не задан | Optional JSON control file. Windows GUI пишет `{"command":"stop"}`, чтобы клиент вышел через штатный cleanup вместо принудительного kill. |
 
 ### Handshake retry policy
 

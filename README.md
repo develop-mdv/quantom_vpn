@@ -7,6 +7,7 @@
 - `omega-core`: wire protocol, crypto, anti-replay, ARQ, chaos-based packet morphing, FEC primitives.
 - `omega-server`: UDP server runtime, TUN, identity store, session manager, web admin, metrics, snapshots.
 - `omega-client`: client runtime, dual-stack handshake/TUN, Windows/Linux/macOS routing and DNS orchestration, diagnostics.
+- `omega-client-app`: Windows GUI поверх `omega-client.exe`, portable package и setup package.
 
 ## Важная честная оговорка по текущему состоянию
 
@@ -68,6 +69,21 @@ OMEGA_DEVICE_TOKEN=<device_token_hex> \
 OMEGA_DEVICE_NAME="laptop" \
 cargo run -p omega-client
 ```
+
+### Windows GUI
+
+Для обычного пользователя есть WPF-клиент:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client.ps1
+```
+
+Артефакты:
+
+- `omega-client-app/artifacts/windows-client/portable/OmegaVPN` - portable-папка для тестов.
+- `omega-client-app/artifacts/windows-client/installer` - setup package с `Omega.Client.Setup.exe` и `payload/`.
+
+GUI требует права администратора, как и `start_client.bat`, потому что Windows-клиент управляет Wintun, routes, DNS и kill switch.
 
 ## Ключевые runtime-файлы
 

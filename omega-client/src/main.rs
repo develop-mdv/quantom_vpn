@@ -1,8 +1,10 @@
 mod config;
+mod control;
 mod diagnostics;
 mod network;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1393,8 +1395,29 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    tracing::info!("data path running, press Ctrl+C to stop");
-    tokio::signal::ctrl_c().await?;
+    tracing::info!("data path running, press Ctrl+C or send control stop to stop");
+    if let Ok(control_path) = std::env::var("OMEGA_CONTROL_PATH") {
+        let control_path = control_path.trim();
+        if control_path.is_empty() {
+            tokio::signal::ctrl_c().await?;
+        } else {
+            tokio::select! {
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    tracing::info!("Ctrl+C received");
+                }
+                control_result = control::wait_for_stop(
+                    PathBuf::from(control_path),
+                    Duration::from_millis(500),
+                ) => {
+                    control_result?;
+                    tracing::info!("control stop requested");
+                }
+            }
+        }
+    } else {
+        tokio::signal::ctrl_c().await?;
+    }
     diagnostics.set_status("stopping");
     tracing::info!("shutting down");
 

@@ -8,6 +8,10 @@
 .DS_Store
 .idea/
 .vscode/
+.dotnet-home/
+.nuget-packages/
+**/bin/
+**/obj/
 
 # Binaries
 #*.dll
@@ -16,5 +20,7 @@
 wintun_temp/
 state/
 omega-client/state/
+omega-client-app/artifacts/
+omega-client-app/omega-client/state/
 relese_plan/
 wfp_filters.xml
