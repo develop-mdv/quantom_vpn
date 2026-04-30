@@ -359,7 +359,7 @@ public partial class MainWindow : Window
     {
         trayIcon = new Forms.NotifyIcon
         {
-            Icon = SystemIcons.Shield,
+            Icon = LoadTrayIcon(),
             Text = "Omega VPN",
             Visible = true,
             ContextMenuStrip = new Forms.ContextMenuStrip(),
@@ -399,6 +399,20 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Activate();
+    }
+
+    private static Icon LoadTrayIcon()
+    {
+        var resource = System.Windows.Application.GetResourceStream(
+            new Uri("pack://application:,,,/Assets/omega-vpn.ico", UriKind.Absolute));
+        if (resource is null)
+        {
+            return SystemIcons.Shield;
+        }
+
+        using var stream = resource.Stream;
+        using var icon = new Icon(stream);
+        return (Icon)icon.Clone();
     }
 
     private void OpenLog()
