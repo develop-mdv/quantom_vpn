@@ -48,4 +48,26 @@ public sealed class ConnectionSettings
 
     [JsonPropertyName("autostart")]
     public bool Autostart { get; set; }
+
+    public ConnectionSettings Clone()
+    {
+        return new ConnectionSettings
+        {
+            ServerEndpoint = ServerEndpoint,
+            DeviceId = DeviceId,
+            DeviceToken = DeviceToken,
+            DeviceName = DeviceName,
+            Profile = Profile,
+            Transport = Transport,
+            TunnelMode = TunnelMode,
+            MtuPolicy = MtuPolicy,
+            DnsPolicy = DnsPolicy,
+            DnsServers = DnsServers,
+            Ipv6Policy = Ipv6Policy,
+            KillSwitch = KillSwitch,
+            DnsLeakGuard = DnsLeakGuard,
+            NetworkDiagnostics = NetworkDiagnostics,
+            Autostart = Autostart,
+        };
+    }
 }

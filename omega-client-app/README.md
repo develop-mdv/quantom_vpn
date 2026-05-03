@@ -15,6 +15,10 @@ Closing the main window while the VPN runtime is active hides the app to the
 Windows tray. Use the tray menu to open the window again or exit after a
 graceful disconnect.
 
+The main connection screen uses one field: a connection code. It accepts either
+`omega://connect/<base64url-json>` or pasted `OMEGA_*` env text, then saves the
+connection as a selectable profile.
+
 ## Build
 
 ```powershell

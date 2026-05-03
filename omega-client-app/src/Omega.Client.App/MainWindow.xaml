@@ -104,14 +104,42 @@
 
                 <Border Background="{StaticResource PanelBrush}" CornerRadius="8" Padding="20" Margin="0,0,0,16">
                     <StackPanel>
-                        <TextBlock Text="Сервер" Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBox x:Name="ServerBox" ToolTip="Например 203.0.113.1:443" />
+                        <TextBlock Text="Профиль" Foreground="{StaticResource MutedTextBrush}" />
+                        <Grid Margin="0,6,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="96" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="ProfileBox"
+                                      Margin="0"
+                                      SelectionChanged="ProfileBox_SelectionChanged" />
+                            <Button Grid.Column="1"
+                                    x:Name="DeleteProfileButton"
+                                    Content="Удалить"
+                                    Margin="10,0,0,0"
+                                    MinHeight="38"
+                                    Padding="10,6"
+                                    FontSize="13"
+                                    Background="#2D3944"
+                                    Foreground="{StaticResource TextBrush}"
+                                    Click="DeleteProfileButton_Click" />
+                        </Grid>
 
-                        <TextBlock Text="ID устройства" Foreground="{StaticResource MutedTextBrush}" />
-                        <TextBox x:Name="DeviceIdBox" />
+                        <TextBlock Text="Код подключения" Foreground="{StaticResource MutedTextBrush}" />
+                        <TextBox x:Name="ConnectionCodeBox"
+                                 MinHeight="78"
+                                 MaxHeight="120"
+                                 TextWrapping="Wrap"
+                                 AcceptsReturn="True"
+                                 VerticalScrollBarVisibility="Auto"
+                                 ToolTip="Вставьте omega://connect/... или OMEGA_* настройки" />
 
-                        <TextBlock Text="Token" Foreground="{StaticResource MutedTextBrush}" />
-                        <PasswordBox x:Name="DeviceTokenBox" />
+                        <Button x:Name="SaveCodeButton"
+                                Content="Добавить код"
+                                Background="#2D3944"
+                                Foreground="{StaticResource TextBrush}"
+                                Margin="0,0,0,10"
+                                Click="SaveCodeButton_Click" />
 
                         <Button x:Name="ConnectButton"
                                 Content="Подключить"

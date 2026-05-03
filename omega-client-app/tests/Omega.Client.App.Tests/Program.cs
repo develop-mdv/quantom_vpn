@@ -8,7 +8,10 @@ var tests = new (string Name, Action Body)[]
     ("diagnostics keep handshake connected state as connecting", DiagnosticsKeepIntermediateConnectedAsConnecting),
     ("lifecycle store writes readable json", LifecycleStoreWritesJson),
     ("control file writes stop command", ControlFileWritesStopCommand),
-    ("config store round trips settings", ConfigStoreRoundTripsSettings),
+    ("connection code parses compact omega url", ConnectionCodeParsesCompactOmegaUrl),
+    ("connection code parses env paste", ConnectionCodeParsesEnvPaste),
+    ("config store migrates legacy settings into saved profile", ConfigStoreMigratesLegacySettingsIntoSavedProfile),
+    ("config store round trips saved profiles", ConfigStoreRoundTripsSavedProfiles),
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
     ("window close hides to tray while runtime is active", WindowCloseHidesToTrayWhileRuntimeIsActive),
     ("autostart task builds scheduler arguments", AutostartTaskBuildsSchedulerArguments),
@@ -158,12 +161,55 @@ static void ControlFileWritesStopCommand()
     True(raw.Contains("\"command\": \"stop\"", StringComparison.Ordinal), "stop command was not written");
 }
 
-static void ConfigStoreRoundTripsSettings()
+static void ConnectionCodeParsesCompactOmegaUrl()
+{
+    var expected = new ConnectionSettings
+    {
+        ServerEndpoint = "203.0.113.1:443",
+        DeviceId = "11111111-2222-3333-4444-555555555555",
+        DeviceToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        DeviceName = "office-pc",
+        Transport = "auto",
+    };
+
+    var code = ConnectionCode.Create(expected, "Office");
+    var parsed = ConnectionCodeParser.Parse(code);
+
+    True(parsed.Success, parsed.ErrorMessage ?? "connection code failed");
+    Equal("Office", parsed.ProfileName);
+    Equal(expected.ServerEndpoint, parsed.Settings!.ServerEndpoint);
+    Equal(expected.DeviceId, parsed.Settings.DeviceId);
+    Equal(expected.DeviceToken, parsed.Settings.DeviceToken);
+    Equal(expected.DeviceName, parsed.Settings.DeviceName);
+    Equal("tunnel", parsed.Settings.Ipv6Policy);
+}
+
+static void ConnectionCodeParsesEnvPaste()
+{
+    var code = """
+    OMEGA_SERVER=198.51.100.10:443
+    OMEGA_DEVICE_ID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+    OMEGA_DEVICE_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    OMEGA_DEVICE_NAME=Home Laptop
+    OMEGA_TRANSPORT=tcp
+    """;
+
+    var parsed = ConnectionCodeParser.Parse(code);
+
+    True(parsed.Success, parsed.ErrorMessage ?? "env paste failed");
+    Equal("198.51.100.10:443", parsed.Settings!.ServerEndpoint);
+    Equal("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", parsed.Settings.DeviceId);
+    Equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", parsed.Settings.DeviceToken);
+    Equal("Home Laptop", parsed.Settings.DeviceName);
+    Equal("tcp", parsed.Settings.Transport);
+}
+
+static void ConfigStoreMigratesLegacySettingsIntoSavedProfile()
 {
     var root = Path.Combine(Path.GetTempPath(), "omega-config-test-" + Guid.NewGuid().ToString("N"));
     var paths = ClientPaths.ForPortableRoot(root);
-    var store = new ConfigStore(paths);
-    var expected = new ConnectionSettings
+    Directory.CreateDirectory(paths.StateDirectory);
+    var legacy = new ConnectionSettings
     {
         ServerEndpoint = "198.51.100.10:443",
         DeviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
@@ -172,16 +218,60 @@ static void ConfigStoreRoundTripsSettings()
         Transport = "tcp",
         Autostart = true,
     };
+    File.WriteAllText(paths.ConfigPath, $$"""
+    {
+      "server_endpoint": "{{legacy.ServerEndpoint}}",
+      "device_id": "{{legacy.DeviceId}}",
+      "device_token": "{{legacy.DeviceToken}}",
+      "device_name": "{{legacy.DeviceName}}",
+      "transport": "{{legacy.Transport}}",
+      "autostart": true
+    }
+    """);
 
-    store.Save(expected);
-    var actual = store.Load();
+    var store = new ConfigStore(paths);
+    var state = store.LoadState();
 
-    Equal(expected.ServerEndpoint, actual.ServerEndpoint);
-    Equal(expected.DeviceId, actual.DeviceId);
-    Equal(expected.DeviceToken, actual.DeviceToken);
-    Equal(expected.DeviceName, actual.DeviceName);
-    Equal(expected.Transport, actual.Transport);
-    Equal(expected.Autostart, actual.Autostart);
+    Equal(1, state.Profiles.Count);
+    Equal(state.Profiles[0].Id, state.SelectedProfileId);
+    Equal("workstation", state.Profiles[0].Name);
+    Equal(legacy.ServerEndpoint, state.Profiles[0].Settings.ServerEndpoint);
+    Equal(legacy.DeviceToken, state.Profiles[0].Settings.DeviceToken);
+}
+
+static void ConfigStoreRoundTripsSavedProfiles()
+{
+    var root = Path.Combine(Path.GetTempPath(), "omega-config-test-" + Guid.NewGuid().ToString("N"));
+    var paths = ClientPaths.ForPortableRoot(root);
+    var store = new ConfigStore(paths);
+    var expected = new ClientAppConfig
+    {
+        SelectedProfileId = "profile-2",
+        Profiles =
+        [
+            SavedConnectionProfile.FromSettings("Office", new ConnectionSettings
+            {
+                ServerEndpoint = "198.51.100.10:443",
+                DeviceId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                DeviceToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }, "profile-1"),
+            SavedConnectionProfile.FromSettings("Home", new ConnectionSettings
+            {
+                ServerEndpoint = "203.0.113.1:443",
+                DeviceId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+                DeviceToken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }, "profile-2"),
+        ],
+    };
+
+    store.SaveState(expected);
+    var actual = store.LoadState();
+
+    Equal(2, actual.Profiles.Count);
+    Equal("profile-2", actual.SelectedProfileId);
+    Equal("Office", actual.Profiles[0].Name);
+    Equal("Home", actual.Profiles[1].Name);
+    Equal("203.0.113.1:443", actual.Profiles[1].Settings.ServerEndpoint);
 }
 
 static void RuntimeLaunchPlanIsHiddenAndEnvDriven()

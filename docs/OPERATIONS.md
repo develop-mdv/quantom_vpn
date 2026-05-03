@@ -35,10 +35,9 @@ cargo run -p omega-server -- admin register_device \
   --platform windows
 ```
 
-Нужно сохранить:
-
-- `device_id`
-- `token`
+Для Windows GUI можно взять `connection_code` из вывода команды или позже
+скопировать его из карточки устройства во встроенной web-админке. Там же
+показывается `OMEGA_DEVICE_TOKEN` для ручной настройки.
 
 ### 3. Запустить сервер
 
@@ -83,8 +82,10 @@ powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client
 - `omega-client-app/artifacts/windows-client/installer`
 
 Portable-папку удобно использовать для тестов: запустить `Omega.Client.App.exe`
-от имени администратора, заполнить server/device id/token и нажать
-`Подключить`.
+от имени администратора, вставить код подключения и нажать `Подключить`.
+Клиент принимает компактный `omega://connect/<base64url-json>` или вставленный
+текст с `OMEGA_SERVER`, `OMEGA_DEVICE_ID`, `OMEGA_DEVICE_TOKEN`. После первого
+подключения профиль сохраняется, и дальше его можно выбрать из списка.
 
 GUI-клиент по умолчанию запускает runtime с `OMEGA_IPV6_POLICY=tunnel`, поэтому
 IPv6-трафик идет через туннель при серверном `OMEGA_IPV6_MODE=nat66`.
@@ -141,11 +142,13 @@ http://<SERVER_IP>:8081/
 Через UI можно:
 
 - создать пользователя;
-- зарегистрировать устройство и сразу получить одноразовый token;
+- зарегистрировать устройство и получить код подключения;
 - block/unblock/delete пользователя;
 - revoke устройство;
 - terminate активную сессию;
-- скопировать шаблон `.env` для клиента.
+- скопировать `omega://connect/...` код для Windows-клиента и `OMEGA_DEVICE_TOKEN`
+  из карточки устройства в любой момент. Для устройств, зарегистрированных до
+  включения хранения токена, нужно перевыпустить устройство.
 
 ## Runtime-файлы и что в них смотреть
 
@@ -153,7 +156,7 @@ http://<SERVER_IP>:8081/
 
 | Файл | Что хранит |
 | --- | --- |
-| `state/identity.json` | Пользователи, устройства, audit events. |
+| `state/identity.json` | Пользователи, устройства, audit events, сохраненные `device_token` для админки. |
 | `state/sessions.json` | Активные сессии в виде `ActiveSessionView`. |
 | `state/runtime.json` | Runtime config + summary + sessions. |
 | `state/admin_commands.ndjson` | Очередь команд для terminate session. |

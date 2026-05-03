@@ -16,11 +16,14 @@ public partial class MainWindow : Window
     private readonly ConfigStore configStore;
     private readonly LifecycleStore lifecycleStore;
     private readonly DispatcherTimer diagnosticsTimer;
+    private ClientAppConfig appConfig = new();
     private Forms.NotifyIcon? trayIcon;
     private Process? runtimeProcess;
+    private ConnectionSettings? activeSettings;
     private StreamWriter? logWriter;
     private bool disconnectRequested;
     private bool explicitExitRequested;
+    private bool profileSelectionChanging;
 
     public MainWindow()
     {
@@ -73,7 +76,12 @@ public partial class MainWindow : Window
 
     private async Task ConnectAsync()
     {
-        var settings = ReadSettings();
+        if (!TryReadSettings(out var settings, out var profileName, out var readError))
+        {
+            SetStatus(ConnectionDisplayState.Error, "Проверьте код", readError);
+            return;
+        }
+
         var validation = ConnectionSettingsValidator.Validate(settings);
         if (validation.Count > 0)
         {
@@ -81,7 +89,12 @@ public partial class MainWindow : Window
             return;
         }
 
-        configStore.Save(settings);
+        var savedProfile = appConfig.UpsertProfile(settings, profileName);
+        configStore.SaveState(appConfig);
+        RefreshProfiles(savedProfile.Id);
+        settings = savedProfile.Settings.Clone();
+        activeSettings = settings.Clone();
+
         try
         {
             AutostartTask.Apply(settings.Autostart, paths);
@@ -178,13 +191,14 @@ public partial class MainWindow : Window
 
         disconnectRequested = true;
         ControlFile.RequestStop(paths.ControlPath);
+        var settings = CurrentLifecycleSettings();
         lifecycleStore.Write(new LifecycleSnapshot
         {
             State = "stopping",
             Pid = process.Id,
-            ServerEndpoint = ServerBox.Text,
-            DeviceName = DeviceNameBox.Text,
-            Profile = "gaming",
+            ServerEndpoint = settings.ServerEndpoint,
+            DeviceName = settings.DeviceName,
+            Profile = settings.Profile,
             Message = "Stop requested by GUI",
         });
         SetStatus(ConnectionDisplayState.Stopping, "Отключение", "Останавливаю VPN и очищаю маршруты.");
@@ -202,6 +216,7 @@ public partial class MainWindow : Window
         var exitCode = runtimeProcess?.ExitCode;
         await Dispatcher.InvokeAsync(() =>
         {
+            var settings = CurrentLifecycleSettings();
             ConnectButton.Content = "Подключить";
             runtimeProcess = null;
             logWriter?.Flush();
@@ -213,9 +228,9 @@ public partial class MainWindow : Window
                 lifecycleStore.Write(new LifecycleSnapshot
                 {
                     State = "disconnected",
-                    ServerEndpoint = ServerBox.Text,
-                    DeviceName = DeviceNameBox.Text,
-                    Profile = "gaming",
+                    ServerEndpoint = settings.ServerEndpoint,
+                    DeviceName = settings.DeviceName,
+                    Profile = settings.Profile,
                     Message = "Omega VPN stopped",
                 });
                 SetStatus(ConnectionDisplayState.Disconnected, "Отключено", "VPN остановлен.");
@@ -225,14 +240,16 @@ public partial class MainWindow : Window
                 lifecycleStore.Write(new LifecycleSnapshot
                 {
                     State = "failed",
-                    ServerEndpoint = ServerBox.Text,
-                    DeviceName = DeviceNameBox.Text,
-                    Profile = "gaming",
+                    ServerEndpoint = settings.ServerEndpoint,
+                    DeviceName = settings.DeviceName,
+                    Profile = settings.Profile,
                     Message = "Omega VPN exited",
                     LastError = exitCode.HasValue ? $"Exit code {exitCode.Value}" : null,
                 });
                 SetStatus(ConnectionDisplayState.Error, "Клиент остановился", exitCode.HasValue ? $"Exit code {exitCode.Value}" : "Процесс завершился.");
             }
+
+            activeSettings = null;
         });
     }
 
@@ -308,32 +325,102 @@ public partial class MainWindow : Window
         }
     }
 
-    private ConnectionSettings ReadSettings()
+    private bool TryReadSettings(out ConnectionSettings settings, out string profileName, out string error)
     {
-        return new ConnectionSettings
+        var code = ConnectionCodeBox.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(code))
         {
-            ServerEndpoint = ServerBox.Text,
-            DeviceId = DeviceIdBox.Text,
-            DeviceToken = DeviceTokenBox.Password,
-            DeviceName = string.IsNullOrWhiteSpace(DeviceNameBox.Text) ? Environment.MachineName : DeviceNameBox.Text,
-            Transport = SelectedComboText(TransportBox, "auto"),
-            KillSwitch = SelectedComboText(KillSwitchBox, "soft"),
-            DnsLeakGuard = SelectedComboText(DnsLeakGuardBox, "warn"),
-            Autostart = AutostartBox.IsChecked == true,
-        };
+            var parsed = ConnectionCodeParser.Parse(code);
+            if (!parsed.Success || parsed.Settings is null)
+            {
+                settings = new ConnectionSettings();
+                profileName = "";
+                error = parsed.ErrorMessage ?? "Код подключения не распознан.";
+                return false;
+            }
+
+            settings = parsed.Settings.Clone();
+            ApplyAdvancedSettings(settings, overwriteDeviceName: false);
+            profileName = parsed.ProfileName;
+            error = "";
+            return true;
+        }
+
+        if (SelectedProfile() is { } selectedProfile)
+        {
+            settings = selectedProfile.Settings.Clone();
+            ApplyAdvancedSettings(settings, overwriteDeviceName: true);
+            profileName = selectedProfile.Name;
+            error = "";
+            return true;
+        }
+
+        settings = new ConnectionSettings();
+        profileName = "";
+        error = "Вставьте код подключения или выберите сохраненный профиль.";
+        return false;
     }
 
     private void LoadSettings()
     {
-        var settings = configStore.Load();
-        ServerBox.Text = settings.ServerEndpoint;
-        DeviceIdBox.Text = settings.DeviceId;
-        DeviceTokenBox.Password = settings.DeviceToken;
+        appConfig = configStore.LoadState();
+        RefreshProfiles(appConfig.SelectedProfileId);
+        ApplySelectedProfileSettings();
+    }
+
+    private void RefreshProfiles(string? selectedProfileId = null)
+    {
+        profileSelectionChanging = true;
+        ProfileBox.ItemsSource = null;
+        ProfileBox.ItemsSource = appConfig.Profiles;
+        ProfileBox.DisplayMemberPath = nameof(SavedConnectionProfile.Name);
+        ProfileBox.SelectedValuePath = nameof(SavedConnectionProfile.Id);
+        ProfileBox.SelectedValue = string.IsNullOrWhiteSpace(selectedProfileId)
+            ? appConfig.SelectedProfileId
+            : selectedProfileId;
+        if (ProfileBox.SelectedItem is null && appConfig.Profiles.Count > 0)
+        {
+            ProfileBox.SelectedIndex = 0;
+        }
+
+        DeleteProfileButton.IsEnabled = ProfileBox.SelectedItem is not null;
+        profileSelectionChanging = false;
+    }
+
+    private void ApplySelectedProfileSettings()
+    {
+        var settings = SelectedProfile()?.Settings ?? new ConnectionSettings();
         DeviceNameBox.Text = string.IsNullOrWhiteSpace(settings.DeviceName) ? Environment.MachineName : settings.DeviceName;
         SelectComboText(TransportBox, settings.Transport);
         SelectComboText(KillSwitchBox, settings.KillSwitch);
         SelectComboText(DnsLeakGuardBox, settings.DnsLeakGuard);
         AutostartBox.IsChecked = settings.Autostart;
+        DeleteProfileButton.IsEnabled = SelectedProfile() is not null;
+    }
+
+    private void ApplyAdvancedSettings(ConnectionSettings settings, bool overwriteDeviceName)
+    {
+        if (overwriteDeviceName)
+        {
+            settings.DeviceName = string.IsNullOrWhiteSpace(DeviceNameBox.Text) ? Environment.MachineName : DeviceNameBox.Text;
+        }
+
+        settings.Transport = SelectedComboText(TransportBox, "auto");
+        settings.KillSwitch = SelectedComboText(KillSwitchBox, "soft");
+        settings.DnsLeakGuard = SelectedComboText(DnsLeakGuardBox, "warn");
+        settings.Autostart = AutostartBox.IsChecked == true;
+    }
+
+    private SavedConnectionProfile? SelectedProfile()
+    {
+        return ProfileBox.SelectedItem as SavedConnectionProfile;
+    }
+
+    private ConnectionSettings CurrentLifecycleSettings()
+    {
+        return activeSettings?.Clone()
+            ?? SelectedProfile()?.Settings.Clone()
+            ?? new ConnectionSettings();
     }
 
     private static string SelectedComboText(System.Windows.Controls.ComboBox comboBox, string fallback)
@@ -341,6 +428,57 @@ public partial class MainWindow : Window
         return comboBox.SelectedItem is System.Windows.Controls.ComboBoxItem item && item.Content is string value
             ? value
             : fallback;
+    }
+
+    private void ProfileBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (profileSelectionChanging)
+        {
+            return;
+        }
+
+        if (SelectedProfile() is { } selectedProfile)
+        {
+            appConfig.SelectedProfileId = selectedProfile.Id;
+            configStore.SaveState(appConfig);
+            ConnectionCodeBox.Clear();
+        }
+
+        ApplySelectedProfileSettings();
+    }
+
+    private void SaveCodeButton_Click(object sender, RoutedEventArgs e)
+    {
+        var parsed = ConnectionCodeParser.Parse(ConnectionCodeBox.Text);
+        if (!parsed.Success || parsed.Settings is null)
+        {
+            SetStatus(ConnectionDisplayState.Error, "Проверьте код", parsed.ErrorMessage ?? "Код подключения не распознан.");
+            return;
+        }
+
+        var settings = parsed.Settings.Clone();
+        ApplyAdvancedSettings(settings, overwriteDeviceName: false);
+        var savedProfile = appConfig.UpsertProfile(settings, parsed.ProfileName);
+        configStore.SaveState(appConfig);
+        RefreshProfiles(savedProfile.Id);
+        ConnectionCodeBox.Clear();
+        ApplySelectedProfileSettings();
+        SetStatus(ConnectionDisplayState.Disconnected, "Профиль сохранен", "Теперь это подключение можно выбрать из списка.");
+    }
+
+    private void DeleteProfileButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (SelectedProfile() is not { } selectedProfile)
+        {
+            return;
+        }
+
+        appConfig.Profiles.RemoveAll(profile => string.Equals(profile.Id, selectedProfile.Id, StringComparison.Ordinal));
+        appConfig.SelectedProfileId = appConfig.Profiles.FirstOrDefault()?.Id ?? "";
+        configStore.SaveState(appConfig);
+        RefreshProfiles(appConfig.SelectedProfileId);
+        ApplySelectedProfileSettings();
+        SetStatus(ConnectionDisplayState.Disconnected, "Профиль удален", "Выберите другой профиль или добавьте новый код подключения.");
     }
 
     private static void SelectComboText(System.Windows.Controls.ComboBox comboBox, string value)
@@ -450,13 +588,14 @@ public partial class MainWindow : Window
         try
         {
             ControlFile.RequestStop(paths.ControlPath);
+            var settings = CurrentLifecycleSettings();
             lifecycleStore.Write(new LifecycleSnapshot
             {
                 State = "stopping",
                 Pid = process.Id,
-                ServerEndpoint = ServerBox.Text,
-                DeviceName = DeviceNameBox.Text,
-                Profile = "gaming",
+                ServerEndpoint = settings.ServerEndpoint,
+                DeviceName = settings.DeviceName,
+                Profile = settings.Profile,
                 Message = "Stop requested because GUI exited",
             });
         }

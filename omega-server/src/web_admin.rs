@@ -56,6 +56,7 @@ async fn handle_connection(
                 &identity_store,
                 &session_manager,
                 request.query.get("msg").cloned(),
+                request.query.get("code").cloned(),
             );
             html_response(200, "OK", html)
         }
@@ -117,7 +118,7 @@ async fn handle_connection(
                 .cloned()
                 .unwrap_or_else(|| "manual".to_string());
 
-            let msg = match parse_platform(&platform_text).and_then(|platform| {
+            match parse_platform(&platform_text).and_then(|platform| {
                 identity_store.register_device(
                     &user_id,
                     &device_name,
@@ -126,18 +127,22 @@ async fn handle_connection(
                     "web_admin",
                 )
             }) {
-                Ok(reg) => format!(
-                    "Device registered successfully.\nSave token now (shown once): {}\n\nClient .env:\nOMEGA_SERVER={}\nOMEGA_DEVICE_ID={}\nOMEGA_DEVICE_TOKEN={}\nOMEGA_DEVICE_NAME={}\nOMEGA_PLATFORM={}",
-                    reg.device_token,
-                    client_server_hint(),
-                    reg.device.device_id,
-                    reg.device_token,
-                    reg.device.device_name,
-                    reg.device.platform.as_str()
-                ),
-                Err(err) => format!("Register device error: {}", err),
-            };
-            redirect_with_message(msg)
+                Ok(reg) => {
+                    let code = build_connection_code(
+                        &client_server_hint(),
+                        &reg.device.device_id,
+                        &reg.device_token,
+                        &reg.device.device_name,
+                        reg.device.platform.as_str(),
+                    );
+                    redirect_with_message_and_code(
+                        "Device registered successfully. Copy this connection code into the Windows client."
+                            .to_string(),
+                        code,
+                    )
+                }
+                Err(err) => redirect_with_message(format!("Register device error: {}", err)),
+            }
         }
         ("POST", "/devices/revoke") => {
             let form = parse_form(&request.body);
@@ -236,10 +241,10 @@ fn render_page(
     identity_store: &IdentityStore,
     session_manager: &SessionManager,
     message: Option<String>,
+    connection_code: Option<String>,
 ) -> String {
     let users = identity_store.list_users();
     let sessions = session_manager.snapshot();
-    let client_server = client_server_hint();
 
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Omega Admin</title>");
@@ -262,7 +267,7 @@ fn render_page(
     out.push_str(".msg{padding:10px;background:#e0f2fe;border:1px solid #7dd3fc;border-radius:8px;margin-bottom:12px;white-space:pre-wrap}");
     out.push_str(".mini{display:inline-block;margin-right:8px}");
     out.push_str(".mini button{margin-top:0;padding:6px 10px;font-size:12px;background:#334155}");
-    out.push_str(".env{margin:8px 0 0;padding:8px;background:#0f172a;color:#e2e8f0;border-radius:8px;white-space:pre-wrap;font-size:12px;line-height:1.35}");
+    out.push_str(".code{margin:8px 0 0;padding:10px;background:#0f172a;color:#e2e8f0;border-radius:8px;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.35}");
     out.push_str(".note{display:block;margin-top:6px;font-size:12px;color:#64748b}");
     out.push_str(".copy-btn{margin-top:8px;padding:6px 10px;font-size:12px;background:#0ea5e9}");
     out.push_str(".copy-status{margin-left:8px;font-size:12px;color:#0f766e}");
@@ -274,6 +279,12 @@ fn render_page(
     if let Some(msg) = message {
         out.push_str("<div class=\"msg\">");
         out.push_str(&escape_html(&msg));
+        if let Some(code) = &connection_code {
+            out.push_str("<pre class=\"code\">");
+            out.push_str(&escape_html(code));
+            out.push_str("</pre>");
+            out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyPreviousCode(this)\">Copy connection code</button><span class=\"copy-status\"></span>");
+        }
         out.push_str("</div>");
     }
 
@@ -327,18 +338,29 @@ fn render_page(
                     device.revoked,
                     escape_html(&device.public_key_fingerprint)
                 ));
-                let env_block = format!(
-                    "OMEGA_SERVER={}\nOMEGA_DEVICE_ID={}\nOMEGA_DEVICE_TOKEN=<token_from_register_output>\nOMEGA_DEVICE_NAME={}\nOMEGA_PLATFORM={}",
-                    client_server,
-                    device.device_id,
-                    device.device_name,
-                    device.platform.as_str()
-                );
-                out.push_str("<pre class=\"env\">");
-                out.push_str(&escape_html(&env_block));
-                out.push_str("</pre>");
-                out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyEnv(this)\">Copy .env</button><span class=\"copy-status\"></span>");
-                out.push_str("<span class=\"note\">OMEGA_DEVICE_TOKEN is shown only once during device registration.</span>");
+                if let Some(token) = device.device_token.as_deref() {
+                    let code = build_connection_code(
+                        &client_server_hint(),
+                        &device.device_id,
+                        token,
+                        &device.device_name,
+                        device.platform.as_str(),
+                    );
+                    out.push_str(
+                        "<span class=\"note\">Connection code for the Windows client</span>",
+                    );
+                    out.push_str("<pre class=\"code\">");
+                    out.push_str(&escape_html(&code));
+                    out.push_str("</pre>");
+                    out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyPreviousCode(this)\">Copy connection code</button><span class=\"copy-status\"></span>");
+                    out.push_str("<span class=\"note\">OMEGA_DEVICE_TOKEN</span>");
+                    out.push_str("<pre class=\"code\">OMEGA_DEVICE_TOKEN=");
+                    out.push_str(&escape_html(token));
+                    out.push_str("</pre>");
+                    out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyPreviousCode(this)\">Copy device token</button><span class=\"copy-status\"></span>");
+                } else {
+                    out.push_str("<span class=\"note\">This device was registered before token viewing was enabled. Re-register it to make the connection code and OMEGA_DEVICE_TOKEN available here.</span>");
+                }
                 if !device.revoked {
                     out.push_str(
                         "<form method=\"post\" action=\"/devices/revoke\" class=\"mini\">",
@@ -413,7 +435,7 @@ fn render_page(
     out.push_str("</tbody></table></div>");
 
     out.push_str("<script>");
-    out.push_str("async function copyEnv(btn){const card=btn.closest('div');if(!card)return;const pre=card.querySelector('pre.env');const status=card.querySelector('.copy-status');if(!pre)return;const text=pre.innerText;try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);}else{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}if(status){status.textContent='Copied';setTimeout(()=>status.textContent='',1500);}}catch(e){if(status){status.textContent='Copy failed';setTimeout(()=>status.textContent='',2000);}}}");
+    out.push_str("async function copyPreviousCode(btn){const pre=btn.previousElementSibling;const status=btn.nextElementSibling;if(!pre)return;const text=pre.innerText;try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);}else{const ta=document.createElement('textarea');ta.value=text;document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}if(status){status.textContent='Copied';setTimeout(()=>status.textContent='',1500);}}catch(e){if(status){status.textContent='Copy failed';setTimeout(()=>status.textContent='',2000);}}}");
     out.push_str("</script>");
     out.push_str("</body></html>");
     out
@@ -439,6 +461,11 @@ fn parse_form(body: &str) -> HashMap<String, String> {
 
 fn redirect_with_message(message: String) -> Vec<u8> {
     let location = format!("/?msg={}", url_encode(&message));
+    redirect_response(&location)
+}
+
+fn redirect_with_message_and_code(message: String, code: String) -> Vec<u8> {
+    let location = format!("/?msg={}&code={}", url_encode(&message), url_encode(&code));
     redirect_response(&location)
 }
 
@@ -537,7 +564,7 @@ fn parse_content_length(header: &[u8]) -> usize {
     0
 }
 
-fn client_server_hint() -> String {
+pub(crate) fn client_server_hint() -> String {
     if let Ok(v) = std::env::var("OMEGA_CLIENT_SERVER") {
         let trimmed = v.trim();
         if !trimmed.is_empty() {
@@ -554,6 +581,60 @@ fn client_server_hint() -> String {
     }
 
     bind
+}
+
+pub(crate) fn build_connection_code(
+    server: &str,
+    device_id: &str,
+    token: &str,
+    device_name: &str,
+    platform: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "profile_name": device_name,
+        "server": server,
+        "device_id": device_id,
+        "token": token,
+        "device_name": device_name,
+        "platform": platform,
+        "transport": "auto",
+        "tunnel_mode": "full",
+        "dns_policy": "tunnel",
+        "ipv6_policy": "tunnel",
+    });
+    let json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    format!("omega://connect/{}", base64_url_encode(json.as_bytes()))
+}
+
+fn base64_url_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut chunks = bytes.chunks_exact(3);
+
+    for chunk in &mut chunks {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(n & 0x3f) as usize] as char);
+    }
+
+    match chunks.remainder() {
+        [a] => {
+            let n = (*a as u32) << 16;
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        }
+        [a, b] => {
+            let n = ((*a as u32) << 16) | ((*b as u32) << 8);
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        }
+        _ => {}
+    }
+
+    out
 }
 
 fn html_response(status: u16, reason: &str, body: String) -> Vec<u8> {
@@ -582,4 +663,118 @@ fn text_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
     out.extend_from_slice(header.as_bytes());
     out.extend_from_slice(body.as_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use crate::identity::{ensure_identity_file, now_ts, IdentityStore};
+    use crate::session::SessionManager;
+
+    use super::{build_connection_code, render_page};
+
+    #[test]
+    fn connection_code_contains_new_windows_client_payload() {
+        let code = build_connection_code(
+            "203.0.113.1:443",
+            "11111111-2222-3333-4444-555555555555",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "home-pc",
+            "windows",
+        );
+
+        assert!(code.starts_with("omega://connect/"));
+
+        let payload = code.trim_start_matches("omega://connect/");
+        let json = String::from_utf8(base64_url_decode(payload)).expect("payload utf8");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("payload json");
+
+        assert_eq!(parsed["server"], "203.0.113.1:443");
+        assert_eq!(parsed["device_id"], "11111111-2222-3333-4444-555555555555");
+        assert_eq!(
+            parsed["token"],
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(parsed["device_name"], "home-pc");
+        assert_eq!(parsed["transport"], "auto");
+        assert_eq!(parsed["ipv6_policy"], "tunnel");
+    }
+
+    #[test]
+    fn admin_page_shows_saved_connection_code_and_device_token() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "omega_admin_token_test_{}_{}.json",
+            std::process::id(),
+            now_ts()
+        ));
+        ensure_identity_file(&path).expect("init identity file");
+
+        let store = IdentityStore::load(path.clone()).expect("load store");
+        let user = store.create_user(5, 3, "test").expect("create user");
+        let registered = store
+            .register_device(
+                &user.user_id,
+                "office-pc",
+                crate::identity::devices::Platform::Windows,
+                "fp-1",
+                "test",
+            )
+            .expect("register device");
+        let sessions = SessionManager::new(true);
+
+        let html = render_page(&store, &sessions, None, None);
+
+        assert!(html.contains("omega://connect/"));
+        assert!(html.contains("OMEGA_DEVICE_TOKEN="));
+        assert!(html.contains(&registered.device_token));
+        assert!(
+            !html.contains("shown only once"),
+            "admin should not tell operators the code is single-use visibility anymore"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    fn base64_url_decode(input: &str) -> Vec<u8> {
+        let mut value = input.replace('-', "+").replace('_', "/");
+        match value.len() % 4 {
+            2 => value.push_str("=="),
+            3 => value.push('='),
+            _ => {}
+        }
+
+        decode_base64(&value)
+    }
+
+    fn decode_base64(input: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut buffer = 0u32;
+        let mut bits = 0u8;
+
+        for byte in input.bytes() {
+            if byte == b'=' {
+                break;
+            }
+
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => continue,
+            } as u32;
+
+            buffer = (buffer << 6) | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push(((buffer >> bits) & 0xff) as u8);
+            }
+        }
+
+        out
+    }
 }

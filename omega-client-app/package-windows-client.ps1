@@ -125,9 +125,10 @@ if (Test-Path $PreservedConfig) {
 Run `Omega.Client.App.exe` as administrator.
 
 Required fields:
-- server endpoint
-- device id
-- device token
+- connection code
+
+The code can be an omega://connect/... link or pasted OMEGA_* env text.
+Saved connections can be selected from the profile list later.
 
 The app stores runtime state in `omega-client\state`.
 

@@ -275,6 +275,7 @@ impl IdentityStore {
                 device_name: device_name.to_string(),
                 platform,
                 public_key_fingerprint: public_key_fingerprint.to_string(),
+                device_token: Some(token_hex.clone()),
                 token_hash,
                 revoked: false,
                 last_seen_at: None,
@@ -670,6 +671,35 @@ mod tests {
                 .iter()
                 .any(|d| d["device_id"] == registered.device.device_id),
             "revoked device should not be persisted"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn registered_device_token_is_available_after_reloading_store() {
+        let path = temp_identity_path("persist_device_token");
+        ensure_identity_file(&path).expect("init identity file");
+
+        let store = IdentityStore::load(path.clone()).expect("load store");
+        let user = store.create_user(5, 3, "test").expect("create user");
+        let registered = store
+            .register_device(&user.user_id, "laptop", Platform::Windows, "fp-1", "test")
+            .expect("register device");
+
+        drop(store);
+
+        let reloaded = IdentityStore::load(path.clone()).expect("reload store");
+        let devices = reloaded.list_user_devices(&user.user_id);
+        let device = devices
+            .iter()
+            .find(|d| d.device_id == registered.device.device_id)
+            .expect("registered device after reload");
+
+        assert_eq!(
+            device.device_token.as_deref(),
+            Some(registered.device_token.as_str()),
+            "admin must be able to show the original OMEGA_DEVICE_TOKEN later"
         );
 
         let _ = fs::remove_file(path);

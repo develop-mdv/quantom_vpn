@@ -54,6 +54,10 @@ cargo run -p omega-server -- admin register_device \
   --platform windows
 ```
 
+Для Windows GUI используйте `connection_code` из вывода команды или скопируйте
+его позже из карточки устройства во встроенной web-админке. Там же доступен
+`OMEGA_DEVICE_TOKEN` для ручной настройки.
+
 ### 3. Запустить сервер
 
 ```bash
@@ -77,6 +81,9 @@ cargo run -p omega-client
 ```powershell
 powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client.ps1
 ```
+
+Пользователь вставляет один `omega://connect/...` код в клиент, а дальше
+выбирает сохраненный профиль из списка.
 
 Артефакты:
 

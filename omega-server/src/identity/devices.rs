@@ -67,6 +67,8 @@ pub struct DeviceRecord {
     pub device_name: String,
     pub platform: Platform,
     pub public_key_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_token: Option<String>,
     pub token_hash: String,
     pub revoked: bool,
     pub last_seen_at: Option<u64>,

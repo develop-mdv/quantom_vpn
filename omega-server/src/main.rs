@@ -320,14 +320,23 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
 
             let registered =
                 store.register_device(user_id, device_name, platform, fingerprint, "admin_cli")?;
+            let connection_code = web_admin::build_connection_code(
+                &web_admin::client_server_hint(),
+                &registered.device.device_id,
+                &registered.device_token,
+                &registered.device.device_name,
+                registered.device.platform.as_str(),
+            );
 
             println!(
-                "registered device: device_id={} user_id={} platform={} token={}",
+                "registered device: device_id={} user_id={} platform={}",
                 registered.device.device_id,
                 registered.device.user_id,
-                registered.device.platform.as_str(),
-                registered.device_token
+                registered.device.platform.as_str()
             );
+            println!("connection_code={}", connection_code);
+            println!("OMEGA_DEVICE_TOKEN={}", registered.device_token);
+            println!("the same code and token are also available later in the admin device list");
         }
         "revoke_device" => {
             let device_id = required_arg(&args, "--device-id")?;
@@ -346,6 +355,24 @@ fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
                     device.revoked,
                     device.last_seen_at
                 );
+                if let Some(token) = device.device_token.as_deref() {
+                    let connection_code = web_admin::build_connection_code(
+                        &web_admin::client_server_hint(),
+                        &device.device_id,
+                        token,
+                        &device.device_name,
+                        device.platform.as_str(),
+                    );
+                    println!("connection_code={}", connection_code);
+                    println!("OMEGA_DEVICE_TOKEN={}", token);
+                } else {
+                    println!(
+                        "connection_code=<unavailable: device was registered before token viewing was enabled>"
+                    );
+                    println!(
+                        "OMEGA_DEVICE_TOKEN=<unavailable: device was registered before token viewing was enabled>"
+                    );
+                }
             }
         }
         "list_active_sessions" => {
