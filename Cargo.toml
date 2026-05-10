@@ -3,6 +3,7 @@ members = [
     "omega-core",
     "omega-server",
     "omega-client",
+    "omega-android-bridge",
 ]
 resolver = "2"
 

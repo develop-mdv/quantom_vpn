@@ -1,0 +1,18 @@
+[package]
+name = "omega-android-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JNI bridge boundary for the Omega VPN Android client"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+omega-core = { path = "../omega-core", features = ["std", "fec"] }
+tokio = { workspace = true }
+tun-rs = { workspace = true }
+bytes = { workspace = true }
+ml-kem = { workspace = true }
+kem = "0.3.0-pre.0"
+rand = "0.8"

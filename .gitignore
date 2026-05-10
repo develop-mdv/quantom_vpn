@@ -22,5 +22,8 @@ state/
 omega-client/state/
 omega-client-app/artifacts/
 omega-client-app/omega-client/state/
+omega-android/.gradle/
+omega-android/**/build/
+omega-android/local.properties
 relese_plan/
 wfp_filters.xml

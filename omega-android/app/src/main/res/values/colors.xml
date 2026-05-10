@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="omega_bg">#111418</color>
+    <color name="omega_panel">#1A2027</color>
+    <color name="omega_border">#2B3440</color>
+    <color name="omega_text">#EEF4F7</color>
+    <color name="omega_muted">#98A7B3</color>
+    <color name="omega_accent">#36D399</color>
+    <color name="omega_teal">#1FB6A6</color>
+</resources>

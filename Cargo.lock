@@ -1143,6 +1143,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "omega-android-bridge"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "kem",
+ "ml-kem",
+ "omega-core",
+ "rand 0.8.5",
+ "tokio",
+ "tun-rs",
+]
+
+[[package]]
 name = "omega-client"
 version = "0.1.0"
 dependencies = [
