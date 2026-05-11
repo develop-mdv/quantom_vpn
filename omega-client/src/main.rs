@@ -2,6 +2,7 @@ mod config;
 mod control;
 mod diagnostics;
 mod network;
+mod reality;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ enum ClientTransport {
         server_addr: SocketAddr,
     },
     Tcp(Arc<TcpClientTransport>),
+    Reality(Arc<crate::reality::RealityClientTransport>),
 }
 
 struct TcpClientTransport {
@@ -70,6 +72,10 @@ impl ClientTransport {
                 write_tcp_frame(&mut *writer, packet).await?;
                 Ok(())
             }
+            Self::Reality(reality) => {
+                reality.send(packet).await?;
+                Ok(())
+            }
         }
     }
 
@@ -81,6 +87,10 @@ impl ClientTransport {
                 let n = read_tcp_frame(&mut *reader, buf).await?;
                 Ok((n, tcp.peer_addr))
             }
+            Self::Reality(reality) => {
+                let n = reality.recv_into(buf).await?;
+                Ok((n, reality.peer_addr()))
+            }
         }
     }
 
@@ -88,6 +98,7 @@ impl ClientTransport {
         match self {
             Self::Udp { .. } => "udp",
             Self::Tcp(_) => "tcp",
+            Self::Reality(_) => "reality",
         }
     }
 }
@@ -759,6 +770,66 @@ async fn perform_tcp_handshake(
     anyhow::bail!("malformed TCP handshake response payload")
 }
 
+async fn perform_reality_handshake(
+    client_hello: &ClientHello,
+    config: &ClientConfig,
+) -> anyhow::Result<(HandshakeResult, ClientTransport)> {
+    let reality_cfg = crate::reality::RealityClientConfig::from_env()
+        .context("OMEGA_REALITY_* environment variables")?;
+    tracing::info!(
+        server = %reality_cfg.server,
+        sni = %reality_cfg.sni,
+        fingerprint = %reality_cfg.fingerprint_profile,
+        "performing REALITY TLS 1.3 handshake"
+    );
+    let transport = crate::reality::perform_reality_handshake(&reality_cfg)
+        .await
+        .context("REALITY TLS handshake")?;
+    tracing::info!(
+        cipher_suite = format!("0x{:04x}", transport.cipher_suite().await),
+        "REALITY handshake completed; running Omega CHLO inside the TLS tunnel"
+    );
+
+    // After the TLS tunnel is established, run the same STUN-wrapped Omega
+    // handshake we already use over plain TCP: the upper layer is identical,
+    // we just send/receive through the TLS record layer instead of a raw
+    // length-prefixed framing.
+    let timeout_ms = config.handshake_timeout_ms;
+    let txn_id: [u8; 12] = rand::random();
+    let request = StunWrapper::wrap_request(&txn_id, &client_hello.serialize());
+    let sent_at = Instant::now();
+    transport.send(&request).await?;
+
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        transport.recv_into(&mut buf),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("REALITY Omega handshake timed out after {timeout_ms} ms"))??;
+
+    let Some((is_request, resp_txn, resp_payload)) = StunWrapper::parse(&buf[..n]) else {
+        anyhow::bail!("malformed REALITY/Omega handshake response");
+    };
+    if is_request || resp_txn != txn_id {
+        anyhow::bail!("unexpected REALITY/Omega handshake transaction id");
+    }
+    if let Some(hello) = ServerHello::deserialize(resp_payload) {
+        let wrapped = ClientTransport::Reality(Arc::new(transport));
+        return Ok((
+            HandshakeResult {
+                hello,
+                rtt_ms: sent_at.elapsed().as_millis() as u64,
+            },
+            wrapped,
+        ));
+    }
+    if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
+        anyhow::bail!("REALITY/Omega handshake rejected by server: {:?}", reject.reason);
+    }
+    anyhow::bail!("malformed REALITY/Omega handshake response payload")
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -885,6 +956,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        TransportPolicy::Reality => {
+            match perform_reality_handshake(&client_hello, &client_config).await {
+                Ok(result) => result,
+                Err(err) => {
+                    diagnostics.set_status("handshake_failed");
+                    let _ = diagnostics.write_now();
+                    return Err(err);
+                }
+            }
+        }
         TransportPolicy::Auto => {
             match perform_handshake(&udp, server_addr, &client_hello, &client_config).await {
                 Ok(handshake) => (handshake, udp_transport.clone()),
@@ -893,11 +974,17 @@ async fn main() -> anyhow::Result<()> {
                     match perform_tcp_handshake(server_addr, &client_hello, &client_config).await {
                         Ok(result) => result,
                         Err(tcp_err) => {
-                            diagnostics.set_status("handshake_failed");
-                            let _ = diagnostics.write_now();
-                            return Err(anyhow::anyhow!(
-                                "UDP handshake failed ({udp_err}); TCP fallback failed ({tcp_err})"
-                            ));
+                            tracing::warn!(error = %tcp_err, "TCP fallback failed; trying REALITY");
+                            match perform_reality_handshake(&client_hello, &client_config).await {
+                                Ok(result) => result,
+                                Err(reality_err) => {
+                                    diagnostics.set_status("handshake_failed");
+                                    let _ = diagnostics.write_now();
+                                    return Err(anyhow::anyhow!(
+                                        "UDP handshake failed ({udp_err}); TCP fallback failed ({tcp_err}); REALITY failed ({reality_err})"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }

@@ -562,7 +562,7 @@ async fn tcp_connection_loop(
     }
 }
 
-async fn handle_client_frame(
+pub(crate) async fn handle_client_frame(
     frame: &[u8],
     src_addr: SocketAddr,
     tun: &Arc<tun_rs::AsyncDevice>,
@@ -736,7 +736,7 @@ async fn handle_client_frame(
     }
 }
 
-fn is_stun_packet(buf: &[u8]) -> bool {
+pub(crate) fn is_stun_packet(buf: &[u8]) -> bool {
     StunWrapper::parse(buf).is_some()
 }
 

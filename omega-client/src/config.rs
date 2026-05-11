@@ -230,6 +230,7 @@ impl DnsLeakGuardPolicy {
 pub enum TransportPolicy {
     Udp,
     Tcp,
+    Reality,
     Auto,
 }
 
@@ -237,12 +238,13 @@ impl TransportPolicy {
     pub fn from_raw(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "tcp" | "tcp_fallback" | "tcp-fallback" => Self::Tcp,
+            "reality" | "xtls" => Self::Reality,
             "auto" | "fallback" => Self::Auto,
             _ => Self::Udp,
         }
     }
 
-    fn from_env(default: Self) -> Self {
+    pub fn from_env(default: Self) -> Self {
         std::env::var("OMEGA_TRANSPORT")
             .map(|value| Self::from_raw(&value))
             .unwrap_or(default)

@@ -1,0 +1,16 @@
+[package]
+name = "omega-reality"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared XTLS REALITY primitives (TLS 1.3 codec, key schedule, record layer, auth) used by both omega-server and omega-client."
+
+[dependencies]
+ring = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+x25519-dalek = { workspace = true }
+subtle = { workspace = true }
+rand = "0.8"
+anyhow = "1"
+tokio = { workspace = true }

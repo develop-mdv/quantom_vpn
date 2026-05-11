@@ -16,3 +16,4 @@ bytes = { workspace = true }
 ml-kem = { workspace = true }
 kem = "0.3.0-pre.0"
 rand = "0.8"
+base64 = { workspace = true }

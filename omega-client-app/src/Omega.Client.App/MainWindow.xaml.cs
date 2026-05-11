@@ -395,6 +395,13 @@ public partial class MainWindow : Window
         SelectComboText(KillSwitchBox, settings.KillSwitch);
         SelectComboText(DnsLeakGuardBox, settings.DnsLeakGuard);
         AutostartBox.IsChecked = settings.Autostart;
+
+        RealityServerBox.Text = settings.RealityServer;
+        RealitySniBox.Text = settings.RealitySni;
+        RealityPubkeyBox.Text = settings.RealityServerPubkey;
+        RealityShortIdBox.Text = settings.RealityShortId;
+        SelectComboText(RealityFingerprintBox, string.IsNullOrWhiteSpace(settings.RealityFingerprint) ? "chrome_131" : settings.RealityFingerprint);
+
         DeleteProfileButton.IsEnabled = SelectedProfile() is not null;
     }
 
@@ -409,6 +416,12 @@ public partial class MainWindow : Window
         settings.KillSwitch = SelectedComboText(KillSwitchBox, "soft");
         settings.DnsLeakGuard = SelectedComboText(DnsLeakGuardBox, "warn");
         settings.Autostart = AutostartBox.IsChecked == true;
+
+        settings.RealityServer = (RealityServerBox.Text ?? string.Empty).Trim();
+        settings.RealitySni = (RealitySniBox.Text ?? string.Empty).Trim();
+        settings.RealityServerPubkey = (RealityPubkeyBox.Text ?? string.Empty).Trim();
+        settings.RealityShortId = (RealityShortIdBox.Text ?? string.Empty).Trim();
+        settings.RealityFingerprint = SelectedComboText(RealityFingerprintBox, "chrome_131");
     }
 
     private SavedConnectionProfile? SelectedProfile()

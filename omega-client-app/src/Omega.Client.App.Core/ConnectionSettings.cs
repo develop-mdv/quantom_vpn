@@ -49,6 +49,24 @@ public sealed class ConnectionSettings
     [JsonPropertyName("autostart")]
     public bool Autostart { get; set; }
 
+    // REALITY (XTLS-style TLS masquerade) — only used when Transport == "reality".
+    // The user obtains these out-of-band from the server admin.
+
+    [JsonPropertyName("reality_server")]
+    public string RealityServer { get; set; } = "";
+
+    [JsonPropertyName("reality_sni")]
+    public string RealitySni { get; set; } = "";
+
+    [JsonPropertyName("reality_server_pubkey")]
+    public string RealityServerPubkey { get; set; } = "";
+
+    [JsonPropertyName("reality_short_id")]
+    public string RealityShortId { get; set; } = "";
+
+    [JsonPropertyName("reality_fingerprint")]
+    public string RealityFingerprint { get; set; } = "chrome_131";
+
     public ConnectionSettings Clone()
     {
         return new ConnectionSettings
@@ -68,6 +86,11 @@ public sealed class ConnectionSettings
             DnsLeakGuard = DnsLeakGuard,
             NetworkDiagnostics = NetworkDiagnostics,
             Autostart = Autostart,
+            RealityServer = RealityServer,
+            RealitySni = RealitySni,
+            RealityServerPubkey = RealityServerPubkey,
+            RealityShortId = RealityShortId,
+            RealityFingerprint = RealityFingerprint,
         };
     }
 }

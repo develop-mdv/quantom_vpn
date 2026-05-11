@@ -192,6 +192,14 @@ mod android {
                 "Android native bridge currently supports UDP transport; choose auto or udp.",
             );
         }
+        if profile.transport == "reality" {
+            close_raw_fd(protected_udp_fd);
+            return HandshakeResponse::err(
+                "REALITY transport is not yet wired into the Android bridge \
+                 (requires VpnService.protect() on a TCP socket). \
+                 Use the Windows client for REALITY today.",
+            );
+        }
 
         let result = (|| -> Result<HandshakeResponse, String> {
             let server_addr: SocketAddr = profile

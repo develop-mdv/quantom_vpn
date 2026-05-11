@@ -11,7 +11,7 @@ public static class OmegaEnvironmentBuilder
             ? Environment.MachineName
             : settings.DeviceName.Trim();
 
-        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["OMEGA_SERVER"] = settings.ServerEndpoint.Trim(),
             ["OMEGA_DEVICE_ID"] = settings.DeviceId.Trim(),
@@ -32,6 +32,31 @@ public static class OmegaEnvironmentBuilder
             ["OMEGA_CONTROL_PATH"] = paths.ControlPath,
             ["RUST_LOG"] = "info",
         };
+
+        // REALITY masquerade (only meaningful when Transport in {reality, auto}).
+        // Pass through whatever the user typed; the Rust client validates
+        // and only consumes these when actually attempting REALITY.
+        if (!string.IsNullOrWhiteSpace(settings.RealityServer))
+        {
+            env["OMEGA_REALITY_SERVER"] = settings.RealityServer.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(settings.RealitySni))
+        {
+            env["OMEGA_REALITY_SNI"] = settings.RealitySni.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(settings.RealityServerPubkey))
+        {
+            env["OMEGA_REALITY_SERVER_PUBKEY"] = settings.RealityServerPubkey.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(settings.RealityShortId))
+        {
+            env["OMEGA_REALITY_SHORT_ID"] = settings.RealityShortId.Trim();
+        }
+        if (!string.IsNullOrWhiteSpace(settings.RealityFingerprint))
+        {
+            env["OMEGA_REALITY_FINGERPRINT"] = settings.RealityFingerprint.Trim();
+        }
+        return env;
     }
 
     private static string Normalize(string? value, string fallback)

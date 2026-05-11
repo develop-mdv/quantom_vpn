@@ -5,6 +5,14 @@ pub struct AndroidProfile {
     pub device_token: String,
     pub platform: String,
     pub transport: String,
+    /// REALITY parameters are accepted on parse but not yet wired into the
+    /// Android native data path (the bridge currently only drives UDP).
+    /// They round-trip through `SharedPreferences` so the user can configure
+    /// them ahead of the Android REALITY rollout in Phase 7+.
+    pub reality_sni: String,
+    pub reality_server_pubkey: String,
+    pub reality_short_id: String,
+    pub reality_fingerprint: String,
 }
 
 impl AndroidProfile {
@@ -14,6 +22,31 @@ impl AndroidProfile {
         device_token: &str,
         platform: &str,
         transport: &str,
+    ) -> Result<Self, String> {
+        Self::parse_extended(
+            server,
+            device_id,
+            device_token,
+            platform,
+            transport,
+            "",
+            "",
+            "",
+            "",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn parse_extended(
+        server: &str,
+        device_id: &str,
+        device_token: &str,
+        platform: &str,
+        transport: &str,
+        reality_sni: &str,
+        reality_server_pubkey: &str,
+        reality_short_id: &str,
+        reality_fingerprint: &str,
     ) -> Result<Self, String> {
         let server = non_empty("server", server)?;
         if server.parse::<std::net::SocketAddr>().is_err() {
@@ -40,10 +73,45 @@ impl AndroidProfile {
         let transport = match transport.trim().to_ascii_lowercase().as_str() {
             "udp" => "udp",
             "tcp" => "tcp",
+            "reality" | "xtls" => "reality",
             "" | "auto" => "auto",
-            _ => return Err("transport must be auto, udp or tcp".to_string()),
+            _ => return Err("transport must be auto, udp, tcp or reality".to_string()),
         }
         .to_string();
+
+        // Phase 6 minimum: persist the REALITY fields verbatim. The Android
+        // native bridge will refuse to start a REALITY tunnel in runtime.rs
+        // with a clear error until Phase 7+ plumbs a protected-from-VPN TCP
+        // socket through `VpnService.protect()`.
+        let reality_sni = reality_sni.trim().to_string();
+        let reality_server_pubkey = reality_server_pubkey.trim().to_string();
+        let reality_short_id = reality_short_id.trim().to_string();
+        let reality_fingerprint = if reality_fingerprint.trim().is_empty() {
+            "chrome_131".to_string()
+        } else {
+            reality_fingerprint.trim().to_string()
+        };
+
+        // Validate format of REALITY fields if the user actually selected the
+        // reality transport (don't burden users who left them blank).
+        if transport == "reality" {
+            if reality_sni.is_empty() {
+                return Err("reality_sni is required when transport=reality".to_string());
+            }
+            if reality_server_pubkey.is_empty() {
+                return Err(
+                    "reality_server_pubkey is required when transport=reality".to_string(),
+                );
+            }
+            let decoded = base64_decode_32(&reality_server_pubkey)
+                .ok_or_else(|| "reality_server_pubkey must be 32 bytes of base64".to_string())?;
+            let _ = decoded;
+            if !reality_short_id.is_empty()
+                && (reality_short_id.len() != 16 || !reality_short_id.bytes().all(is_hex))
+            {
+                return Err("reality_short_id must be 16 hex chars (or empty)".to_string());
+            }
+        }
 
         Ok(Self {
             server,
@@ -51,6 +119,10 @@ impl AndroidProfile {
             device_token,
             platform,
             transport,
+            reality_sni,
+            reality_server_pubkey,
+            reality_short_id,
+            reality_fingerprint,
         })
     }
 
@@ -118,6 +190,18 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn base64_decode_32(raw: &str) -> Option<[u8; 32]> {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let bytes = STANDARD.decode(raw.trim().as_bytes()).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Some(out)
 }
 
 #[cfg(test)]

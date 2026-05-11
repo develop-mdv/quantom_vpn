@@ -83,3 +83,44 @@ pub fn update_runtime_summary(summary: &RuntimeSummary) {
     gauge!("omega_runtime_max_age_seconds").set(summary.max_age_secs as f64);
     gauge!("omega_runtime_avg_loss_ratio").set(summary.avg_loss_ratio);
 }
+
+// -----------------------------------------------------------------------------
+// REALITY transport metrics
+// -----------------------------------------------------------------------------
+
+pub fn record_reality_handshake_authentic(short_id_hex: String) {
+    counter!("omega_reality_handshakes_total", "verdict" => "authentic").increment(1);
+    counter!("omega_reality_handshakes_by_short_id_total", "short_id" => short_id_hex)
+        .increment(1);
+}
+
+pub fn record_reality_handshake_foreign() {
+    counter!("omega_reality_handshakes_total", "verdict" => "foreign").increment(1);
+}
+
+pub fn record_reality_handshake_error(reason: &str) {
+    counter!("omega_reality_handshake_errors_total", "reason" => reason.to_string()).increment(1);
+}
+
+pub fn record_reality_proxy_bytes(direction: &'static str, bytes: u64) {
+    if bytes > 0 {
+        counter!("omega_reality_proxy_bytes_total", "direction" => direction).increment(bytes);
+    }
+}
+
+pub fn reality_active_tunnels_inc() {
+    gauge!("omega_reality_active_tunnels").increment(1.0);
+}
+
+pub fn reality_active_tunnels_dec() {
+    gauge!("omega_reality_active_tunnels").decrement(1.0);
+}
+
+pub fn record_reality_cert_refresh(sni: &str, rotated: bool) {
+    counter!(
+        "omega_reality_cert_refresh_total",
+        "sni" => sni.to_string(),
+        "rotated" => if rotated { "true".to_string() } else { "false".to_string() }
+    )
+    .increment(1);
+}

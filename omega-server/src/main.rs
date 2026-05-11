@@ -3,6 +3,7 @@ mod handshake;
 mod identity;
 mod metrics;
 mod morphing;
+mod reality;
 mod runtime;
 mod session;
 mod web_admin;
@@ -256,6 +257,36 @@ async fn run_server() -> anyhow::Result<()> {
                 tracing::warn!(error = %err, "TCP fallback listener stopped");
             }
         });
+    }
+
+    match reality::RealityConfig::from_env() {
+        Ok(Some(cfg)) => {
+            let reality_dp = reality::RealityDataPath {
+                tun: tun.clone(),
+                udp: udp.clone(),
+                session_manager: session_manager.clone(),
+                identity_store: identity_store.clone(),
+                server_mtu: tunnel_mtu,
+                allow_legacy_v1,
+                morphing_policy,
+            };
+            tokio::spawn(async move {
+                match reality::RealityRuntime::bootstrap(cfg, reality_dp).await {
+                    Ok(rt) => {
+                        if let Err(err) = rt.run_listener().await {
+                            tracing::warn!(error = %err, "REALITY listener stopped");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "REALITY bootstrap failed; transport disabled");
+                    }
+                }
+            });
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!(error = %err, "REALITY configuration invalid; transport disabled");
+        }
     }
 
     tracing::info!("data path running, press Ctrl+C to stop");

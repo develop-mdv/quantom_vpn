@@ -195,7 +195,36 @@
                                 <ComboBoxItem Content="auto" IsSelected="True" />
                                 <ComboBoxItem Content="udp" />
                                 <ComboBoxItem Content="tcp" />
+                                <ComboBoxItem Content="reality" />
                             </ComboBox>
+
+                            <Expander Header="REALITY (маскировка под доверенный сайт)"
+                                      Foreground="{StaticResource MutedTextBrush}"
+                                      Margin="0,0,0,12">
+                                <StackPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Сервер (IP:порт)" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBox x:Name="RealityServerBox"
+                                             ToolTip="Адрес Omega-сервера, на котором поднята REALITY (обычно :443)" />
+
+                                    <TextBlock Text="SNI (доверенный домен)" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBox x:Name="RealitySniBox"
+                                             ToolTip="Например, gosuslugi.ru — должен совпадать со списком на сервере" />
+
+                                    <TextBlock Text="Публичный ключ сервера (base64)" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBox x:Name="RealityPubkeyBox"
+                                             ToolTip="32 байта X25519 в base64, выдаётся командой omega_reality_keygen" />
+
+                                    <TextBlock Text="Short ID (опционально, 16 hex)" Foreground="{StaticResource MutedTextBrush}" />
+                                    <TextBox x:Name="RealityShortIdBox"
+                                             ToolTip="Оставьте пустым для wildcard, либо укажите идентификатор из списка сервера" />
+
+                                    <TextBlock Text="uTLS-профиль" Foreground="{StaticResource MutedTextBrush}" />
+                                    <ComboBox x:Name="RealityFingerprintBox">
+                                        <ComboBoxItem Content="chrome_131" IsSelected="True" />
+                                        <ComboBoxItem Content="chrome_120_no_ech" />
+                                    </ComboBox>
+                                </StackPanel>
+                            </Expander>
 
                             <TextBlock Text="Kill switch" Foreground="{StaticResource MutedTextBrush}" />
                             <ComboBox x:Name="KillSwitchBox">
