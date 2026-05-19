@@ -24,6 +24,13 @@ Environment=OMEGA_IDENTITY_DB=/opt/omega/state/identity.json
 Environment=OMEGA_SESSION_SNAPSHOT=/opt/omega/state/sessions.json
 Environment=OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
 Environment=OMEGA_ADMIN_COMMANDS=/opt/omega/state/admin_commands.ndjson
+
+# REALITY masquerade is configured at runtime through the admin web UI
+# (http://<server>:8081). The server reads state/reality_config.json and
+# state/reality_x25519.key on every change. Legacy `OMEGA_REALITY_*` env
+# vars are still honoured for first-boot bootstrap when the JSON file does
+# not yet exist; after that point the admin UI is the source of truth.
+
 EnvironmentFile=-/etc/default/omega-server
 Restart=always
 RestartSec=3

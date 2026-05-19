@@ -23,9 +23,18 @@ mod android {
         RTP_HEADER_LEN, TOTAL_HEADER_LEN,
     };
     use omega_core::replay::ReplayFilter;
-    use tokio::net::UdpSocket;
+    use omega_reality::handshake_client::{client_handshake, ClientHandshakeInputs};
+    use omega_reality::key_schedule::CipherSuiteParams;
+    use omega_reality::record_layer::{RecordDecryptor, RecordEncryptor};
+    use omega_reality::tls_messages::{
+        parse_record_header, CT_APPLICATION_DATA, CT_CHANGE_CIPHER_SPEC, TLS_MAX_RECORD_CIPHERTEXT,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+    use tokio::net::{TcpStream, UdpSocket};
     use tokio::runtime::Runtime;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Mutex as AsyncMutex};
+    use x25519_dalek::PublicKey;
 
     const DEFAULT_CLIENT_MTU: u16 = 1280;
     const DEFAULT_INITIAL_ARQ_RTT_MS: u64 = 350;
@@ -46,8 +55,13 @@ mod android {
 
     struct NativeSession {
         runtime: Runtime,
-        pending: Option<PendingSession>,
+        pending: Option<Pending>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    enum Pending {
+        Udp(PendingSession),
+        Reality(PendingRealitySession),
     }
 
     struct PendingSession {
@@ -60,6 +74,29 @@ mod android {
         tunnel_ipv4: String,
         tunnel_ipv6: Option<String>,
         mtu: u16,
+    }
+
+    /// Pending REALITY tunnel: TLS 1.3 record layer already negotiated, Omega
+    /// (STUN+ML-KEM) ClientHello already exchanged inside the TLS tunnel.
+    /// Waiting for the Android `VpnService` to hand us its TUN fd so we can
+    /// start pumping IP packets through the encrypted record stream.
+    struct PendingRealitySession {
+        reader: Arc<AsyncMutex<OwnedReadHalf>>,
+        writer: Arc<AsyncMutex<OwnedWriteHalf>>,
+        encryptor: Arc<AsyncMutex<RecordEncryptor>>,
+        decryptor: Arc<AsyncMutex<RecordDecryptor>>,
+        shared_secret: Vec<u8>,
+        keys_send: SessionKeys,
+        flow_id: FlowId,
+        chaos_seed: u64,
+        ssrc: u32,
+        tunnel_ipv4: String,
+        tunnel_ipv6: Option<String>,
+        mtu: u16,
+        #[allow(dead_code)]
+        cipher_suite: u16,
+        #[allow(dead_code)]
+        params: CipherSuiteParams,
     }
 
     struct HandshakeResult {
@@ -195,9 +232,9 @@ mod android {
         if profile.transport == "reality" {
             close_raw_fd(protected_udp_fd);
             return HandshakeResponse::err(
-                "REALITY transport is not yet wired into the Android bridge \
-                 (requires VpnService.protect() on a TCP socket). \
-                 Use the Windows client for REALITY today.",
+                "REALITY transport uses a different entry point: call \
+                 nativeStartRealityHandshake (with a protected TCP fd) instead of \
+                 nativeStartHandshake.",
             );
         }
 
@@ -266,7 +303,7 @@ mod android {
                 handle,
                 NativeSession {
                     runtime,
-                    pending: Some(PendingSession {
+                    pending: Some(Pending::Udp(PendingSession {
                         transport: udp,
                         shared_secret,
                         keys_send,
@@ -276,7 +313,7 @@ mod android {
                         tunnel_ipv4: tunnel_ipv4.clone(),
                         tunnel_ipv6: tunnel_ipv6.clone(),
                         mtu,
-                    }),
+                    })),
                     tasks: Vec::new(),
                 },
             );
@@ -303,7 +340,7 @@ mod android {
             close_raw_fd(tun_fd);
             return NativeResult::err("unknown native session handle");
         };
-        let Some(mut pending) = session.pending.take() else {
+        let Some(pending) = session.pending.take() else {
             close_raw_fd(tun_fd);
             return NativeResult::err("native session is already running");
         };
@@ -319,37 +356,76 @@ mod android {
             }
         };
 
-        let state = Arc::new(Mutex::new(ClientState::new(
-            pending.ssrc,
-            pending.chaos_seed,
-        )));
-        {
-            let mut state = state.lock().unwrap();
-            state.send_seq = pending.keys_send.send_nonce() as u32;
+        match pending {
+            Pending::Udp(mut pending) => {
+                let state = Arc::new(Mutex::new(ClientState::new(
+                    pending.ssrc,
+                    pending.chaos_seed,
+                )));
+                {
+                    let mut state = state.lock().unwrap();
+                    state.send_seq = pending.keys_send.send_nonce() as u32;
+                }
+
+                let (nack_tx, nack_rx) = mpsc::channel::<NackMessage>(100);
+                let send_task = session.runtime.spawn(tun_to_udp_loop(
+                    tun.clone(),
+                    pending.transport.clone(),
+                    pending.flow_id,
+                    pending.keys_send,
+                    state.clone(),
+                    nack_rx,
+                ));
+                let recv_task = session.runtime.spawn(udp_to_tun_loop(
+                    tun,
+                    pending.transport,
+                    pending.flow_id,
+                    pending.shared_secret,
+                    state,
+                    nack_tx,
+                ));
+                session.tasks.push(send_task);
+                session.tasks.push(recv_task);
+
+                let _ = (pending.tunnel_ipv4, pending.tunnel_ipv6.take(), pending.mtu);
+                NativeResult::ok("Omega datapath started")
+            }
+            Pending::Reality(mut pending) => {
+                let state = Arc::new(Mutex::new(ClientState::new(
+                    pending.ssrc,
+                    pending.chaos_seed,
+                )));
+                {
+                    let mut state = state.lock().unwrap();
+                    state.send_seq = pending.keys_send.send_nonce() as u32;
+                }
+
+                let (nack_tx, nack_rx) = mpsc::channel::<NackMessage>(100);
+                let send_task = session.runtime.spawn(tun_to_reality_loop(
+                    tun.clone(),
+                    pending.encryptor.clone(),
+                    pending.writer.clone(),
+                    pending.flow_id,
+                    pending.keys_send,
+                    state.clone(),
+                    nack_rx,
+                ));
+                let recv_task = session.runtime.spawn(reality_to_tun_loop(
+                    tun,
+                    pending.decryptor.clone(),
+                    pending.reader.clone(),
+                    pending.flow_id,
+                    pending.shared_secret,
+                    state,
+                    nack_tx,
+                ));
+                session.tasks.push(send_task);
+                session.tasks.push(recv_task);
+
+                let _ = (pending.tunnel_ipv4, pending.tunnel_ipv6.take(), pending.mtu);
+                NativeResult::ok("Omega REALITY datapath started")
+            }
         }
-
-        let (nack_tx, nack_rx) = mpsc::channel::<NackMessage>(100);
-        let send_task = session.runtime.spawn(tun_to_udp_loop(
-            tun.clone(),
-            pending.transport.clone(),
-            pending.flow_id,
-            pending.keys_send,
-            state.clone(),
-            nack_rx,
-        ));
-        let recv_task = session.runtime.spawn(udp_to_tun_loop(
-            tun,
-            pending.transport,
-            pending.flow_id,
-            pending.shared_secret,
-            state,
-            nack_tx,
-        ));
-        session.tasks.push(send_task);
-        session.tasks.push(recv_task);
-
-        let _ = (pending.tunnel_ipv4, pending.tunnel_ipv6.take(), pending.mtu);
-        NativeResult::ok("Omega datapath started")
     }
 
     pub fn stop(handle: u64) -> NativeResult {
@@ -361,6 +437,496 @@ mod android {
             task.abort();
         }
         NativeResult::ok("Stopped.")
+    }
+
+    // -------------------------------------------------------------------------
+    // REALITY handshake + tunnel loop
+    // -------------------------------------------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_reality_handshake(
+        server: &str,
+        device_id: &str,
+        device_token: &str,
+        device_name: &str,
+        reality_sni: &str,
+        reality_server_pubkey_b64: &str,
+        reality_short_id: &str,
+        reality_fingerprint: &str,
+        protected_tcp_fd: i32,
+    ) -> HandshakeResponse {
+        let profile = match AndroidProfile::parse_extended(
+            server,
+            device_id,
+            device_token,
+            "android",
+            "reality",
+            reality_sni,
+            reality_server_pubkey_b64,
+            reality_short_id,
+            reality_fingerprint,
+        ) {
+            Ok(profile) => profile,
+            Err(err) => {
+                close_raw_fd(protected_tcp_fd);
+                return HandshakeResponse::err(err);
+            }
+        };
+
+        let pubkey_bytes = match decode_b64_pubkey(&profile.reality_server_pubkey) {
+            Some(bytes) => bytes,
+            None => {
+                close_raw_fd(protected_tcp_fd);
+                return HandshakeResponse::err(
+                    "reality_server_pubkey must decode to 32 bytes (base64)",
+                );
+            }
+        };
+        let server_pubkey = PublicKey::from(pubkey_bytes);
+        let short_id = match parse_short_id_hex(&profile.reality_short_id) {
+            Ok(value) => value,
+            Err(err) => {
+                close_raw_fd(protected_tcp_fd);
+                return HandshakeResponse::err(err);
+            }
+        };
+
+        let result = (|| -> Result<HandshakeResponse, String> {
+            let runtime = Runtime::new().map_err(|err| format!("runtime init failed: {err}"))?;
+
+            // Adopt protected TCP fd. The Kotlin side already called
+            // `connect(server)` after `VpnService.protect()`, so the socket
+            // is connected to the REALITY listener and excluded from the VPN.
+            let std_socket =
+                unsafe { std::net::TcpStream::from_raw_fd(protected_tcp_fd as RawFd) };
+            std_socket
+                .set_nonblocking(true)
+                .map_err(|err| format!("tcp nonblocking failed: {err}"))?;
+            let _ = std_socket.set_nodelay(true);
+
+            let tcp = runtime
+                .block_on(async { TcpStream::from_std(std_socket) })
+                .map_err(|err| format!("tokio tcp init failed: {err}"))?;
+
+            // Run the REALITY TLS handshake to completion.
+            let alpn: [&[u8]; 1] = [b"http/1.1"];
+            let inputs = ClientHandshakeInputs {
+                server_name: &profile.reality_sni,
+                server_long_term_pubkey: &server_pubkey,
+                short_id,
+                alpn_offer: Some(&alpn),
+            };
+
+            let (mut tcp, established) = runtime.block_on(async {
+                let mut stream = tcp;
+                let est = client_handshake(&mut stream, &inputs)
+                    .await
+                    .map_err(|err| format!("REALITY TLS handshake failed: {err}"))?;
+                Ok::<_, String>((stream, est))
+            })?;
+
+            // Build encryptor/decryptor under the **application** keys.
+            let params = established.params;
+            let mut encryptor = RecordEncryptor::new(
+                &params,
+                &established
+                    .application_secrets
+                    .client_application_traffic_secret_0,
+            )
+            .map_err(|err| format!("record encryptor: {err}"))?;
+            let mut decryptor = RecordDecryptor::new(
+                &params,
+                &established
+                    .application_secrets
+                    .server_application_traffic_secret_0,
+            )
+            .map_err(|err| format!("record decryptor: {err}"))?;
+
+            // ---- Omega ClientHello (STUN + ML-KEM) inside the TLS tunnel ----
+            let mut rng = rand::thread_rng();
+            let (dk, ek) = MlKem768::generate(&mut rng);
+            let client_hello = ClientHello {
+                version: HANDSHAKE_VERSION,
+                client_mtu: DEFAULT_CLIENT_MTU,
+                fec_support: true,
+                supports_tunnel_ipv6: true,
+                encaps_key: ek.as_bytes().to_vec(),
+                auth: Some(ClientAuth {
+                    device_id: profile.device_id_bytes()?,
+                    device_token: profile.device_token_bytes()?,
+                    platform: DevicePlatform::Android,
+                    device_name: device_name.trim().if_empty("android").to_string(),
+                }),
+            };
+            let txn_id: [u8; 12] = rand::random();
+            let request = StunWrapper::wrap_request(&txn_id, &client_hello.serialize());
+
+            let server_hello = runtime.block_on(async {
+                let record = encryptor
+                    .seal_record(CT_APPLICATION_DATA, &request, 0)
+                    .map_err(|err| format!("seal omega CHLO: {err}"))?;
+                tcp.write_all(&record)
+                    .await
+                    .map_err(|err| format!("tcp write CHLO: {err}"))?;
+                tcp.flush()
+                    .await
+                    .map_err(|err| format!("tcp flush CHLO: {err}"))?;
+
+                let deadline =
+                    Instant::now() + Duration::from_millis(DEFAULT_HANDSHAKE_TIMEOUT_MS * 4);
+                loop {
+                    if Instant::now() >= deadline {
+                        return Err("Omega handshake (inside REALITY) timed out".to_string());
+                    }
+                    let payload = read_one_app_record(&mut tcp, &mut decryptor).await?;
+                    let Some((is_request, resp_txn, resp_payload)) =
+                        StunWrapper::parse(&payload)
+                    else {
+                        continue;
+                    };
+                    if is_request || resp_txn != txn_id {
+                        continue;
+                    }
+                    if let Some(hello) = ServerHello::deserialize(resp_payload) {
+                        return Ok::<ServerHello, String>(hello);
+                    }
+                    if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
+                        return Err(format!(
+                            "REALITY/Omega handshake rejected by server: {:?}",
+                            reject.reason
+                        ));
+                    }
+                    return Err(
+                        "malformed REALITY/Omega handshake response payload".to_string(),
+                    );
+                }
+            })?;
+
+            let ct_array: &ml_kem::Ciphertext<MlKem768> = server_hello
+                .ciphertext
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid KEM ciphertext length".to_string())?;
+            let shared_secret = dk
+                .decapsulate(ct_array)
+                .map_err(|_| "KEM decapsulation failed".to_string())?;
+            let ss_bytes: &[u8] = shared_secret.as_ref();
+            let shared_secret = ss_bytes.to_vec();
+            let flow_id_bytes =
+                derive_flow_id(&shared_secret).map_err(|err| format!("flow id failed: {err}"))?;
+            let flow_id = FlowId(flow_id_bytes);
+            let chaos_seed = u64::from_le_bytes(shared_secret[0..8].try_into().unwrap());
+            let ssrc = u32::from_be_bytes(flow_id_bytes[0..4].try_into().unwrap());
+            let keys_send = SessionKeys::from_shared_secret(&shared_secret, false)
+                .map_err(|err| format!("key derivation failed: {err}"))?;
+
+            // Split TCP stream into reader/writer halves for the tunnel loops.
+            let (reader, writer) = tcp.into_split();
+
+            let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+            let mtu = server_hello.server_mtu.clamp(1200, 1420);
+            let tunnel_ipv4 = server_hello.tunnel_ip.to_string();
+            let tunnel_ipv6 = server_hello.tunnel_ipv6.map(|value| value.to_string());
+
+            sessions().lock().unwrap().insert(
+                handle,
+                NativeSession {
+                    runtime,
+                    pending: Some(Pending::Reality(PendingRealitySession {
+                        reader: Arc::new(AsyncMutex::new(reader)),
+                        writer: Arc::new(AsyncMutex::new(writer)),
+                        encryptor: Arc::new(AsyncMutex::new(encryptor)),
+                        decryptor: Arc::new(AsyncMutex::new(decryptor)),
+                        shared_secret,
+                        keys_send,
+                        flow_id,
+                        chaos_seed,
+                        ssrc,
+                        tunnel_ipv4: tunnel_ipv4.clone(),
+                        tunnel_ipv6: tunnel_ipv6.clone(),
+                        mtu,
+                        cipher_suite: established.cipher_suite,
+                        params,
+                    })),
+                    tasks: Vec::new(),
+                },
+            );
+
+            Ok(HandshakeResponse::ok(
+                handle,
+                tunnel_ipv4,
+                tunnel_ipv6,
+                mtu,
+                vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+            ))
+        })();
+
+        match result {
+            Ok(response) => response,
+            Err(err) => HandshakeResponse::err(err),
+        }
+    }
+
+    /// Read one TLS application_data record from `tcp`, decrypt, and return
+    /// the inner payload bytes. Skips middlebox-compat ChangeCipherSpec
+    /// records that some peers still emit after handshake.
+    async fn read_one_app_record(
+        tcp: &mut TcpStream,
+        decryptor: &mut RecordDecryptor,
+    ) -> Result<Vec<u8>, String> {
+        loop {
+            let mut header = [0u8; 5];
+            tcp.read_exact(&mut header)
+                .await
+                .map_err(|err| format!("tcp read header: {err}"))?;
+            let (content_type, length, _) =
+                parse_record_header(&header).map_err(|err| err.to_string())?;
+            if length == 0 || length as usize > TLS_MAX_RECORD_CIPHERTEXT {
+                return Err(format!("invalid record length {length}"));
+            }
+            let mut body = vec![0u8; length as usize];
+            tcp.read_exact(&mut body)
+                .await
+                .map_err(|err| format!("tcp read body: {err}"))?;
+            match content_type {
+                CT_APPLICATION_DATA => {
+                    let opened = decryptor
+                        .open_record(&header, &mut body)
+                        .map_err(|err| format!("AEAD open: {err}"))?;
+                    if opened.content_type == CT_APPLICATION_DATA {
+                        return Ok(opened.content);
+                    }
+                    // handshake/alert inner types after handshake → ignore.
+                    continue;
+                }
+                CT_CHANGE_CIPHER_SPEC => continue,
+                _ => return Err(format!("unexpected content_type={content_type}")),
+            }
+        }
+    }
+
+    fn decode_b64_pubkey(raw: &str) -> Option<[u8; 32]> {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let bytes = STANDARD.decode(raw.trim().as_bytes()).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes);
+        Some(out)
+    }
+
+    fn parse_short_id_hex(raw: &str) -> Result<[u8; 8], String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok([0u8; 8]);
+        }
+        if raw.len() != 16 {
+            return Err("reality_short_id must be 16 hex chars".to_string());
+        }
+        let mut out = [0u8; 8];
+        for (i, chunk) in raw.as_bytes().chunks_exact(2).enumerate() {
+            let s = std::str::from_utf8(chunk)
+                .map_err(|_| "invalid hex in reality_short_id".to_string())?;
+            out[i] = u8::from_str_radix(s, 16)
+                .map_err(|err| format!("invalid hex in reality_short_id: {err}"))?;
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn tun_to_reality_loop(
+        tun: Arc<tun_rs::AsyncDevice>,
+        encryptor: Arc<AsyncMutex<RecordEncryptor>>,
+        writer: Arc<AsyncMutex<OwnedWriteHalf>>,
+        flow_id: FlowId,
+        mut keys_send: SessionKeys,
+        state: Arc<Mutex<ClientState>>,
+        mut nack_rx: mpsc::Receiver<NackMessage>,
+    ) {
+        let mut keepalive_interval = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut buf = vec![0u8; 1500];
+
+        loop {
+            tokio::select! {
+                _ = keepalive_interval.tick() => {
+                    let (seq, rtp_s, rtp_ts, ssrc) = next_header_state(&state, false);
+                    let Some(packet) = build_packet(&mut keys_send, flow_id, seq, PacketType::KeepAlive, rtp_s, rtp_ts, ssrc, Vec::new(), true) else {
+                        continue;
+                    };
+                    cache_packet(&state, seq, packet.clone());
+                    if send_reality_packet(&encryptor, &writer, packet.as_ref()).await.is_err() {
+                        return;
+                    }
+                }
+                Some(nack) = nack_rx.recv() => {
+                    let (seq, rtp_s, rtp_ts, ssrc) = next_header_state(&state, false);
+                    let mut payload = vec![0u8; 12];
+                    nack.write_to(&mut payload);
+                    let Some(packet) = build_packet(&mut keys_send, flow_id, seq, PacketType::Nack, rtp_s, rtp_ts, ssrc, payload, true) else {
+                        continue;
+                    };
+                    cache_packet(&state, seq, packet.clone());
+                    if send_reality_packet(&encryptor, &writer, packet.as_ref()).await.is_err() {
+                        return;
+                    }
+                }
+                read = tun.recv(&mut buf) => {
+                    let Ok(n) = read else { continue; };
+                    let is_small = n < 500;
+                    let (seq, rtp_s, rtp_ts, ssrc, target_size, padding_budget, redundancy_extra) = {
+                        let mut state = state.lock().unwrap();
+                        let seq = state.send_seq;
+                        state.send_seq = state.send_seq.wrapping_add(1);
+                        state.rtp_seq = state.rtp_seq.wrapping_add(1);
+                        state.rtp_timestamp = state.rtp_timestamp.wrapping_add(if is_small { 960 } else { 3000 });
+                        (
+                            seq,
+                            state.rtp_seq,
+                            state.rtp_timestamp,
+                            state.ssrc,
+                            state.chaos.get_target_size() as usize,
+                            state.current_padding_budget(),
+                            state.current_redundancy_extra(),
+                        )
+                    };
+                    let overhead = TOTAL_HEADER_LEN + AEAD_TAG_LEN;
+                    let wire_size = n + overhead;
+                    let padding_len = target_size.saturating_sub(wire_size).min(padding_budget);
+                    let mut payload = buf[..n].to_vec();
+                    if padding_len > 0 {
+                        payload.extend(std::iter::repeat(0).take(padding_len));
+                    }
+                    let Some(packet) = build_packet(&mut keys_send, flow_id, seq, PacketType::Data, rtp_s, rtp_ts, ssrc, payload, is_small) else {
+                        continue;
+                    };
+                    cache_packet(&state, seq, packet.clone());
+                    if send_reality_packet(&encryptor, &writer, packet.as_ref()).await.is_ok() {
+                        for _ in 0..redundancy_extra {
+                            tokio::time::sleep(Duration::from_micros(REDUNDANCY_PACING_US)).await;
+                            if send_reality_packet(&encryptor, &writer, packet.as_ref()).await.is_err() {
+                                return;
+                            }
+                        }
+                    } else {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Encrypt an Omega-wire packet as a single TLS application_data record
+    /// and write it to the REALITY socket.
+    async fn send_reality_packet(
+        encryptor: &Arc<AsyncMutex<RecordEncryptor>>,
+        writer: &Arc<AsyncMutex<OwnedWriteHalf>>,
+        packet: &[u8],
+    ) -> Result<(), ()> {
+        let record = {
+            let mut enc = encryptor.lock().await;
+            enc.seal_record(CT_APPLICATION_DATA, packet, 0).map_err(|_| ())?
+        };
+        let mut w = writer.lock().await;
+        w.write_all(&record).await.map_err(|_| ())?;
+        Ok(())
+    }
+
+    async fn reality_to_tun_loop(
+        tun: Arc<tun_rs::AsyncDevice>,
+        decryptor: Arc<AsyncMutex<RecordDecryptor>>,
+        reader: Arc<AsyncMutex<OwnedReadHalf>>,
+        flow_id: FlowId,
+        shared_secret: Vec<u8>,
+        state: Arc<Mutex<ClientState>>,
+        nack_tx: mpsc::Sender<NackMessage>,
+    ) {
+        let mut keys_recv = match SessionKeys::from_shared_secret(&shared_secret, false) {
+            Ok(keys) => keys,
+            Err(_) => return,
+        };
+        let mut replay_filter = ReplayFilter::new();
+
+        loop {
+            // Read one encrypted TLS record from the socket.
+            let payload = {
+                let mut r = reader.lock().await;
+                let mut header = [0u8; 5];
+                if r.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let Ok((content_type, length, _)) = parse_record_header(&header) else {
+                    return;
+                };
+                if length == 0 || length as usize > TLS_MAX_RECORD_CIPHERTEXT {
+                    return;
+                }
+                let mut body = vec![0u8; length as usize];
+                if r.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                if content_type != CT_APPLICATION_DATA {
+                    continue;
+                }
+                let mut dec = decryptor.lock().await;
+                match dec.open_record(&header, &mut body) {
+                    Ok(rec) if rec.content_type == CT_APPLICATION_DATA => rec.content,
+                    _ => continue,
+                }
+            };
+
+            let n = payload.len();
+            if n < TOTAL_HEADER_LEN + AEAD_TAG_LEN {
+                continue;
+            }
+            let Some(omega) = OmegaHeader::read_from(&payload[RTP_HEADER_LEN..TOTAL_HEADER_LEN])
+            else {
+                continue;
+            };
+            if omega.flow_id != flow_id {
+                continue;
+            }
+            if !matches!(
+                omega.packet_type,
+                PacketType::Data | PacketType::Nack | PacketType::KeepAlive | PacketType::Close
+            ) {
+                continue;
+            }
+            if !replay_filter.check(omega.seq as u64) {
+                continue;
+            }
+
+            let mut owned = payload;
+            let (aad, ciphertext) = owned.split_at_mut(TOTAL_HEADER_LEN);
+            let Ok(plaintext) = keys_recv.decrypt_in_place(ciphertext, omega.seq as u64, aad)
+            else {
+                continue;
+            };
+            replay_filter.update(omega.seq as u64);
+
+            let inbound_nack = {
+                let mut state = state.lock().unwrap();
+                state.observe_inbound_seq(omega.seq)
+            };
+            if !matches!(omega.packet_type, PacketType::Close) {
+                if let Some(nack) = inbound_nack {
+                    let _ = nack_tx.send(nack).await;
+                }
+            }
+
+            match omega.packet_type {
+                PacketType::Data => {
+                    let final_len = get_ip_packet_len(plaintext)
+                        .map(|ip_len| plaintext.len().min(ip_len))
+                        .unwrap_or(plaintext.len());
+                    let _ = tun.send(&plaintext[..final_len]).await;
+                }
+                PacketType::Close => return,
+                PacketType::KeepAlive | PacketType::Nack | _ => {}
+            }
+        }
     }
 
     async fn perform_handshake(
@@ -721,6 +1287,21 @@ mod host {
         _protected_udp_fd: i32,
     ) -> HandshakeResponse {
         HandshakeResponse::err("Android native runtime can only run on Android.")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_reality_handshake(
+        _server: &str,
+        _device_id: &str,
+        _device_token: &str,
+        _device_name: &str,
+        _reality_sni: &str,
+        _reality_server_pubkey_b64: &str,
+        _reality_short_id: &str,
+        _reality_fingerprint: &str,
+        _protected_tcp_fd: i32,
+    ) -> HandshakeResponse {
+        HandshakeResponse::err("Android REALITY runtime can only run on Android.")
     }
 
     pub fn continue_with_tun_fd(_handle: u64, _tun_fd: i32) -> NativeResult {

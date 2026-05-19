@@ -22,9 +22,13 @@ pub use omega_reality::{
 };
 
 pub mod cert_cache;
+pub mod config_store;
+pub mod controller;
 pub mod keys;
 pub mod proxy;
 pub mod tunnel;
+
+pub use controller::{RealityController, RealityStatus, SharedController};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -48,12 +52,12 @@ const ENV_SHORT_IDS: &str = "OMEGA_REALITY_SHORT_IDS";
 const ENV_FP_PROFILE: &str = "OMEGA_REALITY_FINGERPRINT_PROFILE";
 const ENV_HANDSHAKE_TIMEOUT: &str = "OMEGA_REALITY_HANDSHAKE_TIMEOUT_MS";
 
-const DEFAULT_BIND: &str = "0.0.0.0:443";
-const DEFAULT_KEY_FILE: &str = "state/reality_x25519.key";
-const DEFAULT_CERT_DIR: &str = "state/reality_certs";
-const DEFAULT_FINGERPRINT: &str = "chrome_131";
-const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
-const SHORT_ID_LEN: usize = 8;
+pub(crate) const DEFAULT_BIND: &str = "0.0.0.0:443";
+pub(crate) const DEFAULT_KEY_FILE: &str = "state/reality_x25519.key";
+pub(crate) const DEFAULT_CERT_DIR: &str = "state/reality_certs";
+pub(crate) const DEFAULT_FINGERPRINT: &str = "chrome_131";
+pub(crate) const DEFAULT_HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+pub(crate) const SHORT_ID_LEN: usize = 8;
 const CERT_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 
 #[derive(Debug, Clone)]

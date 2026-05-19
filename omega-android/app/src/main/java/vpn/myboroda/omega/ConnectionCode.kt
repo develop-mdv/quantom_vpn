@@ -21,6 +21,12 @@ data class OmegaProfile(
     val deviceToken: String = "",
     val deviceName: String = "android",
     val transport: String = "auto",
+    // REALITY (XTLS-style TLS masquerade). Only consumed when transport == "reality".
+    val realityServer: String = "",
+    val realitySni: String = "",
+    val realityServerPubkey: String = "",
+    val realityShortId: String = "",
+    val realityFingerprint: String = "chrome_131",
 ) {
     fun normalized(): OmegaProfile {
         return copy(
@@ -29,6 +35,11 @@ data class OmegaProfile(
             deviceToken = deviceToken.trim(),
             deviceName = deviceName.trim().ifEmpty { "android" },
             transport = normalizeTransport(transport),
+            realityServer = realityServer.trim(),
+            realitySni = realitySni.trim(),
+            realityServerPubkey = realityServerPubkey.trim(),
+            realityShortId = realityShortId.trim(),
+            realityFingerprint = realityFingerprint.trim().ifEmpty { "chrome_131" },
         )
     }
 
@@ -40,6 +51,20 @@ data class OmegaProfile(
         if (!TOKEN_RE.matches(normalized.deviceToken)) {
             return "Device token must be 64 hex characters."
         }
+        if (normalized.transport == "reality") {
+            if (normalized.realitySni.isBlank()) {
+                return "REALITY SNI is required when transport=reality."
+            }
+            if (normalized.realityServerPubkey.isBlank()) {
+                return "REALITY server pubkey is required when transport=reality."
+            }
+            if (!PUBKEY_B64_RE.matches(normalized.realityServerPubkey)) {
+                return "REALITY server pubkey must be base64 (32 bytes = 44 chars)."
+            }
+            if (normalized.realityShortId.isNotBlank() && !SHORT_ID_RE.matches(normalized.realityShortId)) {
+                return "REALITY short_id must be 16 hex chars (or empty)."
+            }
+        }
         return null
     }
 
@@ -47,6 +72,8 @@ data class OmegaProfile(
         private val UUID_RE =
             Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         private val TOKEN_RE = Regex("^[0-9a-fA-F]{64}$")
+        private val PUBKEY_B64_RE = Regex("^[A-Za-z0-9+/]{43}=$")
+        private val SHORT_ID_RE = Regex("^[0-9a-fA-F]{16}$")
     }
 }
 
@@ -123,6 +150,11 @@ object ConnectionCodeParser {
                     deviceToken = uri.firstQuery("token", "device_token", "omega_device_token"),
                     deviceName = uri.firstQuery("device_name", "name", fallback = "android"),
                     transport = uri.firstQuery("transport", "omega_transport", fallback = "auto"),
+                    realityServer = uri.firstQuery("reality_server", "omega_reality_server"),
+                    realitySni = uri.firstQuery("reality_sni", "omega_reality_sni"),
+                    realityServerPubkey = uri.firstQuery("reality_server_pubkey", "omega_reality_server_pubkey"),
+                    realityShortId = uri.firstQuery("reality_short_id", "omega_reality_short_id"),
+                    realityFingerprint = uri.firstQuery("reality_fingerprint", "omega_reality_fingerprint", fallback = "chrome_131"),
                 )
             )
         }
@@ -151,6 +183,11 @@ object ConnectionCodeParser {
                 deviceToken = root.firstString("token", "device_token", "omega_device_token"),
                 deviceName = root.firstString("device_name", "name", "omega_device_name", fallback = "android"),
                 transport = root.firstString("transport", "omega_transport", fallback = "auto"),
+                realityServer = root.firstString("reality_server", "omega_reality_server"),
+                realitySni = root.firstString("reality_sni", "omega_reality_sni"),
+                realityServerPubkey = root.firstString("reality_server_pubkey", "omega_reality_server_pubkey"),
+                realityShortId = root.firstString("reality_short_id", "omega_reality_short_id"),
+                realityFingerprint = root.firstString("reality_fingerprint", "omega_reality_fingerprint", fallback = "chrome_131"),
             )
         }
     }
@@ -174,6 +211,11 @@ object ConnectionCodeParser {
                 deviceToken = values["OMEGA_DEVICE_TOKEN"].orEmpty(),
                 deviceName = values["OMEGA_DEVICE_NAME"] ?: "android",
                 transport = values["OMEGA_TRANSPORT"] ?: "auto",
+                realityServer = values["OMEGA_REALITY_SERVER"].orEmpty(),
+                realitySni = values["OMEGA_REALITY_SNI"].orEmpty(),
+                realityServerPubkey = values["OMEGA_REALITY_SERVER_PUBKEY"].orEmpty(),
+                realityShortId = values["OMEGA_REALITY_SHORT_ID"].orEmpty(),
+                realityFingerprint = values["OMEGA_REALITY_FINGERPRINT"] ?: "chrome_131",
             )
         }
     }
@@ -183,6 +225,7 @@ private fun normalizeTransport(value: String): String {
     return when (value.trim().lowercase()) {
         "udp" -> "udp"
         "tcp" -> "tcp"
+        "reality", "xtls" -> "reality"
         else -> "auto"
     }
 }

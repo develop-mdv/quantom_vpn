@@ -45,6 +45,37 @@ pub extern "system" fn Java_vpn_myboroda_omega_OmegaNative_nativeStartHandshake(
 }
 
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_vpn_myboroda_omega_OmegaNative_nativeStartRealityHandshake(
+    env: JNIEnv,
+    _receiver: JObject,
+    server: JString,
+    device_id: JString,
+    device_token: JString,
+    device_name: JString,
+    reality_sni: JString,
+    reality_server_pubkey: JString,
+    reality_short_id: JString,
+    reality_fingerprint: JString,
+    protected_tcp_fd: i32,
+) -> JString {
+    let response = unsafe {
+        runtime::start_reality_handshake(
+            &java_string(env, server),
+            &java_string(env, device_id),
+            &java_string(env, device_token),
+            &java_string(env, device_name),
+            &java_string(env, reality_sni),
+            &java_string(env, reality_server_pubkey),
+            &java_string(env, reality_short_id),
+            &java_string(env, reality_fingerprint),
+            protected_tcp_fd,
+        )
+    };
+    unsafe { new_java_string(env, &response.to_json()) }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_vpn_myboroda_omega_OmegaNative_nativeContinueWithTunFd(
     env: JNIEnv,
     _receiver: JObject,

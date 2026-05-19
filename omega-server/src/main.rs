@@ -158,15 +158,8 @@ async fn run_server() -> anyhow::Result<()> {
         allow_legacy_v1,
     };
 
-    if !env_bool("OMEGA_ADMIN_WEB_DISABLE") {
-        let web_identity = identity_store.clone();
-        let web_sessions = session_manager.clone();
-        tokio::spawn(async move {
-            if let Err(err) = web_admin::run(web_admin_bind, web_identity, web_sessions).await {
-                tracing::warn!(error = %err, "web admin stopped");
-            }
-        });
-    }
+    // web_admin needs to wait until the reality controller is constructed
+    // below; spawn it after the controller exists.
 
     let cleanup_manager = session_manager.clone();
     tokio::spawn(async move {
@@ -259,34 +252,44 @@ async fn run_server() -> anyhow::Result<()> {
         });
     }
 
-    match reality::RealityConfig::from_env() {
-        Ok(Some(cfg)) => {
-            let reality_dp = reality::RealityDataPath {
-                tun: tun.clone(),
-                udp: udp.clone(),
-                session_manager: session_manager.clone(),
-                identity_store: identity_store.clone(),
-                server_mtu: tunnel_mtu,
-                allow_legacy_v1,
-                morphing_policy,
-            };
-            tokio::spawn(async move {
-                match reality::RealityRuntime::bootstrap(cfg, reality_dp).await {
-                    Ok(rt) => {
-                        if let Err(err) = rt.run_listener().await {
-                            tracing::warn!(error = %err, "REALITY listener stopped");
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "REALITY bootstrap failed; transport disabled");
-                    }
-                }
-            });
+    // REALITY: hot-reloadable runtime managed by the admin web UI.
+    let reality_dp = reality::RealityDataPath {
+        tun: tun.clone(),
+        udp: udp.clone(),
+        session_manager: session_manager.clone(),
+        identity_store: identity_store.clone(),
+        server_mtu: tunnel_mtu,
+        allow_legacy_v1,
+        morphing_policy,
+    };
+    let reality_controller: reality::SharedController = Arc::new(
+        reality::RealityController::new(PathBuf::from("state"), reality_dp),
+    );
+    // 1. Try to load the persisted JSON from disk and (if enabled) start the
+    //    listener.
+    if let Err(err) = reality_controller.bootstrap().await {
+        tracing::warn!(error = %err, "reality: bootstrap from disk failed; admin can re-apply via web UI");
+    }
+    // 2. Backwards compat: if the JSON is still missing and the operator set
+    //    the old OMEGA_REALITY_* env-vars, seed the config from them on first
+    //    boot. From then on the admin UI is the source of truth.
+    if let Some(env_cfg) = reality::controller::stored_from_env() {
+        if let Err(err) = reality_controller.seed_from_env(env_cfg).await {
+            tracing::warn!(error = %err, "reality: env-var seed failed");
         }
-        Ok(None) => {}
-        Err(err) => {
-            tracing::warn!(error = %err, "REALITY configuration invalid; transport disabled");
-        }
+    }
+
+    if !env_bool("OMEGA_ADMIN_WEB_DISABLE") {
+        let web_identity = identity_store.clone();
+        let web_sessions = session_manager.clone();
+        let web_reality = reality_controller.clone();
+        tokio::spawn(async move {
+            if let Err(err) =
+                web_admin::run(web_admin_bind, web_identity, web_sessions, web_reality).await
+            {
+                tracing::warn!(error = %err, "web admin stopped");
+            }
+        });
     }
 
     tracing::info!("data path running, press Ctrl+C to stop");

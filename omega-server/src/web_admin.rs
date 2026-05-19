@@ -8,6 +8,8 @@ use tokio::net::{TcpListener, TcpStream};
 use crate::identity::{
     parse_platform, IdentityStore, DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_MAX_DEVICES,
 };
+use crate::reality::config_store::StoredConfig as RealityStored;
+use crate::reality::SharedController as RealityController;
 use crate::session::{flow_id_from_hex, SessionManager};
 
 const MAX_REQUEST_SIZE: usize = 64 * 1024;
@@ -16,6 +18,7 @@ pub async fn run(
     bind_addr: String,
     identity_store: Arc<IdentityStore>,
     session_manager: Arc<SessionManager>,
+    reality: RealityController,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&bind_addr)
         .await
@@ -27,9 +30,10 @@ pub async fn run(
         let (stream, peer) = listener.accept().await?;
         let identity = identity_store.clone();
         let sessions = session_manager.clone();
+        let reality = reality.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, identity, sessions).await {
+            if let Err(err) = handle_connection(stream, identity, sessions, reality).await {
                 tracing::warn!(%peer, error = %err, "web admin request failed");
             }
         });
@@ -47,18 +51,73 @@ async fn handle_connection(
     mut stream: TcpStream,
     identity_store: Arc<IdentityStore>,
     session_manager: Arc<SessionManager>,
+    reality: RealityController,
 ) -> anyhow::Result<()> {
     let request = read_request(&mut stream).await?;
 
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
+            let reality_status = reality.status().await;
             let html = render_page(
                 &identity_store,
                 &session_manager,
+                &reality_status,
                 request.query.get("msg").cloned(),
                 request.query.get("code").cloned(),
             );
             html_response(200, "OK", html)
+        }
+        ("GET", "/api/reality/status") => {
+            let status = reality.status().await;
+            let json = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
+            json_response(200, "OK", &json)
+        }
+        ("POST", "/reality/apply") => {
+            let form = parse_form(&request.body);
+            let mut current = reality.status().await.stored;
+            current.enabled = form.get("enabled").map(|v| v == "1").unwrap_or(false);
+            if let Some(v) = form.get("bind") {
+                current.bind = v.trim().to_string();
+            }
+            if let Some(v) = form.get("dest") {
+                if let Some((h, p)) = parse_host_port(v) {
+                    current.dest_host = h;
+                    current.dest_port = p;
+                }
+            }
+            if let Some(v) = form.get("server_names") {
+                current.server_names = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            if let Some(v) = form.get("short_ids") {
+                current.short_ids_hex = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            if let Some(v) = form.get("fingerprint") {
+                if !v.trim().is_empty() {
+                    current.fingerprint_profile = v.trim().to_string();
+                }
+            }
+            let msg = match reality.apply(current).await {
+                Ok(_) => "REALITY: настройки применены".to_string(),
+                Err(err) => format!("REALITY: ошибка применения — {err}"),
+            };
+            redirect_with_message(msg)
+        }
+        ("POST", "/reality/keygen") => {
+            let msg = match reality.regenerate_keys().await {
+                Ok(pubkey) => format!(
+                    "REALITY: сгенерирован новый ключ. Раздайте клиентам публичный ключ: {pubkey}"
+                ),
+                Err(err) => format!("REALITY: ошибка генерации ключа — {err}"),
+            };
+            redirect_with_message(msg)
         }
         ("POST", "/users/create") => {
             let form = parse_form(&request.body);
@@ -240,6 +299,7 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
 fn render_page(
     identity_store: &IdentityStore,
     session_manager: &SessionManager,
+    reality: &crate::reality::RealityStatus,
     message: Option<String>,
     connection_code: Option<String>,
 ) -> String {
@@ -287,6 +347,8 @@ fn render_page(
         }
         out.push_str("</div>");
     }
+
+    render_reality_card(&mut out, reality);
 
     out.push_str("<div class=\"grid\">");
     out.push_str("<div class=\"card\"><h2>Create User</h2>");
@@ -457,6 +519,128 @@ fn parse_form(body: &str) -> HashMap<String, String> {
         out.insert(url_decode(key), url_decode(value));
     }
     out
+}
+
+fn render_reality_card(out: &mut String, status: &crate::reality::RealityStatus) {
+    let s: &RealityStored = &status.stored;
+    out.push_str("<div class=\"card\" style=\"margin-bottom:16px\">");
+    out.push_str("<h2>REALITY — обход белых списков (TLS-маскировка)</h2>");
+    out.push_str("<p style=\"color:#475569;margin-top:0\">");
+    out.push_str("Включите, если в стране/сети работают только TLS-соединения к доверенным сайтам. ");
+    out.push_str("Сервер будет выглядеть как обычный <code>SNI</code>-сайт (например <code>gosuslugi.ru</code>), внутри идёт ваш VPN.");
+    out.push_str("</p>");
+
+    // Status badge
+    let badge_color = if status.running { "#16a34a" } else { "#64748b" };
+    let badge_text = if status.running { "Работает" } else { "Выключено" };
+    out.push_str(&format!(
+        "<p><b>Статус:</b> <span style=\"background:{};color:#fff;padding:2px 10px;border-radius:10px;font-size:12px\">{}</span>",
+        badge_color, badge_text
+    ));
+    if let Some(uptime) = status.uptime_seconds {
+        out.push_str(&format!(" <span style=\"color:#475569\">uptime: {} сек</span>", uptime));
+    }
+    out.push_str("</p>");
+
+    // Public key block (always show if we have one)
+    if let Some(pubkey) = &status.public_key_b64 {
+        out.push_str("<div style=\"background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:10px;margin-bottom:12px\">");
+        out.push_str("<b>Публичный ключ для клиентов:</b><br>");
+        out.push_str("<code style=\"display:block;background:#fff;padding:6px;border-radius:4px;font-size:13px;word-break:break-all;margin-top:4px\">");
+        out.push_str(&escape_html(pubkey));
+        out.push_str("</code>");
+        out.push_str("<small style=\"color:#475569\">Раздайте этот ключ всем клиентам — на Windows/Android вставить в поле «REALITY server pubkey».</small>");
+        out.push_str("</div>");
+    } else if !status.key_file_exists {
+        out.push_str("<div style=\"background:#fef3c7;border:1px solid #fbbf24;padding:10px;border-radius:8px;margin-bottom:12px\">");
+        out.push_str("Ключевая пара REALITY ещё не сгенерирована. Нажмите «Сгенерировать ключ» ниже.");
+        out.push_str("</div>");
+    }
+
+    // Apply form
+    out.push_str("<form method=\"post\" action=\"/reality/apply\">");
+    out.push_str("<label style=\"display:block;margin:6px 0\"><input type=\"checkbox\" name=\"enabled\" value=\"1\"");
+    if s.enabled {
+        out.push_str(" checked");
+    }
+    out.push_str("> Включить REALITY-обход</label>");
+
+    out.push_str("<label>Слушать на адресе (host:port)</label>");
+    out.push_str(&format!("<input name=\"bind\" value=\"{}\">", escape_html(&s.bind)));
+
+    out.push_str("<label>Маскировка под сайт (host:port)</label>");
+    let dest = format!("{}:{}", s.dest_host, s.dest_port);
+    out.push_str(&format!(
+        "<input name=\"dest\" value=\"{}\" placeholder=\"gosuslugi.ru:443\">",
+        escape_html(&dest)
+    ));
+
+    out.push_str("<label>Разрешённые SNI (через запятую)</label>");
+    let names = s.server_names.join(",");
+    out.push_str(&format!(
+        "<input name=\"server_names\" value=\"{}\" placeholder=\"gosuslugi.ru,www.gosuslugi.ru\">",
+        escape_html(&names)
+    ));
+
+    out.push_str("<label>Short IDs (опционально, 16 hex через запятую — пусто = wildcard)</label>");
+    let short = s.short_ids_hex.join(",");
+    out.push_str(&format!(
+        "<input name=\"short_ids\" value=\"{}\">",
+        escape_html(&short)
+    ));
+
+    out.push_str("<label>uTLS-профиль (fingerprint)</label>");
+    out.push_str("<select name=\"fingerprint\">");
+    for opt in &["chrome_131", "chrome_120_no_ech"] {
+        out.push_str(&format!(
+            "<option value=\"{}\"{}>{}</option>",
+            opt,
+            if s.fingerprint_profile == *opt { " selected" } else { "" },
+            opt
+        ));
+    }
+    out.push_str("</select>");
+
+    out.push_str("<button type=\"submit\">Применить</button>");
+    out.push_str("</form>");
+
+    // Keygen button
+    out.push_str("<form method=\"post\" action=\"/reality/keygen\" style=\"margin-top:10px\" ");
+    out.push_str("onsubmit=\"return confirm('Сгенерировать новый ключ? Старые клиенты перестанут подключаться, пока вы не раздадите им новый публичный ключ.');\">");
+    out.push_str("<button type=\"submit\" style=\"background:#0ea5e9;color:#fff;border:none;padding:8px 14px;border-radius:6px;cursor:pointer\">Сгенерировать новый ключ</button>");
+    out.push_str("</form>");
+
+    // Cert snapshots
+    if !status.cert_snapshots.is_empty() {
+        out.push_str("<details style=\"margin-top:10px\"><summary>Кэшированные сертификаты (");
+        out.push_str(&status.cert_snapshots.len().to_string());
+        out.push_str(")</summary><ul style=\"font-size:13px;color:#475569\">");
+        for snap in &status.cert_snapshots {
+            out.push_str(&format!(
+                "<li><b>{}</b> — sha256: {}…</li>",
+                escape_html(&snap.sni),
+                escape_html(&snap.leaf_sha256_hex.chars().take(16).collect::<String>())
+            ));
+        }
+        out.push_str("</ul></details>");
+    }
+
+    out.push_str("</div>");
+}
+
+fn parse_host_port(raw: &str) -> Option<(String, u16)> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (host, port) = match raw.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
+        None => (raw.to_string(), 443),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_ascii_lowercase(), port))
 }
 
 fn redirect_with_message(message: String) -> Vec<u8> {
@@ -665,6 +849,19 @@ fn text_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
     out
 }
 
+fn json_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        status,
+        reason,
+        body.len()
+    );
+    let mut out = Vec::with_capacity(header.len() + body.len());
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -723,8 +920,18 @@ mod tests {
             )
             .expect("register device");
         let sessions = SessionManager::new(true);
+        let reality = crate::reality::RealityStatus {
+            running: false,
+            stored: crate::reality::config_store::StoredConfig::default(),
+            public_key_b64: None,
+            bind: None,
+            primary_sni: None,
+            uptime_seconds: None,
+            cert_snapshots: Vec::new(),
+            key_file_exists: false,
+        };
 
-        let html = render_page(&store, &sessions, None, None);
+        let html = render_page(&store, &sessions, &reality, None, None);
 
         assert!(html.contains("omega://connect/"));
         assert!(html.contains("OMEGA_DEVICE_TOKEN="));

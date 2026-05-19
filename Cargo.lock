@@ -1189,9 +1189,11 @@ dependencies = [
  "kem",
  "ml-kem",
  "omega-core",
+ "omega-reality",
  "rand 0.8.5",
  "tokio",
  "tun-rs",
+ "x25519-dalek",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 omega-core = { path = "../omega-core", features = ["std", "fec"] }
+omega-reality = { path = "../omega-reality" }
 tokio = { workspace = true }
 tun-rs = { workspace = true }
 bytes = { workspace = true }
@@ -17,3 +18,4 @@ ml-kem = { workspace = true }
 kem = "0.3.0-pre.0"
 rand = "0.8"
 base64 = { workspace = true }
+x25519-dalek = { workspace = true }

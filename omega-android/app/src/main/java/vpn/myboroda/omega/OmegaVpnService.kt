@@ -16,6 +16,7 @@ import android.service.quicksettings.TileService
 import android.util.Log
 import java.net.DatagramSocket
 import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -62,13 +63,11 @@ class OmegaVpnService : VpnService() {
         val profile = store.loadProfile()
         val splitSettings = store.loadSplitSettings()
         Log.i(TAG, "Starting tunnel to ${profile.server} via ${profile.transport}")
-        val protectedUdpFd = createProtectedUdpFd(profile.server)
-        if (protectedUdpFd < 0) {
-            stopTunnel()
-            return
+
+        val handshake = when (profile.transport) {
+            "reality" -> startRealityHandshake(profile)
+            else -> startUdpHandshake(profile)
         }
-        Log.i(TAG, "Protected UDP socket is ready; starting native handshake")
-        val handshake = OmegaNative.startHandshake(profile, protectedUdpFd)
         if (!handshake.ok || handshake.config == null) {
             Log.e(TAG, handshake.message)
             stopTunnel()
@@ -159,6 +158,62 @@ class OmegaVpnService : VpnService() {
         postToMain {
             stopForegroundCompat()
             stopSelf()
+        }
+    }
+
+    private fun startUdpHandshake(profile: OmegaProfile): NativeHandshakeResult {
+        val protectedUdpFd = createProtectedUdpFd(profile.server)
+        if (protectedUdpFd < 0) {
+            return NativeHandshakeResult(false, null, "Failed to create protected UDP socket.")
+        }
+        Log.i(TAG, "Protected UDP socket is ready; starting native handshake")
+        return OmegaNative.startHandshake(profile, protectedUdpFd)
+    }
+
+    private fun startRealityHandshake(profile: OmegaProfile): NativeHandshakeResult {
+        val target = if (profile.realityServer.isNotBlank()) profile.realityServer else profile.server
+        val protectedTcpFd = createProtectedTcpFd(target)
+        if (protectedTcpFd < 0) {
+            return NativeHandshakeResult(false, null, "Failed to create protected TCP socket for REALITY.")
+        }
+        Log.i(TAG, "Protected TCP socket is ready; starting REALITY handshake to $target (SNI=${profile.realitySni})")
+        return OmegaNative.startRealityHandshake(profile, protectedTcpFd)
+    }
+
+    private fun createProtectedTcpFd(server: String): Int {
+        val host = server.substringBeforeLast(':', missingDelimiterValue = "")
+            .trim()
+            .removePrefix("[")
+            .removeSuffix("]")
+        val port = server.substringAfterLast(':', missingDelimiterValue = "").toIntOrNull()
+        if (host.isBlank() || port == null || port !in 1..65535) {
+            Log.e(TAG, "Invalid REALITY server endpoint: $server")
+            return -1
+        }
+        val socket = Socket()
+        return runCatching {
+            socket.reuseAddress = false
+            socket.tcpNoDelay = true
+            // Step 1: protect the OS-level fd from the VPN itself.
+            if (!protect(socket)) {
+                socket.close()
+                Log.e(TAG, "VpnService.protect failed for REALITY TCP socket")
+                return -1
+            }
+            // Step 2: connect through the underlying (non-VPN) network.
+            socket.connect(InetSocketAddress(host, port), 10_000)
+            // Step 3: hand the connected fd to native land. Use
+            // ParcelFileDescriptor.fromSocket to detach the fd cleanly.
+            val pfd = ParcelFileDescriptor.fromSocket(socket)
+            val fd = pfd.detachFd()
+            // socket.close() at this point would close the dup'd fd we kept
+            // — leave the Socket alive to keep the original handle until GC.
+            // The pfd has detached; native side owns the fd now.
+            fd
+        }.getOrElse {
+            runCatching { socket.close() }
+            Log.e(TAG, "Failed to create protected TCP socket", it)
+            -1
         }
     }
 

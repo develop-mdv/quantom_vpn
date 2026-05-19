@@ -35,6 +35,11 @@ class MainActivity : Activity() {
     private lateinit var tokenInput: EditText
     private lateinit var deviceNameInput: EditText
     private lateinit var transportSpinner: Spinner
+    private lateinit var realityServerInput: EditText
+    private lateinit var realitySniInput: EditText
+    private lateinit var realityPubkeyInput: EditText
+    private lateinit var realityShortIdInput: EditText
+    private lateinit var realityFingerprintSpinner: Spinner
     private lateinit var splitSpinner: Spinner
     private lateinit var splitSummaryView: TextView
     private lateinit var searchInput: EditText
@@ -81,7 +86,7 @@ class MainActivity : Activity() {
         deviceIdInput = input("Device ID")
         tokenInput = input("Device token")
         deviceNameInput = input("Device name")
-        transportSpinner = spinner(listOf("auto", "udp", "tcp"))
+        transportSpinner = spinner(listOf("auto", "udp", "tcp", "reality"))
         column.addView(
             panel(
                 "Profile",
@@ -95,6 +100,27 @@ class MainActivity : Activity() {
                 deviceNameInput,
                 label("Transport"),
                 transportSpinner,
+            )
+        )
+
+        realityServerInput = input("REALITY server (host:port, e.g. 1.2.3.4:443)")
+        realitySniInput = input("REALITY SNI (e.g. gosuslugi.ru)")
+        realityPubkeyInput = input("REALITY server pubkey (base64, 44 chars)")
+        realityShortIdInput = input("REALITY short_id (16 hex chars, optional)")
+        realityFingerprintSpinner = spinner(listOf("chrome_131", "chrome_120_no_ech"))
+        column.addView(
+            panel(
+                "REALITY masquerade (used when Transport=reality)",
+                label("REALITY server"),
+                realityServerInput,
+                label("SNI"),
+                realitySniInput,
+                label("Server pubkey"),
+                realityPubkeyInput,
+                label("Short ID (optional)"),
+                realityShortIdInput,
+                label("uTLS fingerprint"),
+                realityFingerprintSpinner,
             )
         )
 
@@ -232,7 +258,18 @@ class MainActivity : Activity() {
         deviceIdInput.setText(profile.deviceId)
         tokenInput.setText(profile.deviceToken)
         deviceNameInput.setText(profile.deviceName)
-        transportSpinner.setSelection(listOf("auto", "udp", "tcp").indexOf(profile.transport).coerceAtLeast(0))
+        transportSpinner.setSelection(
+            listOf("auto", "udp", "tcp", "reality").indexOf(profile.transport).coerceAtLeast(0)
+        )
+        realityServerInput.setText(profile.realityServer)
+        realitySniInput.setText(profile.realitySni)
+        realityPubkeyInput.setText(profile.realityServerPubkey)
+        realityShortIdInput.setText(profile.realityShortId)
+        realityFingerprintSpinner.setSelection(
+            listOf("chrome_131", "chrome_120_no_ech")
+                .indexOf(profile.realityFingerprint)
+                .coerceAtLeast(0)
+        )
     }
 
     private fun readProfileFromFields(): OmegaProfile {
@@ -242,6 +279,11 @@ class MainActivity : Activity() {
             deviceToken = tokenInput.text.toString(),
             deviceName = deviceNameInput.text.toString(),
             transport = transportSpinner.selectedItem?.toString() ?: "auto",
+            realityServer = realityServerInput.text.toString(),
+            realitySni = realitySniInput.text.toString(),
+            realityServerPubkey = realityPubkeyInput.text.toString(),
+            realityShortId = realityShortIdInput.text.toString(),
+            realityFingerprint = realityFingerprintSpinner.selectedItem?.toString() ?: "chrome_131",
         ).normalized()
     }
 
