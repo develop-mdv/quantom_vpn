@@ -64,7 +64,7 @@ class OmegaVpnService : VpnService() {
         val splitSettings = store.loadSplitSettings()
         Log.i(TAG, "Starting tunnel to ${profile.server} via ${profile.transport}")
 
-        val handshake = when (profile.transport) {
+        val handshake = when (profile.effectiveTransport()) {
             "reality" -> startRealityHandshake(profile)
             else -> startUdpHandshake(profile)
         }
@@ -171,12 +171,13 @@ class OmegaVpnService : VpnService() {
     }
 
     private fun startRealityHandshake(profile: OmegaProfile): NativeHandshakeResult {
-        val target = if (profile.realityServer.isNotBlank()) profile.realityServer else profile.server
-        val protectedTcpFd = createProtectedTcpFd(target)
+        val rf = profile.realityFields()
+            ?: return NativeHandshakeResult(false, null, "REALITY-код не распознан.")
+        val protectedTcpFd = createProtectedTcpFd(rf.server)
         if (protectedTcpFd < 0) {
             return NativeHandshakeResult(false, null, "Failed to create protected TCP socket for REALITY.")
         }
-        Log.i(TAG, "Protected TCP socket is ready; starting REALITY handshake to $target (SNI=${profile.realitySni})")
+        Log.i(TAG, "Protected TCP socket is ready; starting REALITY handshake to ${rf.server} (SNI=${rf.sni})")
         return OmegaNative.startRealityHandshake(profile, protectedTcpFd)
     }
 

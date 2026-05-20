@@ -208,6 +208,41 @@ impl RealityController {
     /// Generate a fresh X25519 keypair, write it to disk, and return the
     /// new base64-encoded public key. If the listener was running, restart
     /// it so the new key takes effect immediately.
+    /// Build a self-contained REALITY connection code that the admin can
+    /// paste to clients (Windows / Android). Format:
+    ///
+    ///     omega-reality://<base64url-no-padding>
+    ///
+    /// where the payload is JSON {"server","sni","pubkey","short_id","fp"}.
+    /// `public_host` is the externally-reachable hostname or IP that clients
+    /// should connect to (the local `bind` only knows about `0.0.0.0` etc.).
+    pub async fn connection_code(&self, public_host: &str) -> Option<String> {
+        let guard = self.inner.lock().await;
+        let active = guard.active.as_ref()?;
+        let port = active.config.bind.port();
+        let sni = active.config.primary_sni().to_string();
+        let short_id = active
+            .config
+            .short_ids
+            .first()
+            .map(|id| {
+                id.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            })
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "server": format!("{}:{}", public_host, port),
+            "sni": sni,
+            "pubkey": active.public_key_b64,
+            "short_id": short_id,
+            "fp": active.config.fingerprint_profile,
+        })
+        .to_string();
+        Some(format!(
+            "omega-reality://{}",
+            base64_url_no_pad(payload.as_bytes())
+        ))
+    }
+
     pub async fn regenerate_keys(&self) -> Result<String> {
         let stored = { self.inner.lock().await.stored.clone() };
         let path = PathBuf::from(&stored.key_file);
@@ -310,6 +345,12 @@ pub fn stored_from_env() -> Option<StoredConfig> {
         fingerprint_profile,
         handshake_timeout_ms,
     })
+}
+
+fn base64_url_no_pad(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn parse_host_port(raw: &str) -> Option<(String, u16)> {

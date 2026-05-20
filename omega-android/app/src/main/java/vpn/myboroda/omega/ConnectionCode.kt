@@ -21,12 +21,11 @@ data class OmegaProfile(
     val deviceToken: String = "",
     val deviceName: String = "android",
     val transport: String = "auto",
-    // REALITY (XTLS-style TLS masquerade). Only consumed when transport == "reality".
-    val realityServer: String = "",
-    val realitySni: String = "",
-    val realityServerPubkey: String = "",
-    val realityShortId: String = "",
-    val realityFingerprint: String = "chrome_131",
+    // REALITY (TLS masquerade) — single self-contained code from the admin UI,
+    // plus a user toggle. When realityEnabled is true the client uses
+    // transport="reality" internally regardless of the UDP/TCP setting.
+    val realityCode: String = "",
+    val realityEnabled: Boolean = false,
 ) {
     fun normalized(): OmegaProfile {
         return copy(
@@ -35,11 +34,7 @@ data class OmegaProfile(
             deviceToken = deviceToken.trim(),
             deviceName = deviceName.trim().ifEmpty { "android" },
             transport = normalizeTransport(transport),
-            realityServer = realityServer.trim(),
-            realitySni = realitySni.trim(),
-            realityServerPubkey = realityServerPubkey.trim(),
-            realityShortId = realityShortId.trim(),
-            realityFingerprint = realityFingerprint.trim().ifEmpty { "chrome_131" },
+            realityCode = realityCode.trim(),
         )
     }
 
@@ -51,30 +46,72 @@ data class OmegaProfile(
         if (!TOKEN_RE.matches(normalized.deviceToken)) {
             return "Device token must be 64 hex characters."
         }
-        if (normalized.transport == "reality") {
-            if (normalized.realitySni.isBlank()) {
-                return "REALITY SNI is required when transport=reality."
+        if (normalized.realityEnabled) {
+            if (normalized.realityCode.isBlank()) {
+                return "Вставьте REALITY-код из админки — без него обход не включится."
             }
-            if (normalized.realityServerPubkey.isBlank()) {
-                return "REALITY server pubkey is required when transport=reality."
-            }
-            if (!PUBKEY_B64_RE.matches(normalized.realityServerPubkey)) {
-                return "REALITY server pubkey must be base64 (32 bytes = 44 chars)."
-            }
-            if (normalized.realityShortId.isNotBlank() && !SHORT_ID_RE.matches(normalized.realityShortId)) {
-                return "REALITY short_id must be 16 hex chars (or empty)."
+            if (!isValidRealityCode(normalized.realityCode)) {
+                return "REALITY-код некорректен. Скопируйте свежий код из админки заново."
             }
         }
         return null
+    }
+
+    /// Effective transport that the native bridge actually consumes:
+    /// "reality" overrides whatever the user selected when the toggle is on.
+    fun effectiveTransport(): String = if (realityEnabled) "reality" else transport
+
+    /// Parsed pieces of the REALITY-код (for the native side which still
+    /// takes 5 explicit fields). Returns null if no code is present or
+    /// parsing failed.
+    fun realityFields(): RealityFields? {
+        if (realityCode.isBlank()) return null
+        return runCatching { parseRealityCode(realityCode) }.getOrNull()
     }
 
     companion object {
         private val UUID_RE =
             Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         private val TOKEN_RE = Regex("^[0-9a-fA-F]{64}$")
-        private val PUBKEY_B64_RE = Regex("^[A-Za-z0-9+/]{43}=$")
-        private val SHORT_ID_RE = Regex("^[0-9a-fA-F]{16}$")
     }
+}
+
+data class RealityFields(
+    val server: String,
+    val sni: String,
+    val pubkey: String,
+    val shortId: String,
+    val fingerprint: String,
+)
+
+private fun isValidRealityCode(code: String): Boolean {
+    return runCatching { parseRealityCode(code) }.isSuccess
+}
+
+private fun parseRealityCode(code: String): RealityFields {
+    val trimmed = code.trim()
+    require(trimmed.startsWith("omega-reality://", ignoreCase = true)) {
+        "REALITY code must start with omega-reality://"
+    }
+    val payload = trimmed.substring("omega-reality://".length)
+    var b64 = payload.replace('-', '+').replace('_', '/')
+    when (b64.length % 4) {
+        2 -> b64 += "=="
+        3 -> b64 += "="
+    }
+    val bytes = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
+    val json = JSONObject(String(bytes, Charsets.UTF_8))
+    val server = json.optString("server").trim()
+    val sni = json.optString("sni").trim()
+    val pubkey = json.optString("pubkey").trim()
+    val shortId = json.optString("short_id").trim()
+    val fp = json.optString("fp").ifBlank { "chrome_131" }
+    require(server.isNotBlank()) { "REALITY code: server missing" }
+    require(sni.isNotBlank()) { "REALITY code: sni missing" }
+    require(pubkey.isNotBlank()) { "REALITY code: pubkey missing" }
+    val pkBytes = android.util.Base64.decode(pubkey, android.util.Base64.DEFAULT)
+    require(pkBytes.size == 32) { "REALITY code: pubkey must be 32 bytes" }
+    return RealityFields(server, sni, pubkey, shortId, fp)
 }
 
 data class SplitSettings(
@@ -150,11 +187,7 @@ object ConnectionCodeParser {
                     deviceToken = uri.firstQuery("token", "device_token", "omega_device_token"),
                     deviceName = uri.firstQuery("device_name", "name", fallback = "android"),
                     transport = uri.firstQuery("transport", "omega_transport", fallback = "auto"),
-                    realityServer = uri.firstQuery("reality_server", "omega_reality_server"),
-                    realitySni = uri.firstQuery("reality_sni", "omega_reality_sni"),
-                    realityServerPubkey = uri.firstQuery("reality_server_pubkey", "omega_reality_server_pubkey"),
-                    realityShortId = uri.firstQuery("reality_short_id", "omega_reality_short_id"),
-                    realityFingerprint = uri.firstQuery("reality_fingerprint", "omega_reality_fingerprint", fallback = "chrome_131"),
+                    realityCode = uri.firstQuery("reality_code", "omega_reality_code"),
                 )
             )
         }
@@ -183,11 +216,7 @@ object ConnectionCodeParser {
                 deviceToken = root.firstString("token", "device_token", "omega_device_token"),
                 deviceName = root.firstString("device_name", "name", "omega_device_name", fallback = "android"),
                 transport = root.firstString("transport", "omega_transport", fallback = "auto"),
-                realityServer = root.firstString("reality_server", "omega_reality_server"),
-                realitySni = root.firstString("reality_sni", "omega_reality_sni"),
-                realityServerPubkey = root.firstString("reality_server_pubkey", "omega_reality_server_pubkey"),
-                realityShortId = root.firstString("reality_short_id", "omega_reality_short_id"),
-                realityFingerprint = root.firstString("reality_fingerprint", "omega_reality_fingerprint", fallback = "chrome_131"),
+                realityCode = root.firstString("reality_code", "omega_reality_code"),
             )
         }
     }
@@ -211,11 +240,7 @@ object ConnectionCodeParser {
                 deviceToken = values["OMEGA_DEVICE_TOKEN"].orEmpty(),
                 deviceName = values["OMEGA_DEVICE_NAME"] ?: "android",
                 transport = values["OMEGA_TRANSPORT"] ?: "auto",
-                realityServer = values["OMEGA_REALITY_SERVER"].orEmpty(),
-                realitySni = values["OMEGA_REALITY_SNI"].orEmpty(),
-                realityServerPubkey = values["OMEGA_REALITY_SERVER_PUBKEY"].orEmpty(),
-                realityShortId = values["OMEGA_REALITY_SHORT_ID"].orEmpty(),
-                realityFingerprint = values["OMEGA_REALITY_FINGERPRINT"] ?: "chrome_131",
+                realityCode = values["OMEGA_REALITY_CODE"].orEmpty(),
             )
         }
     }
@@ -225,7 +250,6 @@ private fun normalizeTransport(value: String): String {
     return when (value.trim().lowercase()) {
         "udp" -> "udp"
         "tcp" -> "tcp"
-        "reality", "xtls" -> "reality"
         else -> "auto"
     }
 }

@@ -29,6 +29,7 @@ use x25519_dalek::PublicKey;
 
 use self::handshake::{ClientEstablished, ClientHandshakeInputs};
 
+const ENV_CODE: &str = "OMEGA_REALITY_CODE";
 const ENV_SERVER: &str = "OMEGA_REALITY_SERVER";
 const ENV_SNI: &str = "OMEGA_REALITY_SNI";
 const ENV_PUBKEY: &str = "OMEGA_REALITY_SERVER_PUBKEY";
@@ -50,7 +51,77 @@ pub struct RealityClientConfig {
 }
 
 impl RealityClientConfig {
+    /// Parse a self-contained `omega-reality://` connection code that the
+    /// server admin pastes to the user. The payload is base64url JSON with
+    /// {"server","sni","pubkey","short_id","fp"} — see
+    /// `omega_server::reality::controller::connection_code`.
+    pub fn from_code(code: &str) -> Result<Self> {
+        let code = code.trim();
+        let payload = code
+            .strip_prefix("omega-reality://")
+            .ok_or_else(|| anyhow!("REALITY code must start with omega-reality://"))?;
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload.trim().as_bytes())
+            .or_else(|_| {
+                base64::engine::general_purpose::STANDARD.decode(payload.trim().as_bytes())
+            })
+            .context("REALITY code: base64 decode failed")?;
+        let json: serde_json::Value =
+            serde_json::from_slice(&decoded).context("REALITY code: JSON parse failed")?;
+        let server_raw = json
+            .get("server")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("REALITY code: missing server"))?;
+        let sni = json
+            .get("sni")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("REALITY code: missing sni"))?
+            .to_ascii_lowercase();
+        let pubkey_raw = json
+            .get("pubkey")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("REALITY code: missing pubkey"))?;
+        let short_id_raw = json
+            .get("short_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let fp = json
+            .get("fp")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_FINGERPRINT)
+            .to_string();
+
+        let server: SocketAddr = server_raw
+            .parse()
+            .with_context(|| format!("REALITY code: parse server {server_raw}"))?;
+        let pubkey_bytes = B64
+            .decode(pubkey_raw.trim().as_bytes())
+            .context("REALITY code: pubkey base64 decode")?;
+        if pubkey_bytes.len() != 32 {
+            bail!("REALITY code: pubkey must be 32 bytes");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&pubkey_bytes);
+        let server_pubkey = PublicKey::from(arr);
+        let short_id = parse_short_id(short_id_raw)?;
+
+        Ok(Self {
+            server,
+            sni,
+            server_pubkey,
+            short_id,
+            fingerprint_profile: fp,
+            handshake_timeout: Duration::from_millis(DEFAULT_HANDSHAKE_TIMEOUT_MS),
+        })
+    }
+
     pub fn from_env() -> Result<Self> {
+        // 1. Если есть один компактный код — используем его, остальное игнорируем.
+        if let Ok(code) = std::env::var(ENV_CODE) {
+            if !code.trim().is_empty() {
+                return Self::from_code(&code);
+            }
+        }
         let server_raw = std::env::var(ENV_SERVER)
             .map_err(|_| anyhow!("{ENV_SERVER} must be set for REALITY transport"))?;
         let server: SocketAddr = server_raw

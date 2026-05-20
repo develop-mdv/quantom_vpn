@@ -195,36 +195,31 @@
                                 <ComboBoxItem Content="auto" IsSelected="True" />
                                 <ComboBoxItem Content="udp" />
                                 <ComboBoxItem Content="tcp" />
-                                <ComboBoxItem Content="reality" />
                             </ComboBox>
 
-                            <Expander Header="REALITY (маскировка под доверенный сайт)"
-                                      Foreground="{StaticResource MutedTextBrush}"
-                                      Margin="0,0,0,12">
-                                <StackPanel Margin="0,8,0,0">
-                                    <TextBlock Text="Сервер (IP:порт)" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="RealityServerBox"
-                                             ToolTip="Адрес Omega-сервера, на котором поднята REALITY (обычно :443)" />
-
-                                    <TextBlock Text="SNI (доверенный домен)" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="RealitySniBox"
-                                             ToolTip="Например, gosuslugi.ru — должен совпадать со списком на сервере" />
-
-                                    <TextBlock Text="Публичный ключ сервера (base64)" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="RealityPubkeyBox"
-                                             ToolTip="32 байта X25519 в base64, выдаётся командой omega_reality_keygen" />
-
-                                    <TextBlock Text="Short ID (опционально, 16 hex)" Foreground="{StaticResource MutedTextBrush}" />
-                                    <TextBox x:Name="RealityShortIdBox"
-                                             ToolTip="Оставьте пустым для wildcard, либо укажите идентификатор из списка сервера" />
-
-                                    <TextBlock Text="uTLS-профиль" Foreground="{StaticResource MutedTextBrush}" />
-                                    <ComboBox x:Name="RealityFingerprintBox">
-                                        <ComboBoxItem Content="chrome_131" IsSelected="True" />
-                                        <ComboBoxItem Content="chrome_120_no_ech" />
-                                    </ComboBox>
+                            <Border Background="#1B2530" CornerRadius="8" Padding="14" Margin="0,0,0,12">
+                                <StackPanel>
+                                    <CheckBox x:Name="RealityEnabledBox"
+                                              Content="Включить обход (REALITY)"
+                                              Foreground="{StaticResource TextBrush}"
+                                              FontWeight="SemiBold" />
+                                    <TextBlock Text="REALITY-код из админки"
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               Margin="0,8,0,0" />
+                                    <TextBox x:Name="RealityCodeBox"
+                                             MinHeight="60"
+                                             MaxHeight="120"
+                                             TextWrapping="Wrap"
+                                             AcceptsReturn="False"
+                                             VerticalScrollBarVisibility="Auto"
+                                             ToolTip="Скопируйте omega-reality://… из админки сервера" />
+                                    <TextBlock Text="Включите чекбокс, если в стране/сети режут всё кроме TLS к белым спискам. Один код заменяет все ручные настройки."
+                                               Foreground="{StaticResource MutedTextBrush}"
+                                               TextWrapping="Wrap"
+                                               FontSize="12"
+                                               Margin="0,4,0,0" />
                                 </StackPanel>
-                            </Expander>
+                            </Border>
 
                             <TextBlock Text="Kill switch" Foreground="{StaticResource MutedTextBrush}" />
                             <ComboBox x:Name="KillSwitchBox">

@@ -11,6 +11,13 @@ public static class OmegaEnvironmentBuilder
             ? Environment.MachineName
             : settings.DeviceName.Trim();
 
+        // The REALITY toggle overrides the transport selection: if the user
+        // ticked "Включить обход (REALITY)" we force transport=reality so the
+        // Rust client uses the connection code instead of UDP/TCP.
+        var effectiveTransport = settings.RealityEnabled
+            ? "reality"
+            : Normalize(settings.Transport, "auto");
+
         var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["OMEGA_SERVER"] = settings.ServerEndpoint.Trim(),
@@ -19,7 +26,7 @@ public static class OmegaEnvironmentBuilder
             ["OMEGA_DEVICE_NAME"] = deviceName,
             ["OMEGA_PLATFORM"] = "windows",
             ["OMEGA_PROFILE"] = Normalize(settings.Profile, "gaming"),
-            ["OMEGA_TRANSPORT"] = Normalize(settings.Transport, "auto"),
+            ["OMEGA_TRANSPORT"] = effectiveTransport,
             ["OMEGA_MTU_POLICY"] = Normalize(settings.MtuPolicy, "auto"),
             ["OMEGA_TUNNEL_MODE"] = Normalize(settings.TunnelMode, "full"),
             ["OMEGA_DNS_POLICY"] = Normalize(settings.DnsPolicy, "tunnel"),
@@ -33,28 +40,12 @@ public static class OmegaEnvironmentBuilder
             ["RUST_LOG"] = "info",
         };
 
-        // REALITY masquerade (only meaningful when Transport in {reality, auto}).
-        // Pass through whatever the user typed; the Rust client validates
-        // and only consumes these when actually attempting REALITY.
-        if (!string.IsNullOrWhiteSpace(settings.RealityServer))
+        // REALITY: forward the single connection code. The Rust client only
+        // consumes it when `OMEGA_TRANSPORT=reality` (which we set above
+        // when the user flipped the toggle).
+        if (!string.IsNullOrWhiteSpace(settings.RealityCode))
         {
-            env["OMEGA_REALITY_SERVER"] = settings.RealityServer.Trim();
-        }
-        if (!string.IsNullOrWhiteSpace(settings.RealitySni))
-        {
-            env["OMEGA_REALITY_SNI"] = settings.RealitySni.Trim();
-        }
-        if (!string.IsNullOrWhiteSpace(settings.RealityServerPubkey))
-        {
-            env["OMEGA_REALITY_SERVER_PUBKEY"] = settings.RealityServerPubkey.Trim();
-        }
-        if (!string.IsNullOrWhiteSpace(settings.RealityShortId))
-        {
-            env["OMEGA_REALITY_SHORT_ID"] = settings.RealityShortId.Trim();
-        }
-        if (!string.IsNullOrWhiteSpace(settings.RealityFingerprint))
-        {
-            env["OMEGA_REALITY_FINGERPRINT"] = settings.RealityFingerprint.Trim();
+            env["OMEGA_REALITY_CODE"] = settings.RealityCode.Trim();
         }
         return env;
     }

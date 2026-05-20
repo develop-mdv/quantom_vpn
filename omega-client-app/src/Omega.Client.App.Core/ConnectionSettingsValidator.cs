@@ -38,58 +38,60 @@ public static partial class ConnectionSettingsValidator
             errors.Add(new ValidationIssue(nameof(ConnectionSettings.DeviceToken), "Device token must be 64 hex characters."));
         }
 
-        // REALITY: validate the four user-supplied fields only when the user
-        // actually selected the reality transport. When Transport is auto/udp/tcp
-        // these fields stay informational and are not required.
-        if (string.Equals(settings.Transport?.Trim(), "reality", StringComparison.OrdinalIgnoreCase))
+        // REALITY: только валидируем когда чекбокс "Включить обход" выставлен.
+        // Один self-contained omega-reality://<base64url-json> код заменяет все
+        // прежние поля (server / sni / pubkey / short_id / fingerprint).
+        if (settings.RealityEnabled)
         {
-            if (string.IsNullOrWhiteSpace(settings.RealityServer))
+            if (string.IsNullOrWhiteSpace(settings.RealityCode))
             {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityServer),
-                    "REALITY server endpoint is required (e.g. 203.0.113.10:443)."));
+                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityCode),
+                    "Вставьте REALITY-код из админки — без него обход не включится."));
             }
-            else if (!LooksLikeEndpoint(settings.RealityServer))
+            else if (!IsValidRealityCode(settings.RealityCode))
             {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityServer),
-                    "REALITY server must be host:port (or [ipv6]:port)."));
-            }
-            if (string.IsNullOrWhiteSpace(settings.RealitySni))
-            {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealitySni),
-                    "REALITY SNI is required (e.g. gosuslugi.ru)."));
-            }
-            if (string.IsNullOrWhiteSpace(settings.RealityServerPubkey))
-            {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityServerPubkey),
-                    "REALITY server public key is required (base64, 32 bytes)."));
-            }
-            else if (!Base64Pubkey32(settings.RealityServerPubkey))
-            {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityServerPubkey),
-                    "REALITY public key must decode to 32 bytes (base64)."));
-            }
-            if (!string.IsNullOrWhiteSpace(settings.RealityShortId)
-                && !ShortIdRegex().IsMatch(settings.RealityShortId.Trim()))
-            {
-                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityShortId),
-                    "REALITY short_id must be 16 hex chars (or empty for wildcard)."));
+                errors.Add(new ValidationIssue(nameof(ConnectionSettings.RealityCode),
+                    "REALITY-код некорректен. Скопируйте свежий код из админки заново."));
             }
         }
 
         return errors;
     }
 
-    private static bool Base64Pubkey32(string value)
+    private static bool IsValidRealityCode(string code)
     {
+        var trimmed = code.Trim();
+        const string prefix = "omega-reality://";
+        if (!trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+        var payload = trimmed.Substring(prefix.Length);
         try
         {
-            var bytes = Convert.FromBase64String(value.Trim());
-            return bytes.Length == 32;
+            var bytes = DecodeBase64Permissive(payload);
+            var json = System.Text.Json.JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(bytes));
+            var root = json.RootElement;
+            if (!root.TryGetProperty("server", out _)) return false;
+            if (!root.TryGetProperty("sni", out _)) return false;
+            if (!root.TryGetProperty("pubkey", out var pk)) return false;
+            var pkStr = pk.GetString();
+            if (string.IsNullOrWhiteSpace(pkStr)) return false;
+            var pkBytes = Convert.FromBase64String(pkStr.Trim());
+            return pkBytes.Length == 32;
         }
         catch
         {
             return false;
         }
+    }
+
+    private static byte[] DecodeBase64Permissive(string s)
+    {
+        var v = s.Trim().Replace('-', '+').Replace('_', '/');
+        switch (v.Length % 4)
+        {
+            case 2: v += "=="; break;
+            case 3: v += "="; break;
+        }
+        return Convert.FromBase64String(v);
     }
 
     private static bool LooksLikeEndpoint(string value)
@@ -111,7 +113,4 @@ public static partial class ConnectionSettingsValidator
 
     [GeneratedRegex("^[0-9a-fA-F]{64}$")]
     private static partial Regex DeviceTokenRegex();
-
-    [GeneratedRegex("^[0-9a-fA-F]{16}$")]
-    private static partial Regex ShortIdRegex();
 }

@@ -12,11 +12,8 @@ class ProfileStore(context: Context) {
             deviceToken = prefs.getString(KEY_DEVICE_TOKEN, "").orEmpty(),
             deviceName = prefs.getString(KEY_DEVICE_NAME, "android").orEmpty(),
             transport = prefs.getString(KEY_TRANSPORT, "auto").orEmpty(),
-            realityServer = prefs.getString(KEY_REALITY_SERVER, "").orEmpty(),
-            realitySni = prefs.getString(KEY_REALITY_SNI, "").orEmpty(),
-            realityServerPubkey = prefs.getString(KEY_REALITY_PUBKEY, "").orEmpty(),
-            realityShortId = prefs.getString(KEY_REALITY_SHORT_ID, "").orEmpty(),
-            realityFingerprint = prefs.getString(KEY_REALITY_FP, "chrome_131").orEmpty(),
+            realityCode = prefs.getString(KEY_REALITY_CODE, "").orEmpty(),
+            realityEnabled = prefs.getBoolean(KEY_REALITY_ENABLED, false),
         ).normalized()
     }
 
@@ -28,11 +25,8 @@ class ProfileStore(context: Context) {
             .putString(KEY_DEVICE_TOKEN, normalized.deviceToken)
             .putString(KEY_DEVICE_NAME, normalized.deviceName)
             .putString(KEY_TRANSPORT, normalized.transport)
-            .putString(KEY_REALITY_SERVER, normalized.realityServer)
-            .putString(KEY_REALITY_SNI, normalized.realitySni)
-            .putString(KEY_REALITY_PUBKEY, normalized.realityServerPubkey)
-            .putString(KEY_REALITY_SHORT_ID, normalized.realityShortId)
-            .putString(KEY_REALITY_FP, normalized.realityFingerprint)
+            .putString(KEY_REALITY_CODE, normalized.realityCode)
+            .putBoolean(KEY_REALITY_ENABLED, normalized.realityEnabled)
             .apply()
     }
 
@@ -58,10 +52,7 @@ class ProfileStore(context: Context) {
         private const val KEY_TRANSPORT = "transport"
         private const val KEY_SPLIT_MODE = "split_mode"
         private const val KEY_SELECTED_PACKAGES = "selected_packages"
-        private const val KEY_REALITY_SERVER = "reality_server"
-        private const val KEY_REALITY_SNI = "reality_sni"
-        private const val KEY_REALITY_PUBKEY = "reality_server_pubkey"
-        private const val KEY_REALITY_SHORT_ID = "reality_short_id"
-        private const val KEY_REALITY_FP = "reality_fingerprint"
+        private const val KEY_REALITY_CODE = "reality_code"
+        private const val KEY_REALITY_ENABLED = "reality_enabled"
     }
 }

@@ -58,10 +58,13 @@ async fn handle_connection(
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
             let reality_status = reality.status().await;
+            let public_host = public_host_for_clients();
+            let reality_code = reality.connection_code(&public_host).await;
             let html = render_page(
                 &identity_store,
                 &session_manager,
                 &reality_status,
+                reality_code.as_deref(),
                 request.query.get("msg").cloned(),
                 request.query.get("code").cloned(),
             );
@@ -296,10 +299,21 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     })
 }
 
+fn public_host_for_clients() -> String {
+    let hint = client_server_hint();
+    // hint can be "<SERVER_IP>:51820" or "1.2.3.4:51820" or "host:port".
+    if let Some((host, _)) = hint.rsplit_once(':') {
+        host.trim_matches(|c| c == '[' || c == ']').to_string()
+    } else {
+        hint
+    }
+}
+
 fn render_page(
     identity_store: &IdentityStore,
     session_manager: &SessionManager,
     reality: &crate::reality::RealityStatus,
+    reality_code: Option<&str>,
     message: Option<String>,
     connection_code: Option<String>,
 ) -> String {
@@ -348,7 +362,7 @@ fn render_page(
         out.push_str("</div>");
     }
 
-    render_reality_card(&mut out, reality);
+    render_reality_card(&mut out, reality, reality_code);
 
     out.push_str("<div class=\"grid\">");
     out.push_str("<div class=\"card\"><h2>Create User</h2>");
@@ -521,7 +535,11 @@ fn parse_form(body: &str) -> HashMap<String, String> {
     out
 }
 
-fn render_reality_card(out: &mut String, status: &crate::reality::RealityStatus) {
+fn render_reality_card(
+    out: &mut String,
+    status: &crate::reality::RealityStatus,
+    reality_code: Option<&str>,
+) {
     let s: &RealityStored = &status.stored;
     out.push_str("<div class=\"card\" style=\"margin-bottom:16px\">");
     out.push_str("<h2>REALITY — обход белых списков (TLS-маскировка)</h2>");
@@ -542,18 +560,26 @@ fn render_reality_card(out: &mut String, status: &crate::reality::RealityStatus)
     }
     out.push_str("</p>");
 
-    // Public key block (always show if we have one)
-    if let Some(pubkey) = &status.public_key_b64 {
-        out.push_str("<div style=\"background:#f1f5f9;border:1px solid #cbd5e1;border-radius:8px;padding:10px;margin-bottom:12px\">");
-        out.push_str("<b>Публичный ключ для клиентов:</b><br>");
-        out.push_str("<code style=\"display:block;background:#fff;padding:6px;border-radius:4px;font-size:13px;word-break:break-all;margin-top:4px\">");
-        out.push_str(&escape_html(pubkey));
-        out.push_str("</code>");
-        out.push_str("<small style=\"color:#475569\">Раздайте этот ключ всем клиентам — на Windows/Android вставить в поле «REALITY server pubkey».</small>");
+    // Готовый REALITY-код для клиентов (одна строка, paste в клиент).
+    if let Some(code) = reality_code {
+        out.push_str("<div style=\"background:#ecfdf5;border:1px solid #34d399;border-radius:8px;padding:10px;margin-bottom:12px\">");
+        out.push_str("<b>REALITY-код для клиентов:</b><br>");
+        out.push_str("<pre class=\"code reality-code\" style=\"background:#fff;padding:8px;border-radius:4px;font-size:13px;word-break:break-all;white-space:pre-wrap;margin:6px 0\">");
+        out.push_str(&escape_html(code));
+        out.push_str("</pre>");
+        out.push_str("<button type=\"button\" class=\"copy-btn\" onclick=\"copyPreviousCode(this)\">Скопировать REALITY-код</button><span class=\"copy-status\"></span>");
+        out.push_str("<br><small style=\"color:#475569\">Передайте эту единственную строку клиенту. На Windows/Android достаточно вставить её в поле «REALITY-код» и включить переключатель «Обход». Все остальные параметры зашиты внутри кода.</small>");
         out.push_str("</div>");
     } else if !status.key_file_exists {
         out.push_str("<div style=\"background:#fef3c7;border:1px solid #fbbf24;padding:10px;border-radius:8px;margin-bottom:12px\">");
-        out.push_str("Ключевая пара REALITY ещё не сгенерирована. Нажмите «Сгенерировать ключ» ниже.");
+        out.push_str("Ключевая пара REALITY ещё не сгенерирована. Нажмите «Сгенерировать ключ» ниже, затем включите REALITY и нажмите «Применить» — здесь появится готовый REALITY-код для клиентов.");
+        out.push_str("</div>");
+    } else if let Some(pubkey) = &status.public_key_b64 {
+        out.push_str("<div style=\"background:#fef3c7;border:1px solid #fbbf24;padding:10px;border-radius:8px;margin-bottom:12px\">");
+        out.push_str("REALITY выключен — включите ниже, чтобы получить готовый REALITY-код для клиентов.<br>");
+        out.push_str("<small style=\"color:#475569\">Публичный ключ уже создан: <code>");
+        out.push_str(&escape_html(pubkey));
+        out.push_str("</code></small>");
         out.push_str("</div>");
     }
 
@@ -931,7 +957,7 @@ mod tests {
             key_file_exists: false,
         };
 
-        let html = render_page(&store, &sessions, &reality, None, None);
+        let html = render_page(&store, &sessions, &reality, None, None, None);
 
         assert!(html.contains("omega://connect/"));
         assert!(html.contains("OMEGA_DEVICE_TOKEN="));
