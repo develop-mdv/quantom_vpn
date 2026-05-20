@@ -600,8 +600,11 @@ fn render_reality_card(
         out.push_str(" checked");
     }
     out.push_str("><span class=\"slider\"></span></label>");
-    out.push_str("<label class=\"text\" for=\"reality-enabled\">Включить REALITY-обход</label>");
+    out.push_str("<label class=\"text\" for=\"reality-enabled\">Принимать REALITY-подключения от клиентов</label>");
     out.push_str("</div>");
+    out.push_str("<small style=\"color:#475569;display:block;margin:-6px 0 10px\">");
+    out.push_str("Этот переключатель открывает/закрывает REALITY-порт на сервере. Каждый пользователь у себя в клиенте сам решает идти через обход или обычный UDP.");
+    out.push_str("</small>");
 
     out.push_str("<label>Слушать на адресе (host:port)</label>");
     out.push_str(&format!("<input name=\"bind\" value=\"{}\">", escape_html(&s.bind)));

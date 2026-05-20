@@ -244,7 +244,7 @@ impl RealityController {
     }
 
     pub async fn regenerate_keys(&self) -> Result<String> {
-        let stored = { self.inner.lock().await.stored.clone() };
+        let mut stored = { self.inner.lock().await.stored.clone() };
         let path = PathBuf::from(&stored.key_file);
         let pair = RealityKeyPair::generate();
         pair.save(&path)?;
@@ -254,9 +254,14 @@ impl RealityController {
             path = %path.display(),
             "reality: admin regenerated server X25519 keypair (clients must update)"
         );
-        if stored.enabled {
-            self.apply(stored).await?;
+        // Convenience: if the admin just generated a key, they almost
+        // certainly want REALITY to be live. Flip it on automatically so
+        // the next visit to the admin shows the green "Работает" badge
+        // and the ready-to-copy REALITY code instead of an inert form.
+        if !stored.enabled {
+            stored.enabled = true;
         }
+        self.apply(stored).await?;
         Ok(pubkey)
     }
 
