@@ -36,7 +36,7 @@ class MainActivity : Activity() {
     private lateinit var deviceNameInput: EditText
     private lateinit var transportSpinner: Spinner
     private lateinit var realityCodeInput: EditText
-    private lateinit var realityEnabledBox: android.widget.CheckBox
+    private lateinit var realityEnabledSwitch: android.widget.Switch
     private lateinit var splitSpinner: Spinner
     private lateinit var splitSummaryView: TextView
     private lateinit var searchInput: EditText
@@ -100,15 +100,20 @@ class MainActivity : Activity() {
             )
         )
 
-        realityEnabledBox = android.widget.CheckBox(this).apply {
+        @Suppress("DEPRECATION") // android.widget.Switch is deprecated only in API 23 docs;
+        // the project min-SDK == 23 stays on platform widgets to avoid pulling in androidx.
+        realityEnabledSwitch = android.widget.Switch(this).apply {
             text = "Включить обход (REALITY)"
             setTextColor(COLOR_TEXT)
+            textSize = 16f
+            isChecked = false
+            showText = false
         }
         realityCodeInput = input("Вставьте REALITY-код (omega-reality://...)")
         column.addView(
             panel(
                 "Обход блокировок (REALITY)",
-                realityEnabledBox,
+                realityEnabledSwitch,
                 label("REALITY-код из админки"),
                 realityCodeInput,
                 label("Включите переключатель только если в сети режут всё кроме TLS к доверенным сайтам. Один код заменяет все ручные настройки."),
@@ -253,7 +258,7 @@ class MainActivity : Activity() {
             listOf("auto", "udp", "tcp").indexOf(profile.transport).coerceAtLeast(0)
         )
         realityCodeInput.setText(profile.realityCode)
-        realityEnabledBox.isChecked = profile.realityEnabled
+        realityEnabledSwitch.isChecked = profile.realityEnabled
     }
 
     private fun readProfileFromFields(): OmegaProfile {
@@ -264,7 +269,7 @@ class MainActivity : Activity() {
             deviceName = deviceNameInput.text.toString(),
             transport = transportSpinner.selectedItem?.toString() ?: "auto",
             realityCode = realityCodeInput.text.toString(),
-            realityEnabled = realityEnabledBox.isChecked,
+            realityEnabled = realityEnabledSwitch.isChecked,
         ).normalized()
     }
 

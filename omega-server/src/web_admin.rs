@@ -345,6 +345,15 @@ fn render_page(
     out.push_str(".note{display:block;margin-top:6px;font-size:12px;color:#64748b}");
     out.push_str(".copy-btn{margin-top:8px;padding:6px 10px;font-size:12px;background:#0ea5e9}");
     out.push_str(".copy-status{margin-left:8px;font-size:12px;color:#0f766e}");
+    // toggle switch styling (used on the REALITY card)
+    out.push_str(".toggle{position:relative;display:inline-block;width:48px;height:26px;vertical-align:middle}");
+    out.push_str(".toggle input{opacity:0;width:0;height:0}");
+    out.push_str(".toggle .slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:#cbd5e1;transition:.25s;border-radius:13px}");
+    out.push_str(".toggle .slider:before{position:absolute;content:'';height:20px;width:20px;left:3px;bottom:3px;background:#fff;transition:.25s;border-radius:50%;box-shadow:0 1px 3px rgba(0,0,0,.2)}");
+    out.push_str(".toggle input:checked + .slider{background:#16a34a}");
+    out.push_str(".toggle input:checked + .slider:before{transform:translateX(22px)}");
+    out.push_str(".toggle-row{display:flex;align-items:center;gap:10px;margin:8px 0 12px}");
+    out.push_str(".toggle-row label.text{cursor:pointer;font-weight:600}");
     out.push_str("</style></head><body>");
 
     out.push_str("<h1>Omega VPN Admin</h1>");
@@ -585,11 +594,14 @@ fn render_reality_card(
 
     // Apply form
     out.push_str("<form method=\"post\" action=\"/reality/apply\">");
-    out.push_str("<label style=\"display:block;margin:6px 0\"><input type=\"checkbox\" name=\"enabled\" value=\"1\"");
+    out.push_str("<div class=\"toggle-row\">");
+    out.push_str("<label class=\"toggle\" for=\"reality-enabled\"><input type=\"checkbox\" id=\"reality-enabled\" name=\"enabled\" value=\"1\"");
     if s.enabled {
         out.push_str(" checked");
     }
-    out.push_str("> Включить REALITY-обход</label>");
+    out.push_str("><span class=\"slider\"></span></label>");
+    out.push_str("<label class=\"text\" for=\"reality-enabled\">Включить REALITY-обход</label>");
+    out.push_str("</div>");
 
     out.push_str("<label>Слушать на адресе (host:port)</label>");
     out.push_str(&format!("<input name=\"bind\" value=\"{}\">", escape_html(&s.bind)));

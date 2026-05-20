@@ -201,11 +201,10 @@
                                 <StackPanel>
                                     <CheckBox x:Name="RealityEnabledBox"
                                               Content="Включить обход (REALITY)"
-                                              Foreground="{StaticResource TextBrush}"
-                                              FontWeight="SemiBold" />
+                                              Style="{StaticResource ToggleSwitchStyle}" />
                                     <TextBlock Text="REALITY-код из админки"
                                                Foreground="{StaticResource MutedTextBrush}"
-                                               Margin="0,8,0,0" />
+                                               Margin="0,12,0,0" />
                                     <TextBox x:Name="RealityCodeBox"
                                              MinHeight="60"
                                              MaxHeight="120"
@@ -213,7 +212,7 @@
                                              AcceptsReturn="False"
                                              VerticalScrollBarVisibility="Auto"
                                              ToolTip="Скопируйте omega-reality://… из админки сервера" />
-                                    <TextBlock Text="Включите чекбокс, если в стране/сети режут всё кроме TLS к белым спискам. Один код заменяет все ручные настройки."
+                                    <TextBlock Text="Включайте, если в сети режут всё кроме TLS к белым спискам. Один код заменяет все ручные настройки."
                                                Foreground="{StaticResource MutedTextBrush}"
                                                TextWrapping="Wrap"
                                                FontSize="12"
@@ -237,7 +236,7 @@
 
                             <CheckBox x:Name="AutostartBox"
                                       Content="Запускать Omega VPN при входе в Windows"
-                                      Foreground="{StaticResource TextBrush}"
+                                      Style="{StaticResource ToggleSwitchStyle}"
                                       Margin="0,4,0,0" />
                         </StackPanel>
                     </Border>
