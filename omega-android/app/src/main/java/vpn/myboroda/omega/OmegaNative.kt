@@ -53,6 +53,7 @@ object OmegaNative {
     ): String
     private external fun nativeContinueWithTunFd(handle: Long, tunFd: Int): String
     private external fun nativeStop(handle: Long): String
+    private external fun nativeSessionAlive(handle: Long): Int
 
     fun bridgeStatus(): String {
         if (!loaded) return "Native library is not packaged."
@@ -140,6 +141,14 @@ object OmegaNative {
     fun stop(handle: Long): NativeResult {
         if (!loaded) return NativeResult(true, "Stopped.")
         return NativeResult.fromJson(nativeStop(handle))
+    }
+
+    /// Liveness probe for the service watchdog. Returns true only while the
+    /// native datapath is healthy; a dead/unknown session reports false so the
+    /// service knows to rebuild the tunnel on a fresh socket.
+    fun sessionAlive(handle: Long): Boolean {
+        if (handle <= 0L || !loaded) return false
+        return runCatching { nativeSessionAlive(handle) == 1 }.getOrDefault(false)
     }
 
     private fun closeDetachedFd(fd: Int) {

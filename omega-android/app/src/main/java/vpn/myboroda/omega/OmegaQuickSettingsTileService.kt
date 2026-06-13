@@ -17,6 +17,7 @@ class OmegaQuickSettingsTileService : TileService() {
         super.onClick()
         when (VpnStateStore(this).loadState()) {
             VpnConnectionState.CONNECTING,
+            VpnConnectionState.RECONNECTING,
             VpnConnectionState.CONNECTED,
             -> {
                 OmegaVpnService.disconnect(this)
@@ -58,12 +59,14 @@ class OmegaQuickSettingsTileService : TileService() {
             this.state = when (state) {
                 VpnConnectionState.CONNECTED,
                 VpnConnectionState.CONNECTING,
+                VpnConnectionState.RECONNECTING,
                 -> Tile.STATE_ACTIVE
                 VpnConnectionState.DISCONNECTED -> Tile.STATE_INACTIVE
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 subtitle = when (state) {
                     VpnConnectionState.CONNECTING -> "Connecting"
+                    VpnConnectionState.RECONNECTING -> "Reconnecting"
                     VpnConnectionState.CONNECTED -> "Connected"
                     VpnConnectionState.DISCONNECTED -> "Disconnected"
                 }

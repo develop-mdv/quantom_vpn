@@ -63,6 +63,23 @@ class MainActivity : Activity() {
         handleIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Reflect the live tunnel state whenever the user returns to the app, so
+        // the header isn't stale after a background reconnect or a toggle from
+        // the notification / quick-settings tile.
+        if (::statusView.isInitialized) {
+            status(
+                when (VpnStateStore(this).loadState()) {
+                    VpnConnectionState.CONNECTING -> "Подключение…"
+                    VpnConnectionState.RECONNECTING -> "Переподключение…"
+                    VpnConnectionState.CONNECTED -> "Подключено"
+                    VpnConnectionState.DISCONNECTED -> OmegaNative.bridgeStatus()
+                },
+            )
+        }
+    }
+
     private fun buildContent(): View {
         val root = ScrollView(this).apply {
             setBackgroundColor(COLOR_BG)

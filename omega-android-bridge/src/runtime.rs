@@ -7,7 +7,7 @@ mod android {
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::os::fd::{FromRawFd, RawFd};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -49,6 +49,9 @@ mod android {
     const PADDING_RECOVERY_INTERVAL_SECS: u64 = 2;
     const REDUNDANCY_EXTRA_MAX: u8 = 2;
     const REDUNDANCY_DECAY_SECS: u64 = 8;
+    /// Consecutive transport recv errors tolerated before we declare the
+    /// datapath dead so the Android service can reconnect on a fresh socket.
+    const MAX_DATAPATH_RECV_ERRORS: u32 = 5;
 
     static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
     static SESSIONS: OnceLock<Mutex<HashMap<u64, NativeSession>>> = OnceLock::new();
@@ -57,6 +60,10 @@ mod android {
         runtime: Runtime,
         pending: Option<Pending>,
         tasks: Vec<tokio::task::JoinHandle<()>>,
+        /// `true` while the datapath is healthy; a tunnel loop flips it to
+        /// `false` when its transport dies so the Android service watchdog can
+        /// tear the session down and reconnect on a fresh socket.
+        running: Arc<AtomicBool>,
     }
 
     enum Pending {
@@ -315,6 +322,7 @@ mod android {
                         mtu,
                     })),
                     tasks: Vec::new(),
+                    running: Arc::new(AtomicBool::new(true)),
                 },
             );
 
@@ -356,6 +364,8 @@ mod android {
             }
         };
 
+        let running = session.running.clone();
+        running.store(true, Ordering::Relaxed);
         match pending {
             Pending::Udp(mut pending) => {
                 let state = Arc::new(Mutex::new(ClientState::new(
@@ -383,6 +393,7 @@ mod android {
                     pending.shared_secret,
                     state,
                     nack_tx,
+                    running.clone(),
                 ));
                 session.tasks.push(send_task);
                 session.tasks.push(recv_task);
@@ -409,6 +420,7 @@ mod android {
                     pending.keys_send,
                     state.clone(),
                     nack_rx,
+                    running.clone(),
                 ));
                 let recv_task = session.runtime.spawn(reality_to_tun_loop(
                     tun,
@@ -418,6 +430,7 @@ mod android {
                     pending.shared_secret,
                     state,
                     nack_tx,
+                    running.clone(),
                 ));
                 session.tasks.push(send_task);
                 session.tasks.push(recv_task);
@@ -437,6 +450,23 @@ mod android {
             task.abort();
         }
         NativeResult::ok("Stopped.")
+    }
+
+    /// Liveness probe for the Android service watchdog.
+    /// Returns `1` if the datapath is healthy, `0` if a tunnel loop has died
+    /// (transport broke and the session needs a reconnect), and `-1` if the
+    /// handle is unknown (already stopped / never existed).
+    pub fn session_alive(handle: u64) -> i32 {
+        match sessions().lock().unwrap().get(&handle) {
+            Some(session) => {
+                if session.running.load(Ordering::Relaxed) {
+                    1
+                } else {
+                    0
+                }
+            }
+            None => -1,
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -649,6 +679,7 @@ mod android {
                         params,
                     })),
                     tasks: Vec::new(),
+                    running: Arc::new(AtomicBool::new(true)),
                 },
             );
 
@@ -737,6 +768,23 @@ mod android {
 
     #[allow(clippy::too_many_arguments)]
     async fn tun_to_reality_loop(
+        tun: Arc<tun_rs::AsyncDevice>,
+        encryptor: Arc<AsyncMutex<RecordEncryptor>>,
+        writer: Arc<AsyncMutex<OwnedWriteHalf>>,
+        flow_id: FlowId,
+        keys_send: SessionKeys,
+        state: Arc<Mutex<ClientState>>,
+        nack_rx: mpsc::Receiver<NackMessage>,
+        running: Arc<AtomicBool>,
+    ) {
+        tun_to_reality_inner(tun, encryptor, writer, flow_id, keys_send, state, nack_rx).await;
+        // The loop only returns when the REALITY socket write failed → the
+        // tunnel is dead; signal the Android watchdog to reconnect.
+        running.store(false, Ordering::Relaxed);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn tun_to_reality_inner(
         tun: Arc<tun_rs::AsyncDevice>,
         encryptor: Arc<AsyncMutex<RecordEncryptor>>,
         writer: Arc<AsyncMutex<OwnedWriteHalf>>,
@@ -834,7 +882,24 @@ mod android {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn reality_to_tun_loop(
+        tun: Arc<tun_rs::AsyncDevice>,
+        decryptor: Arc<AsyncMutex<RecordDecryptor>>,
+        reader: Arc<AsyncMutex<OwnedReadHalf>>,
+        flow_id: FlowId,
+        shared_secret: Vec<u8>,
+        state: Arc<Mutex<ClientState>>,
+        nack_tx: mpsc::Sender<NackMessage>,
+        running: Arc<AtomicBool>,
+    ) {
+        reality_to_tun_inner(tun, decryptor, reader, flow_id, shared_secret, state, nack_tx).await;
+        // Any return from the read loop means the REALITY socket broke or the
+        // peer closed the session → mark dead so the watchdog reconnects.
+        running.store(false, Ordering::Relaxed);
+    }
+
+    async fn reality_to_tun_inner(
         tun: Arc<tun_rs::AsyncDevice>,
         decryptor: Arc<AsyncMutex<RecordDecryptor>>,
         reader: Arc<AsyncMutex<OwnedReadHalf>>,
@@ -1077,7 +1142,23 @@ mod android {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn udp_to_tun_loop(
+        tun: Arc<tun_rs::AsyncDevice>,
+        transport: Arc<UdpSocket>,
+        flow_id: FlowId,
+        shared_secret: Vec<u8>,
+        state: Arc<Mutex<ClientState>>,
+        nack_tx: mpsc::Sender<NackMessage>,
+        running: Arc<AtomicBool>,
+    ) {
+        udp_to_tun_inner(tun, transport, flow_id, shared_secret, state, nack_tx).await;
+        // Returns only after the UDP socket produced sustained recv errors
+        // (underlying network gone) → mark dead so the watchdog reconnects.
+        running.store(false, Ordering::Relaxed);
+    }
+
+    async fn udp_to_tun_inner(
         tun: Arc<tun_rs::AsyncDevice>,
         transport: Arc<UdpSocket>,
         flow_id: FlowId,
@@ -1091,10 +1172,26 @@ mod android {
         };
         let mut replay_filter = ReplayFilter::new();
         let mut buf = vec![0u8; 2048];
+        let mut consecutive_errors: u32 = 0;
 
         loop {
-            let Ok(n) = transport.recv(&mut buf).await else {
-                continue;
+            // Previously this busy-spun (`else { continue }`) on a dead socket,
+            // pinning a CPU core and draining the battery after a network drop.
+            // Now we back off briefly and bail once errors persist so the
+            // Android service can rebuild the tunnel on the new network.
+            let n = match transport.recv(&mut buf).await {
+                Ok(n) => {
+                    consecutive_errors = 0;
+                    n
+                }
+                Err(_) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_DATAPATH_RECV_ERRORS {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
             };
             if n < TOTAL_HEADER_LEN + AEAD_TAG_LEN {
                 continue;
@@ -1310,6 +1407,10 @@ mod host {
 
     pub fn stop(_handle: u64) -> NativeResult {
         NativeResult::ok("No Android native session on this host.")
+    }
+
+    pub fn session_alive(_handle: u64) -> i32 {
+        -1
     }
 }
 

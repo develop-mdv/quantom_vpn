@@ -4,4 +4,12 @@
     <string name="vpn_notification_channel">Omega VPN</string>
     <string name="vpn_notification_title">Omega VPN is active</string>
     <string name="vpn_notification_text">Encrypted tunnel is running</string>
+
+    <string name="notif_title">Omega VPN</string>
+    <string name="notif_connecting">Подключение…</string>
+    <string name="notif_connected">Подключено</string>
+    <string name="notif_reconnecting">Переподключение…</string>
+    <string name="notif_disconnected">Отключено — нажмите «Подключиться»</string>
+    <string name="action_connect">Подключиться</string>
+    <string name="action_disconnect">Отключиться</string>
 </resources>

@@ -104,6 +104,21 @@ pub extern "system" fn Java_vpn_myboroda_omega_OmegaNative_nativeStop(
     unsafe { new_java_string(env, &result.to_json()) }
 }
 
+/// Liveness probe used by the Android service watchdog.
+/// `1` = healthy, `0` = datapath died (reconnect), `-1` = unknown handle.
+#[no_mangle]
+pub extern "system" fn Java_vpn_myboroda_omega_OmegaNative_nativeSessionAlive(
+    _env: JNIEnv,
+    _receiver: JObject,
+    handle: i64,
+) -> i32 {
+    if handle <= 0 {
+        -1
+    } else {
+        runtime::session_alive(handle as u64)
+    }
+}
+
 unsafe fn java_string(env: JNIEnv, value: JString) -> String {
     if env.is_null() || value.is_null() {
         return String::new();
