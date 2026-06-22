@@ -15,6 +15,7 @@ var tests = new (string Name, Action Body)[]
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
     ("window close hides to tray while runtime is active", WindowCloseHidesToTrayWhileRuntimeIsActive),
     ("autostart task builds scheduler arguments", AutostartTaskBuildsSchedulerArguments),
+    ("windows bootstrap installer documents required commands", WindowsBootstrapInstallerDocumentsRequiredCommands),
 };
 
 var failed = 0;
@@ -323,6 +324,38 @@ static void AutostartTaskBuildsSchedulerArguments()
     var deleteArgs = AutostartTask.BuildDeleteArguments();
     Equal("/Delete", deleteArgs[0]);
     True(deleteArgs.Contains("/F"), "force delete flag missing");
+}
+
+static void WindowsBootstrapInstallerDocumentsRequiredCommands()
+{
+    var scriptPath = Path.Combine(FindRepoRoot(), "install-windows-client.ps1");
+    True(File.Exists(scriptPath), "root install-windows-client.ps1 is missing");
+
+    var script = File.ReadAllText(scriptPath);
+    True(script.Contains("Microsoft.DotNet.SDK.9", StringComparison.Ordinal), ".NET 9 SDK winget package missing");
+    True(script.Contains("Rustlang.Rustup", StringComparison.Ordinal), "rustup winget package missing");
+    True(script.Contains("Microsoft.VisualStudio.2022.BuildTools", StringComparison.Ordinal), "C++ build tools winget package missing");
+    True(script.Contains("omega-client-app/package-windows-client.ps1", StringComparison.Ordinal), "package script invocation missing");
+    True(script.Contains("Omega.Client.Setup.exe", StringComparison.Ordinal), "setup executable launch missing");
+    True(script.Contains("SkipDependencyInstall", StringComparison.Ordinal), "dependency install opt-out parameter missing");
+    True(script.Contains("SkipRustBuild", StringComparison.Ordinal), "rust build opt-out parameter missing");
+}
+
+static string FindRepoRoot()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null)
+    {
+        if (File.Exists(Path.Combine(directory.FullName, "Cargo.toml")) &&
+            Directory.Exists(Path.Combine(directory.FullName, "omega-client-app")))
+        {
+            return directory.FullName;
+        }
+
+        directory = directory.Parent;
+    }
+
+    throw new InvalidOperationException("repository root not found");
 }
 
 static void Equal<T>(T expected, T actual)

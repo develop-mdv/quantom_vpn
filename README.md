@@ -108,3 +108,35 @@ GUI требует права администратора, как и `start_cli
 2. `docs/ARCHITECTURE.md`
 3. `docs/REPO_MAP.md`
 4. `docs/CONFIG_REFERENCE.md` или `docs/OPERATIONS.md` по ситуации
+
+## Windows: простая установка клиента одной командой
+
+Из PowerShell в корне репозитория:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1
+```
+
+Скрипт проверит и при необходимости поставит через `winget` нужные зависимости
+для сборки Windows-клиента:
+
+- `.NET 9 SDK` (`Microsoft.DotNet.SDK.9`);
+- `Rustup` со stable MSVC toolchain (`stable-x86_64-pc-windows-msvc`);
+- `Visual Studio 2022 Build Tools` с C++ workload.
+
+После этого он соберет `omega-client.exe`, опубликует self-contained WPF-клиент,
+создаст installer package и запустит `Omega.Client.Setup.exe`. Установщик
+попросит права администратора, скопирует Omega VPN в `%ProgramFiles%\Omega VPN`,
+создаст ярлыки и включит автозапуск при входе в Windows.
+
+После установки откройте `Omega VPN` с рабочего стола или из меню Start и
+вставьте свой `omega://connect/...` код подключения.
+
+Полезные варианты:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1 -SkipDependencyInstall
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1 -SkipRustBuild
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1 -NoAutostart
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1 -Target "D:\Apps\Omega VPN"
+```
