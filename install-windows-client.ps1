@@ -256,7 +256,11 @@ function Invoke-Setup {
     }
 
     Write-Step "Launching Omega VPN setup"
-    $process = Start-Process -FilePath $setupExe -ArgumentList (Join-ProcessArguments $args) -Wait -PassThru
+    if ($args.Count -gt 0) {
+        $process = Start-Process -FilePath $setupExe -ArgumentList (Join-ProcessArguments $args) -Wait -PassThru
+    } else {
+        $process = Start-Process -FilePath $setupExe -Wait -PassThru
+    }
     if ($process.ExitCode -ne 0) {
         throw "Omega VPN setup failed with exit code $($process.ExitCode)."
     }
