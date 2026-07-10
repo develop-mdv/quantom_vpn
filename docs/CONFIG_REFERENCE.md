@@ -145,9 +145,12 @@
 ## Практические замечания
 
 - Самый важный production override на сервере - это `OMEGA_TOKEN_PEPPER`.
+- В production задавайте `OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443`, иначе
+  web admin может генерировать коды подключения с placeholder-адресом.
 - Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`, `OMEGA_SPLIT_ROUTES_V6` или обе переменные сразу.
-- Для полноценного inner IPv6 нужно согласованно включать `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте.
-- Для TCP fallback нужно включить серверный listener (`OMEGA_TCP_ENABLE=1`, `OMEGA_TCP_BIND=[::]:443`), открыть порт через `setup_nat.sh`, а на клиенте выбрать `OMEGA_TRANSPORT=tcp` или `auto`.
+- Для полноценного inner IPv6 нужно согласованно включать `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте. Перед этим проверьте, что VPS имеет IPv6 egress: `ip -6 route get 2606:4700:4700::1111`. Если маршрута нет, оставьте `OMEGA_IPV6_MODE=disabled`.
+- Для TCP fallback нужно включить серверный listener (`OMEGA_TCP_ENABLE=1`, `OMEGA_TCP_BIND=[::]:443`), открыть порт через `setup_nat.sh`, а на клиенте выбрать `OMEGA_TRANSPORT=tcp` или `auto`. Если TCP `443` уже занят nginx/xray/другим сервисом, не включайте Omega TCP fallback на этом же endpoint.
+- Built-in web admin сейчас plain HTTP. Для публичного варианта используйте `http://<SERVER_IP>:8081/`, не `https://`.
 - `OMEGA_PROFILE=gaming` теперь по умолчанию выбирает `OMEGA_MORPHING=off`, чтобы не тратить throughput на padding и лишнюю избыточность.
 - Если `OMEGA_MORPHING=off`, latency и throughput обычно становятся лучше, но traffic cover будет слабее.
 - `OMEGA_ALLOW_LEGACY_V1` не стоит считать полноценной backward compatibility feature.

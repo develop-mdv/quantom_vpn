@@ -2,58 +2,46 @@ package vpn.myboroda.omega
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.text.Editable
-import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
 
+/// Home screen: pick a profile, add new ones and toggle the tunnel — nothing
+/// else. All configuration lives on separate screens (ProfileEditorActivity
+/// for profile data, SettingsActivity for REALITY and split tunneling) so
+/// this screen stays glanceable.
 class MainActivity : Activity() {
     private lateinit var store: ProfileStore
-    private lateinit var appRepository: AppSplitRepository
-    private lateinit var statusView: TextView
-    private lateinit var codeInput: EditText
-    private lateinit var serverInput: EditText
-    private lateinit var deviceIdInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var deviceNameInput: EditText
-    private lateinit var transportSpinner: Spinner
-    private lateinit var realityCodeInput: EditText
-    private lateinit var realityEnabledSwitch: android.widget.Switch
-    private lateinit var splitSpinner: Spinner
-    private lateinit var splitSummaryView: TextView
-    private lateinit var searchInput: EditText
-    private lateinit var appList: LinearLayout
+    private lateinit var stateStore: VpnStateStore
 
-    private var selectedPackages: MutableSet<String> = linkedSetOf()
+    private lateinit var toggleButton: TextView
+    private lateinit var statusDot: View
+    private lateinit var statusText: TextView
+    private lateinit var activeProfileText: TextView
+    private lateinit var hintText: TextView
+    private lateinit var profileList: LinearLayout
+
+    // Field, not a local: SharedPreferences only holds listeners weakly.
+    private val stateListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, _ -> renderState() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = ProfileStore(this)
-        appRepository = AppSplitRepository(this)
-        selectedPackages = store.loadSplitSettings().selectedPackages.toMutableSet()
-
+        stateStore = VpnStateStore(this)
         setContentView(buildContent())
-        loadProfileIntoFields()
         requestNotificationPermission()
-        refreshAppList()
         handleIntent(intent)
     }
 
@@ -63,111 +51,36 @@ class MainActivity : Activity() {
         handleIntent(intent)
     }
 
-    override fun onResume() {
-        super.onResume()
-        // Reflect the live tunnel state whenever the user returns to the app, so
-        // the header isn't stale after a background reconnect or a toggle from
-        // the notification / quick-settings tile.
-        if (::statusView.isInitialized) {
-            status(
-                when (VpnStateStore(this).loadState()) {
-                    VpnConnectionState.CONNECTING -> "Подключение…"
-                    VpnConnectionState.RECONNECTING -> "Переподключение…"
-                    VpnConnectionState.CONNECTED -> "Подключено"
-                    VpnConnectionState.DISCONNECTED -> OmegaNative.bridgeStatus()
-                },
-            )
-        }
+    override fun onStart() {
+        super.onStart()
+        stateStore.registerListener(stateListener)
     }
 
+    override fun onStop() {
+        stateStore.unregisterListener(stateListener)
+        super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Profiles may have been added/edited on the editor screen, and the
+        // tunnel state may have changed from the notification or QS tile.
+        renderProfiles()
+        renderState()
+    }
+
+    // ------------------------------------------------------------------ UI --
+
     private fun buildContent(): View {
-        val root = ScrollView(this).apply {
-            setBackgroundColor(COLOR_BG)
-            isFillViewport = true
-        }
+        val root = uiScreenRoot()
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(18), dp(20), dp(24))
+            setPadding(dp(20), dp(16), dp(20), dp(24))
         }
         root.addView(column)
-
         column.addView(header())
-
-        codeInput = input("Paste omega://connect code")
-        column.addView(panel("Connection code", codeInput, button("Apply code") { applyConnectionCode() }))
-
-        serverInput = input("Server, for example 72.56.88.224:51820")
-        deviceIdInput = input("Device ID")
-        tokenInput = input("Device token")
-        deviceNameInput = input("Device name")
-        transportSpinner = spinner(listOf("auto", "udp", "tcp"))
-        column.addView(
-            panel(
-                "Profile",
-                label("Server"),
-                serverInput,
-                label("Device ID"),
-                deviceIdInput,
-                label("Device token"),
-                tokenInput,
-                label("Device name"),
-                deviceNameInput,
-                label("Transport"),
-                transportSpinner,
-            )
-        )
-
-        @Suppress("DEPRECATION") // android.widget.Switch is deprecated only in API 23 docs;
-        // the project min-SDK == 23 stays on platform widgets to avoid pulling in androidx.
-        realityEnabledSwitch = android.widget.Switch(this).apply {
-            text = "Включить обход (REALITY)"
-            setTextColor(COLOR_TEXT)
-            textSize = 16f
-            isChecked = false
-            showText = false
-        }
-        realityCodeInput = input("Вставьте REALITY-код (omega-reality://...)")
-        column.addView(
-            panel(
-                "Обход блокировок (REALITY)",
-                realityEnabledSwitch,
-                label("REALITY-код из админки"),
-                realityCodeInput,
-                label("Включите переключатель только если в сети режут всё кроме TLS к доверенным сайтам. Один код заменяет все ручные настройки."),
-            )
-        )
-
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            addView(button("Connect") { connect() }, weightParams())
-            addView(space(dp(10), 1))
-            addView(button("Disconnect") { OmegaVpnService.disconnect(this@MainActivity) }, weightParams())
-        }
-        column.addView(actions)
-
-        splitSpinner = spinner(listOf("VPN for all except selected", "VPN only for selected"))
-        val settings = store.loadSplitSettings()
-        splitSpinner.setSelection(if (settings.mode == SplitMode.ONLY_SELECTED) 1 else 0)
-        splitSpinner.onItemSelectedListener = SimpleItemSelectedListener {
-            store.saveSplitMode(currentSplitMode())
-            updateSplitSummary()
-        }
-        splitSummaryView = label("")
-        searchInput = input("Search apps")
-        appList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        column.addView(
-            panel(
-                "Split tunneling",
-                label("Mode"),
-                splitSpinner,
-                splitSummaryView,
-                searchInput,
-                appList,
-            )
-        )
-        searchInput.addTextChangedListener(simpleTextWatcher { refreshAppList() })
-
+        column.addView(statusCard())
+        column.addView(profilesPanel())
         return root
     }
 
@@ -175,61 +88,299 @@ class MainActivity : Activity() {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(18))
+            setPadding(0, 0, 0, dp(16))
         }
-        row.addView(ImageView(this).apply {
-            setImageResource(R.drawable.ic_omega_mark)
-        }, LinearLayout.LayoutParams(dp(54), dp(54)))
-        val texts = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), 0, 0, 0)
-        }
-        texts.addView(TextView(this).apply {
-            text = "Omega VPN"
-            textSize = 28f
-            setTextColor(COLOR_TEXT)
-            typeface = Typeface.DEFAULT_BOLD
-        })
-        statusView = TextView(this).apply {
-            text = OmegaNative.bridgeStatus()
-            textSize = 14f
-            setTextColor(COLOR_MUTED)
-        }
-        texts.addView(statusView)
-        row.addView(texts, weightParams())
+        row.addView(
+            ImageView(this).apply { setImageResource(R.drawable.ic_omega_mark) },
+            LinearLayout.LayoutParams(dp(44), dp(44)),
+        )
+        row.addView(
+            TextView(this).apply {
+                text = "Omega VPN"
+                textSize = 24f
+                setTextColor(Palette.TEXT)
+                typeface = Typeface.DEFAULT_BOLD
+                setPadding(dp(12), 0, 0, 0)
+            },
+            weightParams(),
+        )
+        row.addView(
+            uiIconButton("⚙", tint = Palette.TEXT) {
+                startActivity(Intent(this, SettingsActivity::class.java))
+            }
+        )
         return row
     }
 
-    private fun applyConnectionCode() {
-        val result = ConnectionCodeParser.parse(codeInput.text.toString())
-        result
-            .onSuccess {
-                val error = it.validationError()
-                if (error != null) {
-                    status(error)
-                } else {
-                    putProfileIntoFields(it)
-                    saveProfileFromFields()
-                    status("Connection code applied.")
-                }
+    private fun statusCard(): View {
+        toggleButton = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setOnClickListener { onToggle() }
+        }
+        statusDot = View(this)
+        statusText = TextView(this).apply {
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        activeProfileText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Palette.MUTED)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(4), 0, 0)
+        }
+        hintText = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Palette.AMBER)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(10), dp(8), 0)
+            visibility = View.GONE
+        }
+
+        val statusRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(18), 0, 0)
+        }
+        statusRow.addView(
+            statusDot,
+            LinearLayout.LayoutParams(dp(10), dp(10)).apply { rightMargin = dp(8) },
+        )
+        statusRow.addView(statusText)
+
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(16), dp(26), dp(16), dp(20))
+            background = roundedRect(Palette.PANEL, 14, Palette.BORDER)
+        }
+        card.addView(toggleButton, LinearLayout.LayoutParams(dp(150), dp(150)))
+        card.addView(statusRow)
+        card.addView(activeProfileText)
+        card.addView(hintText)
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(14))
+            addView(card)
+        }
+    }
+
+    private fun profilesPanel(): View {
+        profileList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(
+            TextView(this).apply {
+                text = "Профили"
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Palette.TEXT)
+            },
+            weightParams(),
+        )
+        titleRow.addView(uiGhostButton("+ Добавить", Palette.ACCENT) { openEditor(null) })
+        return uiPanel(null, titleRow, uiSpace(1, dp(10)), profileList)
+    }
+
+    // ------------------------------------------------------------ Profiles --
+
+    private fun renderProfiles() {
+        profileList.removeAllViews()
+        val profiles = store.loadProfiles()
+        if (profiles.isEmpty()) {
+            profileList.addView(
+                uiLabel("Пока нет ни одного профиля. Нажмите «Добавить» и вставьте код подключения из админки."),
+            )
+            return
+        }
+        val activeId = store.activeProfile()?.id
+        profiles.forEach { entry ->
+            profileList.addView(profileRow(entry, entry.id == activeId))
+        }
+    }
+
+    private fun profileRow(entry: StoredProfile, active: Boolean): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(10), dp(6), dp(10))
+            background = roundedRect(
+                if (active) Palette.PANEL_SOFT else Color.TRANSPARENT,
+                10,
+                if (active) Palette.ACCENT else Palette.BORDER,
+            )
+            setOnClickListener { selectProfile(entry) }
+        }
+        row.addView(
+            View(this).apply {
+                background = circle(
+                    if (active) Palette.ACCENT else Color.TRANSPARENT,
+                    if (active) Palette.ACCENT else Palette.MUTED,
+                )
+            },
+            LinearLayout.LayoutParams(dp(12), dp(12)).apply { rightMargin = dp(10) },
+        )
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        texts.addView(
+            TextView(this).apply {
+                text = entry.name
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Palette.TEXT)
             }
-            .onFailure { status(it.message ?: "Connection code is invalid.") }
+        )
+        texts.addView(
+            TextView(this).apply {
+                text = profileSubtitle(entry.profile)
+                textSize = 12f
+                setTextColor(Palette.MUTED)
+            }
+        )
+        row.addView(texts, weightParams())
+        row.addView(uiIconButton("✎", sizeDp = 36) { openEditor(entry.id) })
+        row.addView(uiSpace(dp(6), 1))
+        row.addView(uiIconButton("✕", tint = Palette.DANGER, sizeDp = 36) { confirmDelete(entry) })
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, 0, 0, dp(8))
+            addView(row)
+        }
+    }
+
+    private fun profileSubtitle(profile: OmegaProfile): String {
+        val extras = buildList {
+            if (profile.transport != "auto") add(profile.transport.uppercase())
+            if (profile.realityEnabled) add("REALITY")
+        }
+        val server = profile.server.ifBlank { "сервер не задан" }
+        return if (extras.isEmpty()) server else "$server · ${extras.joinToString(" · ")}"
+    }
+
+    private fun selectProfile(entry: StoredProfile) {
+        if (store.activeProfile()?.id == entry.id) return
+        store.setActiveProfileId(entry.id)
+        renderProfiles()
+        renderState()
+        if (stateStore.loadState() != VpnConnectionState.DISCONNECTED) {
+            // The service always rebuilds the datapath on a fresh start
+            // request, picking up the newly active profile.
+            hint("Переподключение с профилем «${entry.name}»…")
+            OmegaVpnService.start(this)
+        }
+    }
+
+    private fun confirmDelete(entry: StoredProfile) {
+        AlertDialog.Builder(this)
+            .setTitle("Удалить профиль?")
+            .setMessage("Профиль «${entry.name}» будет удалён без возможности восстановления.")
+            .setPositiveButton("Удалить") { _, _ -> deleteProfile(entry) }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun deleteProfile(entry: StoredProfile) {
+        val wasActive = store.activeProfile()?.id == entry.id
+        store.deleteProfile(entry.id)
+        if (wasActive && stateStore.loadState() != VpnConnectionState.DISCONNECTED) {
+            OmegaVpnService.disconnect(this)
+        }
+        renderProfiles()
+        renderState()
+    }
+
+    private fun openEditor(profileId: String?) {
+        val intent = Intent(this, ProfileEditorActivity::class.java)
+        if (profileId != null) {
+            intent.putExtra(ProfileEditorActivity.EXTRA_PROFILE_ID, profileId)
+        }
+        startActivity(intent)
+    }
+
+    // --------------------------------------------------------------- State --
+
+    private fun renderState() {
+        val state = stateStore.loadState()
+        val stateColor = when (state) {
+            VpnConnectionState.DISCONNECTED -> Palette.MUTED
+            VpnConnectionState.CONNECTING, VpnConnectionState.RECONNECTING -> Palette.AMBER
+            VpnConnectionState.CONNECTED -> Palette.ACCENT
+        }
+        statusText.text = when (state) {
+            VpnConnectionState.DISCONNECTED -> "Отключено"
+            VpnConnectionState.CONNECTING -> "Подключение…"
+            VpnConnectionState.RECONNECTING -> "Переподключение…"
+            VpnConnectionState.CONNECTED -> "Подключено"
+        }
+        statusText.setTextColor(stateColor)
+        statusDot.background = circle(stateColor, stateColor)
+        when (state) {
+            VpnConnectionState.DISCONNECTED -> {
+                toggleButton.text = "Подключить"
+                toggleButton.setTextColor(Palette.ACCENT)
+                toggleButton.background = circle(Palette.BG, Palette.ACCENT, strokeDp = 3)
+            }
+            VpnConnectionState.CONNECTING, VpnConnectionState.RECONNECTING -> {
+                toggleButton.text = "Отмена"
+                toggleButton.setTextColor(Palette.AMBER)
+                toggleButton.background = circle(Palette.BG, Palette.AMBER, strokeDp = 3)
+            }
+            VpnConnectionState.CONNECTED -> {
+                toggleButton.text = "Отключить"
+                toggleButton.setTextColor(Palette.BG)
+                toggleButton.background = circle(Palette.ACCENT, Palette.ACCENT, strokeDp = 3)
+            }
+        }
+        if (state == VpnConnectionState.CONNECTED) {
+            hint(null)
+        }
+        activeProfileText.text = store.activeProfile()
+            ?.let { "Профиль: ${it.name}" }
+            ?: "Профиль не выбран"
+    }
+
+    private fun hint(message: String?) {
+        if (message.isNullOrBlank()) {
+            hintText.visibility = View.GONE
+        } else {
+            hintText.text = message
+            hintText.visibility = View.VISIBLE
+        }
+    }
+
+    // ------------------------------------------------------------- Connect --
+
+    private fun onToggle() {
+        when (stateStore.loadState()) {
+            VpnConnectionState.DISCONNECTED -> connect()
+            else -> {
+                hint(null)
+                OmegaVpnService.disconnect(this)
+            }
+        }
     }
 
     private fun connect() {
-        val profile = readProfileFromFields()
-        val error = profile.validationError()
-        if (error != null) {
-            status(error)
+        val active = store.activeProfile()
+        if (active == null) {
+            hint("Сначала добавьте профиль с кодом подключения.")
+            openEditor(null)
             return
         }
-        saveProfileFromFields()
-
+        val error = active.profile.validationError()
+        if (error != null) {
+            hint(error)
+            return
+        }
+        hint(null)
         val prepareIntent = VpnService.prepare(this)
         if (prepareIntent != null) {
             startActivityForResult(prepareIntent, VPN_REQUEST)
         } else {
-            startVpnService()
+            OmegaVpnService.start(this)
         }
     }
 
@@ -238,109 +389,16 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_REQUEST) {
             if (resultCode == RESULT_OK) {
-                startVpnService()
+                OmegaVpnService.start(this)
             } else {
-                status("VPN permission was denied.")
+                hint("Нет разрешения на VPN — подключение невозможно.")
             }
         }
-    }
-
-    private fun startVpnService() {
-        status("Connecting...")
-        OmegaVpnService.start(this)
     }
 
     private fun handleIntent(intent: Intent?) {
         if (intent?.action == ACTION_CONNECT) {
-            statusView.post { connect() }
-        }
-    }
-
-    private fun saveProfileFromFields() {
-        store.saveProfile(readProfileFromFields())
-        store.saveSplitMode(currentSplitMode())
-        store.saveSelectedPackages(selectedPackages)
-    }
-
-    private fun loadProfileIntoFields() {
-        putProfileIntoFields(store.loadProfile())
-    }
-
-    private fun putProfileIntoFields(profile: OmegaProfile) {
-        serverInput.setText(profile.server)
-        deviceIdInput.setText(profile.deviceId)
-        tokenInput.setText(profile.deviceToken)
-        deviceNameInput.setText(profile.deviceName)
-        transportSpinner.setSelection(
-            listOf("auto", "udp", "tcp").indexOf(profile.transport).coerceAtLeast(0)
-        )
-        realityCodeInput.setText(profile.realityCode)
-        realityEnabledSwitch.isChecked = profile.realityEnabled
-    }
-
-    private fun readProfileFromFields(): OmegaProfile {
-        return OmegaProfile(
-            server = serverInput.text.toString(),
-            deviceId = deviceIdInput.text.toString(),
-            deviceToken = tokenInput.text.toString(),
-            deviceName = deviceNameInput.text.toString(),
-            transport = transportSpinner.selectedItem?.toString() ?: "auto",
-            realityCode = realityCodeInput.text.toString(),
-            realityEnabled = realityEnabledSwitch.isChecked,
-        ).normalized()
-    }
-
-    private fun currentSplitMode(): SplitMode {
-        return if (splitSpinner.selectedItemPosition == 1) SplitMode.ONLY_SELECTED else SplitMode.EXCLUDE_SELECTED
-    }
-
-    private fun refreshAppList() {
-        appList.removeAllViews()
-        val apps = appRepository.loadInternetApps(selectedPackages, searchInput.text.toString())
-        updateSplitSummary()
-        if (apps.isEmpty()) {
-            appList.addView(label("No apps found."))
-            return
-        }
-
-        apps.forEach { app ->
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(8), 0, dp(8))
-            }
-            val checkBox = CheckBox(this).apply {
-                isChecked = app.selected
-                isEnabled = app.selectable
-                buttonTintList = android.content.res.ColorStateList.valueOf(COLOR_ACCENT)
-                setOnCheckedChangeListener { _, checked ->
-                    if (checked) selectedPackages.add(app.packageName) else selectedPackages.remove(app.packageName)
-                    store.saveSelectedPackages(selectedPackages)
-                    updateSplitSummary()
-                }
-            }
-            row.addView(checkBox)
-            val text = TextView(this).apply {
-                val markers = buildList {
-                    if (app.system) add("system")
-                    if (!app.launchable) add("background")
-                    if (!app.selectable) add("Omega")
-                }
-                val suffix = markers.takeIf { it.isNotEmpty() }?.joinToString(" · ", " (", ")").orEmpty()
-                text = "${app.label}$suffix\n${app.packageName}"
-                textSize = 14f
-                setTextColor(if (app.selectable) COLOR_TEXT else COLOR_MUTED)
-            }
-            row.addView(text, weightParams())
-            appList.addView(row)
-        }
-    }
-
-    private fun updateSplitSummary() {
-        val count = selectedPackages.count { it != packageName }
-        splitSummaryView.text = when (currentSplitMode()) {
-            SplitMode.EXCLUDE_SELECTED -> "$count app(s) bypass VPN when it is connected."
-            SplitMode.ONLY_SELECTED -> "$count app(s) are allowed to use VPN."
+            toggleButton.post { connect() }
         }
     }
 
@@ -350,122 +408,9 @@ class MainActivity : Activity() {
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_REQUEST)
     }
 
-    private fun panel(title: String, vararg children: View): View {
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(16))
-            background = rounded(COLOR_PANEL, dp(8), COLOR_BORDER)
-        }
-        box.addView(TextView(this).apply {
-            text = title
-            textSize = 17f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(COLOR_TEXT)
-        })
-        box.addView(space(1, dp(10)))
-        children.forEach { box.addView(it) }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, dp(14))
-            addView(box)
-        }
-    }
-
-    private fun input(hintText: String): EditText {
-        return EditText(this).apply {
-            hint = hintText
-            textSize = 15f
-            setSingleLine(false)
-            minLines = 1
-            maxLines = 3
-            setTextColor(COLOR_TEXT)
-            setHintTextColor(COLOR_MUTED)
-            setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = rounded(Color.TRANSPARENT, dp(8), COLOR_BORDER)
-        }
-    }
-
-    private fun spinner(items: List<String>): Spinner {
-        return Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, items)
-            background = rounded(Color.TRANSPARENT, dp(8), COLOR_BORDER)
-            setPadding(dp(8), dp(6), dp(8), dp(6))
-        }
-    }
-
-    private fun button(textValue: String, onClick: () -> Unit): Button {
-        return Button(this).apply {
-            text = textValue
-            textSize = 14f
-            setTextColor(COLOR_BG)
-            typeface = Typeface.DEFAULT_BOLD
-            background = rounded(COLOR_ACCENT, dp(8), COLOR_ACCENT)
-            setOnClickListener { onClick() }
-        }
-    }
-
-    private fun label(textValue: String): TextView {
-        return TextView(this).apply {
-            text = textValue
-            textSize = 13f
-            setTextColor(COLOR_MUTED)
-            setPadding(0, dp(8), 0, dp(5))
-        }
-    }
-
-    private fun status(message: String) {
-        statusView.text = message
-    }
-
-    private fun rounded(color: Int, radius: Int, strokeColor: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = radius.toFloat()
-            setStroke(dp(1), strokeColor)
-        }
-    }
-
-    private fun space(width: Int, height: Int): View {
-        return View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(width, height)
-        }
-    }
-
-    private fun weightParams(): LinearLayout.LayoutParams {
-        return LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
-
-    private fun simpleTextWatcher(onChange: () -> Unit): TextWatcher {
-        return object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = onChange()
-            override fun afterTextChanged(s: Editable?) = Unit
-        }
-    }
-
     companion object {
         private const val VPN_REQUEST = 42
         private const val NOTIFICATION_REQUEST = 43
         const val ACTION_CONNECT = "vpn.myboroda.omega.CONNECT"
-        private val COLOR_BG = Color.rgb(17, 20, 24)
-        private val COLOR_PANEL = Color.rgb(26, 32, 39)
-        private val COLOR_BORDER = Color.rgb(43, 52, 64)
-        private val COLOR_TEXT = Color.rgb(238, 244, 247)
-        private val COLOR_MUTED = Color.rgb(152, 167, 179)
-        private val COLOR_ACCENT = Color.rgb(54, 211, 153)
     }
-}
-
-private class SimpleItemSelectedListener(private val onSelected: () -> Unit) :
-    android.widget.AdapterView.OnItemSelectedListener {
-    override fun onItemSelected(
-        parent: android.widget.AdapterView<*>?,
-        view: View?,
-        position: Int,
-        id: Long,
-    ) = onSelected()
-
-    override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
 }

@@ -66,6 +66,7 @@ class OmegaVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        isRunning = true
         stateStore = VpnStateStore(this)
         connectivityManager = getSystemService(ConnectivityManager::class.java)
     }
@@ -103,6 +104,7 @@ class OmegaVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         stopWatchdog()
         unregisterNetworkCallback()
         stopDatapath()
@@ -779,6 +781,14 @@ class OmegaVpnService : VpnService() {
     }
 
     companion object {
+        /// True while a service instance exists in this process. The UI and
+        /// the QS tile run in the same process, so this flag lets them tell a
+        /// live tunnel from a stale "connected" left in prefs after a process
+        /// kill or device reboot.
+        @Volatile
+        var isRunning: Boolean = false
+            private set
+
         private const val TAG = "OmegaVpnService"
         private const val CHANNEL_ID = "omega_vpn"
         private const val NOTIFICATION_ID = 7007

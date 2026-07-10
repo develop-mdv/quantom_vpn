@@ -12,16 +12,31 @@ namespace Omega.Client.App;
 
 public partial class MainWindow : Window
 {
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan KillTimeout = TimeSpan.FromSeconds(5);
+
+    private enum StopReason
+    {
+        Unexpected,
+        UserRequested,
+        Forced,
+        ConnectTimeout,
+    }
+
     private readonly ClientPaths paths;
     private readonly ConfigStore configStore;
     private readonly LifecycleStore lifecycleStore;
     private readonly DispatcherTimer diagnosticsTimer;
+    private readonly DispatcherTimer connectTimeoutTimer;
     private ClientAppConfig appConfig = new();
     private Forms.NotifyIcon? trayIcon;
+    private Forms.ToolStripMenuItem? trayToggleItem;
     private Process? runtimeProcess;
     private ConnectionSettings? activeSettings;
     private StreamWriter? logWriter;
-    private bool disconnectRequested;
+    private ConnectionPhase phase = ConnectionPhase.Disconnected;
+    private StopReason stopReason = StopReason.Unexpected;
     private bool explicitExitRequested;
     private bool profileSelectionChanging;
 
@@ -33,9 +48,12 @@ public partial class MainWindow : Window
         lifecycleStore = new LifecycleStore(paths);
         diagnosticsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
         diagnosticsTimer.Tick += (_, _) => RefreshDiagnostics();
+        connectTimeoutTimer = new DispatcherTimer { Interval = ConnectTimeout };
+        connectTimeoutTimer.Tick += async (_, _) => await AbortStuckConnectAsync();
 
         LoadSettings();
         ConfigureTray();
+        SetPhase(ConnectionPhase.Disconnected);
         FooterText.Text = $"Журнал: {paths.LogPath}";
         diagnosticsTimer.Start();
     }
@@ -65,17 +83,46 @@ public partial class MainWindow : Window
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
     {
-        if (runtimeProcess is { HasExited: false })
+        await ToggleConnectionAsync();
+    }
+
+    private async Task ToggleConnectionAsync()
+    {
+        switch (ConnectionPhasePolicy.DecideClick(phase))
         {
-            await DisconnectAsync();
-            return;
+            case ConnectClickAction.Connect:
+                await ConnectAsync();
+                break;
+            case ConnectClickAction.Disconnect:
+                await DisconnectAsync();
+                break;
+        }
+    }
+
+    private void SetPhase(ConnectionPhase newPhase)
+    {
+        phase = newPhase;
+        ConnectButton.IsEnabled = ConnectionPhasePolicy.IsToggleEnabled(newPhase);
+        ConnectButton.Content = ConnectionPhasePolicy.ToggleText(newPhase);
+        if (trayToggleItem is not null)
+        {
+            trayToggleItem.Text = ConnectionPhasePolicy.ToggleText(newPhase);
+            trayToggleItem.Enabled = ConnectionPhasePolicy.IsToggleEnabled(newPhase);
         }
 
-        await ConnectAsync();
+        if (newPhase != ConnectionPhase.Connecting)
+        {
+            connectTimeoutTimer.Stop();
+        }
     }
 
     private async Task ConnectAsync()
     {
+        if (phase != ConnectionPhase.Disconnected)
+        {
+            return;
+        }
+
         if (!TryReadSettings(out var settings, out var profileName, out var readError))
         {
             SetStatus(ConnectionDisplayState.Error, "Проверьте код", readError);
@@ -122,7 +169,13 @@ public partial class MainWindow : Window
             File.Delete(paths.ControlPath);
         }
 
-        disconnectRequested = false;
+        if (File.Exists(paths.DiagnosticsPath))
+        {
+            File.Delete(paths.DiagnosticsPath);
+        }
+
+        stopReason = StopReason.Unexpected;
+        SetPhase(ConnectionPhase.Connecting);
         lifecycleStore.Write(new LifecycleSnapshot
         {
             State = "connecting",
@@ -143,6 +196,8 @@ public partial class MainWindow : Window
             OpenLog();
             if (!runtimeProcess.Start())
             {
+                runtimeProcess = null;
+                SetPhase(ConnectionPhase.Disconnected);
                 SetStatus(ConnectionDisplayState.Error, "Не удалось запустить клиент", "Process.Start вернул false.");
                 return;
             }
@@ -162,10 +217,13 @@ public partial class MainWindow : Window
             });
 
             SetStatus(ConnectionDisplayState.Connecting, "Подключение", "Omega VPN запускается.");
-            ConnectButton.Content = "Отключить";
+            connectTimeoutTimer.Stop();
+            connectTimeoutTimer.Start();
         }
         catch (Exception ex)
         {
+            runtimeProcess = null;
+            SetPhase(ConnectionPhase.Disconnected);
             lifecycleStore.Write(new LifecycleSnapshot
             {
                 State = "failed",
@@ -181,15 +239,21 @@ public partial class MainWindow : Window
 
     private async Task DisconnectAsync()
     {
+        if (phase == ConnectionPhase.Disconnecting)
+        {
+            return;
+        }
+
         if (runtimeProcess is not { HasExited: false } process)
         {
             runtimeProcess = null;
-            ConnectButton.Content = "Подключить";
+            SetPhase(ConnectionPhase.Disconnected);
             SetStatus(ConnectionDisplayState.Disconnected, "Отключено", "Omega VPN не запущен.");
             return;
         }
 
-        disconnectRequested = true;
+        SetPhase(ConnectionPhase.Disconnecting);
+        stopReason = StopReason.UserRequested;
         ControlFile.RequestStop(paths.ControlPath);
         var settings = CurrentLifecycleSettings();
         lifecycleStore.Write(new LifecycleSnapshot
@@ -203,50 +267,149 @@ public partial class MainWindow : Window
         });
         SetStatus(ConnectionDisplayState.Stopping, "Отключение", "Останавливаю VPN и очищаю маршруты.");
 
-        var exited = await WaitForExitAsync(process, TimeSpan.FromSeconds(15));
+        var exited = await WaitForExitAsync(process, StopTimeout);
         if (!exited && !process.HasExited)
         {
+            stopReason = StopReason.Forced;
+            TryKill(process);
+            exited = await WaitForExitAsync(process, KillTimeout);
+        }
+
+        if (!exited && !process.HasExited && phase == ConnectionPhase.Disconnecting)
+        {
+            // Процесс не удалось завершить — отвязываемся, чтобы UI не завис в "Отключение…".
+            runtimeProcess = null;
+            SetPhase(ConnectionPhase.Disconnected);
+            SetStatus(ConnectionDisplayState.Error, "Не удалось остановить клиент", "Процесс omega-client.exe не завершился. Завершите его вручную через диспетчер задач.");
+        }
+    }
+
+    private async Task AbortStuckConnectAsync()
+    {
+        connectTimeoutTimer.Stop();
+        if (phase != ConnectionPhase.Connecting)
+        {
+            return;
+        }
+
+        if (runtimeProcess is not { HasExited: false } process)
+        {
+            runtimeProcess = null;
+            SetPhase(ConnectionPhase.Disconnected);
+            SetStatus(ConnectionDisplayState.Error, "Не удалось подключиться", "Клиент не запущен.");
+            return;
+        }
+
+        stopReason = StopReason.ConnectTimeout;
+        ControlFile.RequestStop(paths.ControlPath);
+        SetStatus(ConnectionDisplayState.Stopping, "Отключение", $"Подключение не установлено за {ConnectTimeout.TotalSeconds:F0} с, останавливаю клиент.");
+
+        var exited = await WaitForExitAsync(process, KillTimeout);
+        if (!exited && !process.HasExited)
+        {
+            TryKill(process);
+            exited = await WaitForExitAsync(process, KillTimeout);
+        }
+
+        if (!exited && !process.HasExited && phase == ConnectionPhase.Connecting)
+        {
+            runtimeProcess = null;
+            SetPhase(ConnectionPhase.Disconnected);
+            SetStatus(ConnectionDisplayState.Error, "Не удалось подключиться", "Клиент завис и не завершился. Завершите omega-client.exe вручную через диспетчер задач.");
+        }
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
             process.Kill(entireProcessTree: true);
-            SetStatus(ConnectionDisplayState.Error, "Клиент остановлен принудительно", "Cleanup мог не завершиться. Запустите подключение заново, если маршруты требуют восстановления.");
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
         }
     }
 
     private async void RuntimeProcess_Exited(object? sender, EventArgs e)
     {
-        var exitCode = runtimeProcess?.ExitCode;
+        var process = sender as Process;
+        int? exitCode = null;
+        try
+        {
+            exitCode = process?.ExitCode;
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
         await Dispatcher.InvokeAsync(() =>
         {
+            // Событие от процесса прошлого подключения не должно сбивать текущее.
+            if (process is not null && runtimeProcess is not null && !ReferenceEquals(process, runtimeProcess))
+            {
+                return;
+            }
+
             var settings = CurrentLifecycleSettings();
-            ConnectButton.Content = "Подключить";
+            var reason = stopReason;
+            stopReason = StopReason.Unexpected;
             runtimeProcess = null;
+            SetPhase(ConnectionPhase.Disconnected);
             logWriter?.Flush();
             logWriter?.Dispose();
             logWriter = null;
 
-            if (disconnectRequested)
+            switch (reason)
             {
-                lifecycleStore.Write(new LifecycleSnapshot
-                {
-                    State = "disconnected",
-                    ServerEndpoint = settings.ServerEndpoint,
-                    DeviceName = settings.DeviceName,
-                    Profile = settings.Profile,
-                    Message = "Omega VPN stopped",
-                });
-                SetStatus(ConnectionDisplayState.Disconnected, "Отключено", "VPN остановлен.");
-            }
-            else
-            {
-                lifecycleStore.Write(new LifecycleSnapshot
-                {
-                    State = "failed",
-                    ServerEndpoint = settings.ServerEndpoint,
-                    DeviceName = settings.DeviceName,
-                    Profile = settings.Profile,
-                    Message = "Omega VPN exited",
-                    LastError = exitCode.HasValue ? $"Exit code {exitCode.Value}" : null,
-                });
-                SetStatus(ConnectionDisplayState.Error, "Клиент остановился", exitCode.HasValue ? $"Exit code {exitCode.Value}" : "Процесс завершился.");
+                case StopReason.UserRequested:
+                    lifecycleStore.Write(new LifecycleSnapshot
+                    {
+                        State = "disconnected",
+                        ServerEndpoint = settings.ServerEndpoint,
+                        DeviceName = settings.DeviceName,
+                        Profile = settings.Profile,
+                        Message = "Omega VPN stopped",
+                    });
+                    SetStatus(ConnectionDisplayState.Disconnected, "Отключено", "VPN остановлен.");
+                    break;
+                case StopReason.Forced:
+                    lifecycleStore.Write(new LifecycleSnapshot
+                    {
+                        State = "disconnected",
+                        ServerEndpoint = settings.ServerEndpoint,
+                        DeviceName = settings.DeviceName,
+                        Profile = settings.Profile,
+                        Message = "Omega VPN killed after stop timeout",
+                    });
+                    SetStatus(ConnectionDisplayState.Error, "Клиент остановлен принудительно", "Cleanup мог не завершиться. Запустите подключение заново, если маршруты требуют восстановления.");
+                    break;
+                case StopReason.ConnectTimeout:
+                    lifecycleStore.Write(new LifecycleSnapshot
+                    {
+                        State = "failed",
+                        ServerEndpoint = settings.ServerEndpoint,
+                        DeviceName = settings.DeviceName,
+                        Profile = settings.Profile,
+                        Message = "Omega VPN connect timed out",
+                        LastError = $"No connection within {ConnectTimeout.TotalSeconds:F0}s",
+                    });
+                    SetStatus(ConnectionDisplayState.Error, "Не удалось подключиться", $"Подключение не установлено за {ConnectTimeout.TotalSeconds:F0} с. Проверьте код подключения и доступность сервера.");
+                    break;
+                default:
+                    lifecycleStore.Write(new LifecycleSnapshot
+                    {
+                        State = "failed",
+                        ServerEndpoint = settings.ServerEndpoint,
+                        DeviceName = settings.DeviceName,
+                        Profile = settings.Profile,
+                        Message = "Omega VPN exited",
+                        LastError = exitCode.HasValue ? $"Exit code {exitCode.Value}" : null,
+                    });
+                    SetStatus(ConnectionDisplayState.Error, "Клиент остановился", exitCode.HasValue ? $"Exit code {exitCode.Value}" : "Процесс завершился.");
+                    break;
             }
 
             activeSettings = null;
@@ -269,6 +432,13 @@ public partial class MainWindow : Window
 
     private void RefreshDiagnostics()
     {
+        // Пока клиент не запущен (или уже останавливается), файл диагностики устарел —
+        // он не должен перещёлкивать статус и кнопку.
+        if (phase is not (ConnectionPhase.Connecting or ConnectionPhase.Connected))
+        {
+            return;
+        }
+
         if (!File.Exists(paths.DiagnosticsPath))
         {
             return;
@@ -296,9 +466,9 @@ public partial class MainWindow : Window
         MtuText.Text = view.EffectiveMtu;
         TransportText.Text = view.Transport;
         TunnelIpText.Text = view.TunnelIp;
-        if (view.State is ConnectionDisplayState.Connected or ConnectionDisplayState.Degraded or ConnectionDisplayState.Connecting)
+        if (phase == ConnectionPhase.Connecting && view.State is ConnectionDisplayState.Connected or ConnectionDisplayState.Degraded)
         {
-            ConnectButton.Content = "Отключить";
+            SetPhase(ConnectionPhase.Connected);
         }
     }
 
@@ -511,20 +681,15 @@ public partial class MainWindow : Window
         };
         trayIcon.DoubleClick += (_, _) => ShowFromTray();
         trayIcon.ContextMenuStrip.Items.Add("Открыть", null, (_, _) => ShowFromTray());
-        trayIcon.ContextMenuStrip.Items.Add("Подключить / отключить", null, async (_, _) =>
+        trayToggleItem = new Forms.ToolStripMenuItem(ConnectionPhasePolicy.ToggleText(phase))
         {
-            await Dispatcher.InvokeAsync(async () =>
-            {
-                if (runtimeProcess is { HasExited: false })
-                {
-                    await DisconnectAsync();
-                }
-                else
-                {
-                    await ConnectAsync();
-                }
-            });
-        });
+            Enabled = ConnectionPhasePolicy.IsToggleEnabled(phase),
+        };
+        trayToggleItem.Click += async (_, _) =>
+        {
+            await Dispatcher.InvokeAsync(async () => await ToggleConnectionAsync());
+        };
+        trayIcon.ContextMenuStrip.Items.Add(trayToggleItem);
         trayIcon.ContextMenuStrip.Items.Add("Выход", null, async (_, _) =>
         {
             await Dispatcher.InvokeAsync(async () =>

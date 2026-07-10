@@ -161,6 +161,8 @@ OMEGA_DEVICE_NAME="laptop" \
 
 Переменные окружения:
 - `OMEGA_ADMIN_WEB_BIND` (по умолчанию `127.0.0.1:8081`)
+- `OMEGA_ADMIN_WEB_PUBLIC=1` и `OMEGA_ADMIN_WEB_PORT=8081`, если админку нужно открыть наружу
+- `OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443`, чтобы UI генерировал правильные `omega://connect/...` коды
 - `OMEGA_ADMIN_WEB_DISABLE=1` для полного отключения
 
 Пример запуска:
@@ -169,7 +171,68 @@ OMEGA_DEVICE_NAME="laptop" \
 OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 /opt/omega/omega-server
 ```
 
-Рекомендуется держать bind только на localhost и публиковать доступ через защищенный reverse proxy (mTLS/VPN/SSH tunnel).
+Встроенная админка сейчас работает по plain HTTP, не HTTPS. Если она опубликована
+наружу, открывайте ее явно как:
+
+```text
+http://<SERVER_IP>:8081/
+```
+
+Если открыть `https://<SERVER_IP>:8081/`, сервер получит TLS ClientHello вместо
+HTTP-запроса и запишет `malformed HTTP request`.
+
+Для production override-ов используйте `/etc/default/omega-server`, а не правку
+unit-файла:
+
+```env
+# Сгенерируйте один раз и не меняйте после регистрации устройств.
+OMEGA_TOKEN_PEPPER=<long-random-secret>
+OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
+
+# Public plain-HTTP admin.
+OMEGA_ADMIN_WEB_PUBLIC=1
+OMEGA_ADMIN_WEB_PORT=8081
+
+# Если у VPS нет IPv6 egress, не включайте nat66.
+OMEGA_IPV6_MODE=disabled
+
+# Если TCP 443 уже занят nginx/xray/другим сервисом, отключите Omega TCP fallback.
+OMEGA_TCP_ENABLE=0
+```
+
+Сетевой bootstrap для такого IPv4-only варианта:
+
+```bash
+sudo OMEGA_VPN_PORT=443 \
+  OMEGA_TCP_ENABLE=0 \
+  OMEGA_VPN_IPV6_MODE=disabled \
+  OMEGA_ADMIN_WEB_PUBLIC=1 \
+  OMEGA_ADMIN_WEB_PORT=8081 \
+  bash deploy/setup_nat.sh
+
+sudo OMEGA_VPN_PORT=443 \
+  OMEGA_TCP_ENABLE=0 \
+  OMEGA_VPN_IPV6_MODE=disabled \
+  OMEGA_ADMIN_WEB_PUBLIC=1 \
+  OMEGA_ADMIN_WEB_PORT=8081 \
+  bash deploy/diagnose_server.sh
+```
+
+`OMEGA_IPV6_MODE=nat66` включайте только после проверки, что на VPS есть
+исходящий IPv6 route:
+
+```bash
+ip -6 route get 2606:4700:4700::1111
+```
+
+`OMEGA_TCP_ENABLE=1` имеет смысл только если TCP endpoint из `OMEGA_SERVER`
+свободен под Omega. Клиентский TCP fallback использует тот же host:port, поэтому
+если TCP `443` уже занимает, например, `xray`, включать Omega TCP fallback на
+`[::]:443` нельзя.
+
+Если админка содержит реальные пользовательские токены, безопаснее держать bind
+только на localhost и публиковать доступ через защищенный reverse proxy
+(mTLS/VPN/SSH tunnel) или хотя бы ограничить `8081` по IP в firewall/security group.
 ## Автодеплой при push (GitHub Actions)
 
 В репозитории добавлен workflow: `.github/workflows/deploy-server.yml`.

@@ -1,6 +1,7 @@
 package vpn.myboroda.omega
 
 import android.content.Context
+import android.content.SharedPreferences
 
 enum class VpnConnectionState {
     DISCONNECTED,
@@ -19,7 +20,14 @@ class VpnStateStore(context: Context) {
     private val prefs = context.getSharedPreferences("omega_vpn_state", Context.MODE_PRIVATE)
 
     fun loadState(): VpnConnectionState {
-        return VpnConnectionState.fromStored(prefs.getString(KEY_STATE, null))
+        val stored = VpnConnectionState.fromStored(prefs.getString(KEY_STATE, null))
+        // Prefs survive a process kill or reboot, the tunnel does not: an
+        // "active" state without a live service instance is stale, so report
+        // the truth instead of a phantom connection.
+        if (stored != VpnConnectionState.DISCONNECTED && !OmegaVpnService.isRunning) {
+            return VpnConnectionState.DISCONNECTED
+        }
+        return stored
     }
 
     fun saveState(state: VpnConnectionState) {
@@ -33,6 +41,18 @@ class VpnStateStore(context: Context) {
 
     fun setDesiredConnected(value: Boolean) {
         prefs.edit().putBoolean(KEY_DESIRED, value).apply()
+    }
+
+    /// Live state updates for the UI: the service writes every transition
+    /// through saveState(), so a prefs listener is a cheap in-process event
+    /// bus. Callers must hold a strong reference to the listener —
+    /// SharedPreferences only keeps weak ones.
+    fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+    }
+
+    fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {
+        prefs.unregisterOnSharedPreferenceChangeListener(listener)
     }
 
     companion object {

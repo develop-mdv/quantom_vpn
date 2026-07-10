@@ -14,6 +14,7 @@ var tests = new (string Name, Action Body)[]
     ("config store round trips saved profiles", ConfigStoreRoundTripsSavedProfiles),
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
     ("window close hides to tray while runtime is active", WindowCloseHidesToTrayWhileRuntimeIsActive),
+    ("connect toggle follows connection phase", ConnectToggleFollowsConnectionPhase),
     ("autostart task builds scheduler arguments", AutostartTaskBuildsSchedulerArguments),
     ("windows bootstrap installer documents required commands", WindowsBootstrapInstallerDocumentsRequiredCommands),
 };
@@ -309,6 +310,24 @@ static void WindowCloseHidesToTrayWhileRuntimeIsActive()
     Equal(
         WindowCloseAction.ExitApplication,
         WindowClosePolicy.Decide(hasActiveRuntime: false, explicitExitRequested: false));
+}
+
+static void ConnectToggleFollowsConnectionPhase()
+{
+    Equal(ConnectClickAction.Connect, ConnectionPhasePolicy.DecideClick(ConnectionPhase.Disconnected));
+    Equal(ConnectClickAction.Disconnect, ConnectionPhasePolicy.DecideClick(ConnectionPhase.Connected));
+    Equal(ConnectClickAction.None, ConnectionPhasePolicy.DecideClick(ConnectionPhase.Connecting));
+    Equal(ConnectClickAction.None, ConnectionPhasePolicy.DecideClick(ConnectionPhase.Disconnecting));
+
+    True(ConnectionPhasePolicy.IsToggleEnabled(ConnectionPhase.Disconnected), "toggle must be enabled when disconnected");
+    True(ConnectionPhasePolicy.IsToggleEnabled(ConnectionPhase.Connected), "toggle must be enabled when connected");
+    True(!ConnectionPhasePolicy.IsToggleEnabled(ConnectionPhase.Connecting), "toggle must be disabled while connecting");
+    True(!ConnectionPhasePolicy.IsToggleEnabled(ConnectionPhase.Disconnecting), "toggle must be disabled while disconnecting");
+
+    Equal("Подключить", ConnectionPhasePolicy.ToggleText(ConnectionPhase.Disconnected));
+    Equal("Отключить", ConnectionPhasePolicy.ToggleText(ConnectionPhase.Connected));
+    Equal("Подключение…", ConnectionPhasePolicy.ToggleText(ConnectionPhase.Connecting));
+    Equal("Отключение…", ConnectionPhasePolicy.ToggleText(ConnectionPhase.Disconnecting));
 }
 
 static void AutostartTaskBuildsSchedulerArguments()

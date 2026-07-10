@@ -139,6 +139,16 @@ http://127.0.0.1:8081/
 http://<SERVER_IP>:8081/
 ```
 
+Важно: встроенная админка сейчас говорит обычным HTTP, не HTTPS. Открывайте
+адрес явно как `http://<SERVER_IP>:8081/`. Если открыть `https://<SERVER_IP>:8081/`,
+сервер запишет в лог `malformed HTTP request`, а браузер не покажет UI.
+
+Для корректных `omega://connect/...` кодов в UI задайте публичный адрес сервера:
+
+```env
+OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
+```
+
 Через UI можно:
 
 - создать пользователя;
@@ -179,10 +189,33 @@ http://<SERVER_IP>:8081/
 
 ### Linux server bootstrap/health
 
+Для обычного VPS без подтвержденного IPv6 egress используйте IPv4-only bootstrap:
+
 ```bash
-sudo OMEGA_VPN_PORT=443 bash deploy/setup_nat.sh
-sudo bash deploy/diagnose_server.sh
+sudo OMEGA_VPN_PORT=443 \
+  OMEGA_TCP_ENABLE=0 \
+  OMEGA_VPN_IPV6_MODE=disabled \
+  OMEGA_ADMIN_WEB_PUBLIC=1 \
+  OMEGA_ADMIN_WEB_PORT=8081 \
+  bash deploy/setup_nat.sh
+
+sudo OMEGA_VPN_PORT=443 \
+  OMEGA_TCP_ENABLE=0 \
+  OMEGA_VPN_IPV6_MODE=disabled \
+  OMEGA_ADMIN_WEB_PUBLIC=1 \
+  OMEGA_ADMIN_WEB_PORT=8081 \
+  bash deploy/diagnose_server.sh
 ```
+
+Включайте `OMEGA_VPN_IPV6_MODE=nat66` только если сам сервер реально имеет IPv6
+маршрут наружу:
+
+```bash
+ip -6 route get 2606:4700:4700::1111
+```
+
+Если этой маршрутизации нет, diagnostics правильно упадет на IPv6 route/egress,
+а серверу нужно оставить `OMEGA_IPV6_MODE=disabled`.
 
 `setup_nat.sh` делает:
 
@@ -284,6 +317,35 @@ OMEGA_TRANSPORT=auto  # UDP handshake, затем TCP fallback
 - built-in admin на публичном `:8081`
 - metrics только на localhost
 - state-файлы в `/opt/omega/state/*`
+
+Практические production override-ы держите в `/etc/default/omega-server`, чтобы не
+править unit при каждом обновлении:
+
+```env
+# Обязателен в production. После регистрации устройств не менять:
+# смена pepper инвалидирует device tokens.
+OMEGA_TOKEN_PEPPER=<long-random-secret>
+
+# Что админка подставляет в omega://connect коды.
+OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
+
+# Built-in admin сейчас plain HTTP.
+OMEGA_ADMIN_WEB_PUBLIC=1
+OMEGA_ADMIN_WEB_PORT=8081
+
+# Если у VPS нет IPv6 egress, оставьте IPv4-only.
+OMEGA_IPV6_MODE=disabled
+
+# Если TCP 443 уже занят nginx/xray/другим сервисом, Omega TCP fallback
+# на этом же порту включать нельзя. UDP 443 продолжит работать.
+OMEGA_TCP_ENABLE=0
+```
+
+Если TCP `443` свободен и нужен framed TCP fallback, оставьте `OMEGA_TCP_ENABLE=1`
+и `OMEGA_TCP_BIND=[::]:443`, а `setup_nat.sh` запускайте с
+`OMEGA_TCP_ENABLE=1 OMEGA_TCP_PORT=443`. Если порт уже занят другим процессом,
+не включайте fallback на том же endpoint: клиентский TCP fallback использует тот
+же `OMEGA_SERVER` host:port.
 
 ### Rolling update script
 
