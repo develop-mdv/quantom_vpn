@@ -75,12 +75,6 @@ if (-not (Test-Path $Wintun)) {
 
 $AppPublish = Join-Path $ArtifactsRoot "publish-app"
 $SetupPublish = Join-Path $ArtifactsRoot "publish-setup"
-$ExistingConfig = Join-Path $PortableRoot "omega-client\state\app-config.json"
-$PreservedConfig = Join-Path $ArtifactsRoot "app-config.preserve.json"
-if (Test-Path $ExistingConfig) {
-    New-Item -ItemType Directory -Force $ArtifactsRoot | Out-Null
-    Copy-Item -Force $ExistingConfig $PreservedConfig
-}
 Remove-Item -Recurse -Force $AppPublish, $SetupPublish, $PortableRoot, $PayloadRoot -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $PortableRoot, $PayloadRoot | Out-Null
 
@@ -113,11 +107,6 @@ foreach ($publishDir in @($AppPublish, $SetupPublish)) {
 Copy-Item -Recurse -Force (Join-Path $AppPublish "*") $PortableRoot
 Copy-Item -Force $RuntimeExe (Join-Path $PortableRoot "omega-client.exe")
 Copy-Item -Force $Wintun (Join-Path $PortableRoot "wintun.dll")
-New-Item -ItemType Directory -Force (Join-Path $PortableRoot "omega-client\state") | Out-Null
-if (Test-Path $PreservedConfig) {
-    Copy-Item -Force $PreservedConfig (Join-Path $PortableRoot "omega-client\state\app-config.json")
-    Remove-Item -Force $PreservedConfig -ErrorAction SilentlyContinue
-}
 
 @"
 # Omega VPN Portable
@@ -130,7 +119,9 @@ Required fields:
 The code can be an omega://connect/... link or pasted OMEGA_* env text.
 Saved connections can be selected from the profile list later.
 
-The app stores runtime state in `omega-client\state`.
+Portable runs store runtime state in `omega-client\state`.
+The installed app stores profiles and runtime state in `%LocalAppData%\Omega VPN\state`
+so reinstalling or updating program files does not remove saved connections.
 
 No separate .NET Desktop Runtime install is required.
 
@@ -138,6 +129,10 @@ If the VPN is active, closing the main window hides Omega VPN to the Windows tra
 "@ | Set-Content -Encoding UTF8 (Join-Path $PortableRoot "README.txt")
 
 Copy-Item -Recurse -Force (Join-Path $PortableRoot "*") $PayloadRoot
+$BundledConfigs = @(Get-ChildItem -Path $PayloadRoot -Recurse -File -Filter "app-config*.json")
+if ($BundledConfigs.Count -gt 0) {
+    throw "Unsafe installer payload: user app-config.json must never be bundled."
+}
 Copy-Item -Recurse -Force (Join-Path $SetupPublish "*") $InstallerRoot
 
 Write-Host "Portable: $PortableRoot"

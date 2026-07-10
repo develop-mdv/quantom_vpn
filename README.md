@@ -92,6 +92,11 @@ powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client
 
 GUI требует права администратора, как и `start_client.bat`, потому что Windows-клиент управляет Wintun, routes, DNS и kill switch.
 
+Установленная версия хранит сохранённые подключения отдельно от файлов программы
+в `%LocalAppData%\Omega VPN\state`. При обновлении setup корректно останавливает
+запущенный клиент, атомарно заменяет каталог программы и сохраняет профили.
+Повторный запуск ярлыка не создаёт второе окно, а открывает уже работающий клиент.
+
 ## Ключевые runtime-файлы
 
 - `state/identity.json` - users/devices/audit

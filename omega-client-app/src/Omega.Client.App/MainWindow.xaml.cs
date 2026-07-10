@@ -38,6 +38,7 @@ public partial class MainWindow : Window
     private ConnectionPhase phase = ConnectionPhase.Disconnected;
     private StopReason stopReason = StopReason.Unexpected;
     private bool explicitExitRequested;
+    private bool exitInProgress;
     private bool profileSelectionChanging;
 
     public MainWindow()
@@ -79,6 +80,37 @@ public partial class MainWindow : Window
         logWriter?.Dispose();
         base.OnClosed(e);
         System.Windows.Application.Current.Shutdown();
+    }
+
+    public void BringToFront()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        Activate();
+        Topmost = true;
+        Topmost = false;
+        Focus();
+    }
+
+    public async Task ExitApplicationAsync()
+    {
+        if (exitInProgress)
+        {
+            return;
+        }
+
+        exitInProgress = true;
+        if (runtimeProcess is { HasExited: false })
+        {
+            await DisconnectAsync();
+        }
+
+        explicitExitRequested = true;
+        Close();
     }
 
     private async void ConnectButton_Click(object sender, RoutedEventArgs e)
@@ -692,23 +724,13 @@ public partial class MainWindow : Window
         trayIcon.ContextMenuStrip.Items.Add(trayToggleItem);
         trayIcon.ContextMenuStrip.Items.Add("Выход", null, async (_, _) =>
         {
-            await Dispatcher.InvokeAsync(async () =>
-            {
-                if (runtimeProcess is { HasExited: false })
-                {
-                    await DisconnectAsync();
-                }
-                explicitExitRequested = true;
-                Close();
-            });
+            await Dispatcher.InvokeAsync(ExitApplicationAsync).Task.Unwrap();
         });
     }
 
     private void ShowFromTray()
     {
-        Show();
-        WindowState = WindowState.Normal;
-        Activate();
+        BringToFront();
     }
 
     private static Icon LoadTrayIcon()

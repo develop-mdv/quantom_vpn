@@ -12,6 +12,8 @@ var tests = new (string Name, Action Body)[]
     ("connection code parses env paste", ConnectionCodeParsesEnvPaste),
     ("config store migrates legacy settings into saved profile", ConfigStoreMigratesLegacySettingsIntoSavedProfile),
     ("config store round trips saved profiles", ConfigStoreRoundTripsSavedProfiles),
+    ("installed config migrates outside program files", InstalledConfigMigratesOutsideProgramFiles),
+    ("second app instance signals the primary instance", SecondAppInstanceSignalsPrimaryInstance),
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
     ("window close hides to tray while runtime is active", WindowCloseHidesToTrayWhileRuntimeIsActive),
     ("connect toggle follows connection phase", ConnectToggleFollowsConnectionPhase),
@@ -276,6 +278,63 @@ static void ConfigStoreRoundTripsSavedProfiles()
     Equal("203.0.113.1:443", actual.Profiles[1].Settings.ServerEndpoint);
 }
 
+static void InstalledConfigMigratesOutsideProgramFiles()
+{
+    var testRoot = Path.Combine(Path.GetTempPath(), "omega-installed-config-test-" + Guid.NewGuid().ToString("N"));
+    var installRoot = Path.Combine(testRoot, "Program Files", "Omega VPN");
+    var localAppData = Path.Combine(testRoot, "LocalAppData");
+    var portablePaths = ClientPaths.ForPortableRoot(installRoot);
+    var installedPaths = ClientPaths.ForInstalledRoot(installRoot, localAppData);
+    var legacyStore = new ConfigStore(portablePaths);
+    legacyStore.SaveState(new ClientAppConfig
+    {
+        Profiles =
+        [
+            SavedConnectionProfile.FromSettings("Migrated", new ConnectionSettings
+            {
+                ServerEndpoint = "198.51.100.20:443",
+                DeviceId = "cccccccc-dddd-eeee-ffff-000000000000",
+                DeviceToken = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            }, "migrated-profile"),
+        ],
+        SelectedProfileId = "migrated-profile",
+    });
+
+    var migrated = new ConfigStore(installedPaths).LoadState();
+
+    Equal(Path.Combine(localAppData, "Omega VPN", "state"), installedPaths.StateDirectory);
+    True(File.Exists(installedPaths.ConfigPath), "installed config was not copied to LocalAppData");
+    Equal(1, migrated.Profiles.Count);
+    Equal("Migrated", migrated.Profiles[0].Name);
+    Equal("migrated-profile", migrated.SelectedProfileId);
+}
+
+static void SecondAppInstanceSignalsPrimaryInstance()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var instanceKey = "OmegaVpn.Client.App.Tests." + Guid.NewGuid().ToString("N");
+    using var commandReceived = new ManualResetEventSlim();
+    var receivedCommand = default(ClientInstanceCommand?);
+    using var primary = ClientInstanceCoordinator.Create(instanceKey, sessionId: 0, command =>
+    {
+        receivedCommand = command;
+        commandReceived.Set();
+    });
+    using var secondary = ClientInstanceCoordinator.Create(instanceKey, sessionId: 0, _ => { });
+
+    True(primary.IsPrimary, "first coordinator was not primary");
+    True(!secondary.IsPrimary, "second coordinator unexpectedly became primary");
+    True(
+        secondary.SendToPrimary(ClientInstanceCommand.Activate, TimeSpan.FromSeconds(5)),
+        "second coordinator could not signal primary");
+    True(commandReceived.Wait(TimeSpan.FromSeconds(5)), "primary did not receive activation command");
+    Equal(ClientInstanceCommand.Activate, receivedCommand);
+}
+
 static void RuntimeLaunchPlanIsHiddenAndEnvDriven()
 {
     var root = Path.Combine(Path.GetTempPath(), "omega-launch-test-" + Guid.NewGuid().ToString("N"));
@@ -358,6 +417,16 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(script.Contains("Omega.Client.Setup.exe", StringComparison.Ordinal), "setup executable launch missing");
     True(script.Contains("SkipDependencyInstall", StringComparison.Ordinal), "dependency install opt-out parameter missing");
     True(script.Contains("SkipRustBuild", StringComparison.Ordinal), "rust build opt-out parameter missing");
+
+    var packageScriptPath = Path.Combine(FindRepoRoot(), "omega-client-app", "package-windows-client.ps1");
+    var packageScript = File.ReadAllText(packageScriptPath);
+    True(!packageScript.Contains("app-config.preserve", StringComparison.OrdinalIgnoreCase), "packager still preserves user config");
+    True(packageScript.Contains("must never be bundled", StringComparison.Ordinal), "unsafe payload guard missing");
+
+    var setupSourcePath = Path.Combine(FindRepoRoot(), "omega-client-app", "src", "Omega.Client.Setup", "Program.cs");
+    var setupSource = File.ReadAllText(setupSourcePath);
+    True(setupSource.Contains("ReplaceInstallDirectory", StringComparison.Ordinal), "atomic install directory replacement missing");
+    True(setupSource.Contains("MigrateLegacyConfig", StringComparison.Ordinal), "legacy config migration missing");
 }
 
 static string FindRepoRoot()

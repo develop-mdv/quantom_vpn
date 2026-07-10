@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Principal;
 using System.Text;
+using Omega.Client.App.Core;
 
 Console.OutputEncoding = Encoding.UTF8;
 
@@ -16,13 +17,21 @@ if (!IsAdministrator())
     return;
 }
 
-if (string.Equals(command, "uninstall", StringComparison.OrdinalIgnoreCase))
+try
 {
-    Uninstall(installDir);
-    return;
-}
+    if (string.Equals(command, "uninstall", StringComparison.OrdinalIgnoreCase))
+    {
+        Uninstall(installDir);
+        return;
+    }
 
-Install(installDir, autostart);
+    Install(installDir, autostart);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"Omega VPN setup failed: {ex.Message}");
+    Environment.ExitCode = 1;
+}
 
 static void Install(string installDir, bool autostart)
 {
@@ -35,9 +44,18 @@ static void Install(string installDir, bool autostart)
         return;
     }
 
+    var bundledConfig = Directory
+        .EnumerateFiles(payloadDir, "app-config*.json", SearchOption.AllDirectories)
+        .FirstOrDefault();
+    if (bundledConfig is not null)
+    {
+        throw new InvalidOperationException("Installer payload contains a user app-config.json and is unsafe to install.");
+    }
+
     Console.WriteLine($"Installing Omega VPN to {installDir}");
-    Directory.CreateDirectory(installDir);
-    CopyDirectory(payloadDir, installDir);
+    StopInstalledClient(installDir);
+    MigrateLegacyConfig(installDir);
+    ReplaceInstallDirectory(payloadDir, installDir);
 
     var appPath = Path.Combine(installDir, "Omega.Client.App.exe");
     if (!File.Exists(appPath))
@@ -48,10 +66,7 @@ static void Install(string installDir, bool autostart)
     }
 
     CreateShortcuts(appPath, installDir);
-    if (autostart)
-    {
-        ConfigureAutostart(appPath, enabled: true);
-    }
+    ConfigureAutostart(appPath, enabled: autostart);
 
     Console.WriteLine("Omega VPN installed.");
 }
@@ -59,6 +74,8 @@ static void Install(string installDir, bool autostart)
 static void Uninstall(string installDir)
 {
     Console.WriteLine("Uninstalling Omega VPN");
+    StopInstalledClient(installDir);
+    MigrateLegacyConfig(installDir);
     ConfigureAutostart("", enabled: false);
     DeleteShortcut(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Omega VPN.lnk");
     DeleteShortcut(
@@ -71,6 +88,184 @@ static void Uninstall(string installDir)
     }
 
     Console.WriteLine("Omega VPN removed.");
+}
+
+static void StopInstalledClient(string installDir)
+{
+    var appPath = Path.GetFullPath(Path.Combine(installDir, "Omega.Client.App.exe"));
+    var runtimePath = Path.GetFullPath(Path.Combine(installDir, "omega-client.exe"));
+    var processes = FindProcessesAtPaths(appPath, runtimePath);
+    try
+    {
+        if (processes.Count == 0)
+        {
+            return;
+        }
+
+        var appProcess = processes.FirstOrDefault(process => ProcessPathEquals(process, appPath));
+        if (appProcess is not null)
+        {
+            Console.WriteLine("Stopping the running Omega VPN client before update...");
+            if (!ClientInstanceCoordinator.SendToPrimaryInstance(
+                    ClientInstanceCommand.ExitForUpdate,
+                    TimeSpan.FromSeconds(5)))
+            {
+                throw new InvalidOperationException(
+                    "Omega VPN is running. Exit it from the system tray, then run setup again.");
+            }
+
+            if (!appProcess.WaitForExit((int)TimeSpan.FromSeconds(30).TotalMilliseconds))
+            {
+                throw new InvalidOperationException(
+                    "Omega VPN did not stop in time. Exit it from the system tray, then run setup again.");
+            }
+        }
+
+        foreach (var process in FindProcessesAtPaths(appPath, runtimePath))
+        {
+            process.Dispose();
+            throw new InvalidOperationException(
+                "An Omega VPN process is still using the installation directory. Close it and run setup again.");
+        }
+    }
+    finally
+    {
+        foreach (var process in processes)
+        {
+            process.Dispose();
+        }
+    }
+}
+
+static List<Process> FindProcessesAtPaths(params string[] expectedPaths)
+{
+    var expected = expectedPaths
+        .Select(Path.GetFullPath)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var result = new List<Process>();
+    foreach (var processName in new[] { "Omega.Client.App", "omega-client" })
+    {
+        foreach (var process in Process.GetProcessesByName(processName))
+        {
+            if (expected.Any(path => ProcessPathEquals(process, path)))
+            {
+                result.Add(process);
+            }
+            else
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    return result;
+}
+
+static bool ProcessPathEquals(Process process, string expectedPath)
+{
+    try
+    {
+        var actualPath = process.MainModule?.FileName;
+        return actualPath is not null
+            && string.Equals(Path.GetFullPath(actualPath), expectedPath, StringComparison.OrdinalIgnoreCase);
+    }
+    catch (InvalidOperationException)
+    {
+        return false;
+    }
+    catch (System.ComponentModel.Win32Exception)
+    {
+        return false;
+    }
+}
+
+static void MigrateLegacyConfig(string installDir)
+{
+    var localApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+    var paths = ClientPaths.ForInstalledRoot(installDir, localApplicationData);
+    if (File.Exists(paths.ConfigPath)
+        || string.IsNullOrWhiteSpace(paths.LegacyConfigPath)
+        || !File.Exists(paths.LegacyConfigPath))
+    {
+        return;
+    }
+
+    Console.WriteLine($"Preserving connection profiles in {paths.StateDirectory}");
+    Directory.CreateDirectory(paths.StateDirectory);
+    File.Copy(paths.LegacyConfigPath, paths.ConfigPath, overwrite: false);
+}
+
+static void ReplaceInstallDirectory(string payloadDir, string installDir)
+{
+    installDir = Path.GetFullPath(installDir);
+    var parentDirectory = Directory.GetParent(installDir)?.FullName
+        ?? throw new InvalidOperationException("Installation directory cannot be a drive root.");
+    Directory.CreateDirectory(parentDirectory);
+
+    var directoryName = Path.GetFileName(installDir);
+    var operationId = Guid.NewGuid().ToString("N");
+    var stagingDir = Path.Combine(parentDirectory, $".{directoryName}.staging-{operationId}");
+    var backupDir = Path.Combine(parentDirectory, $".{directoryName}.backup-{operationId}");
+    var previousInstallMoved = false;
+
+    try
+    {
+        Directory.CreateDirectory(stagingDir);
+        CopyDirectory(payloadDir, stagingDir);
+        var stagedApp = Path.Combine(stagingDir, "Omega.Client.App.exe");
+        if (!File.Exists(stagedApp))
+        {
+            throw new InvalidOperationException($"Installer payload is missing {Path.GetFileName(stagedApp)}.");
+        }
+
+        File.WriteAllText(
+            Path.Combine(stagingDir, ClientPaths.InstalledMarkerFileName),
+            DateTimeOffset.UtcNow.ToString("O"));
+
+        if (Directory.Exists(installDir))
+        {
+            Directory.Move(installDir, backupDir);
+            previousInstallMoved = true;
+        }
+
+        try
+        {
+            Directory.Move(stagingDir, installDir);
+        }
+        catch
+        {
+            if (previousInstallMoved && !Directory.Exists(installDir) && Directory.Exists(backupDir))
+            {
+                Directory.Move(backupDir, installDir);
+                previousInstallMoved = false;
+            }
+
+            throw;
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(stagingDir))
+        {
+            Directory.Delete(stagingDir, recursive: true);
+        }
+    }
+
+    if (previousInstallMoved && Directory.Exists(backupDir))
+    {
+        try
+        {
+            Directory.Delete(backupDir, recursive: true);
+        }
+        catch (IOException ex)
+        {
+            Console.WriteLine($"Old installation backup could not be removed: {ex.Message}");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.WriteLine($"Old installation backup could not be removed: {ex.Message}");
+        }
+    }
 }
 
 static string? ReadOption(string[] args, string name)

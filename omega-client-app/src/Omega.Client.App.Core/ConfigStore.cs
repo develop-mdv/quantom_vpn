@@ -19,6 +19,7 @@ public sealed class ConfigStore
 
     public ClientAppConfig LoadState()
     {
+        MigrateLegacyConfig();
         if (!File.Exists(paths.ConfigPath))
         {
             return new ClientAppConfig();
@@ -55,6 +56,26 @@ public sealed class ConfigStore
         Directory.CreateDirectory(paths.StateDirectory);
         state.Normalize();
         File.WriteAllText(paths.ConfigPath, JsonSerializerDefaults.Write(state));
+    }
+
+    private void MigrateLegacyConfig()
+    {
+        if (File.Exists(paths.ConfigPath)
+            || string.IsNullOrWhiteSpace(paths.LegacyConfigPath)
+            || !File.Exists(paths.LegacyConfigPath))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(paths.StateDirectory);
+        try
+        {
+            File.Copy(paths.LegacyConfigPath, paths.ConfigPath, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(paths.ConfigPath))
+        {
+            // Another startup completed the migration first.
+        }
     }
 
     private static ClientAppConfig LoadFromJson(string json)

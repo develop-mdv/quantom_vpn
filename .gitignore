@@ -22,6 +22,8 @@ state/
 omega-client/state/
 omega-client-app/artifacts/
 omega-client-app/omega-client/state/
+# Saved client profiles contain device credentials and must never be committed.
+**/app-config*.json
 omega-android/.gradle/
 omega-android/**/build/
 omega-android/local.properties

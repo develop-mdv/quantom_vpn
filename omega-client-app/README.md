@@ -15,9 +15,18 @@ Closing the main window while the VPN runtime is active hides the app to the
 Windows tray. Use the tray menu to open the window again or exit after a
 graceful disconnect.
 
+Only one GUI instance runs per Windows session. Starting Omega VPN again brings
+the existing window to the foreground, including when it is hidden in the tray.
+
 The main connection screen uses one field: a connection code. It accepts either
 `omega://connect/<base64url-json>` or pasted `OMEGA_*` env text, then saves the
 connection as a selectable profile.
+
+Installed clients keep profiles and runtime state in
+`%LocalAppData%\Omega VPN\state`. Setup migrates the legacy
+`%ProgramFiles%\Omega VPN\omega-client\state\app-config.json` on the first
+update. Portable clients continue to use `omega-client\state` beside the app.
+Installer payloads never contain an `app-config.json` from the build machine.
 
 ## Build Prerequisites
 
@@ -93,6 +102,10 @@ Use the installer package for a normal user machine:
 5. Paste the connection code for this PC. The code can be an
    `omega://connect/...` link or pasted `OMEGA_*` environment text. After it is
    saved, the profile is available from the profile list.
+
+To update, run `Omega.Client.Setup.exe` from the new installer folder. Setup
+asks a running client to disconnect gracefully, stages the new version, swaps
+the program directory, and keeps the profiles in `%LocalAppData%` unchanged.
 
 For a new PC, create/register a separate Windows device and use its own
 connection code. Reusing another machine's device token works only as a manual
