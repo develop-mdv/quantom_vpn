@@ -456,6 +456,8 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(script.Contains("--log", StringComparison.Ordinal), "setup log argument missing");
     True(script.Contains("Get-Content -LiteralPath $logPath -Raw", StringComparison.Ordinal), "setup traceback propagation missing");
     True(script.Contains("COREHOST_TRACE", StringComparison.Ordinal), "native .NET host trace missing");
+    True(script.Contains("RedirectStandardOutput", StringComparison.Ordinal), "setup stdout capture missing");
+    True(script.Contains("RedirectStandardError", StringComparison.Ordinal), "setup stderr capture missing");
 
     var packageScriptPath = Path.Combine(FindRepoRoot(), "omega-client-app", "package-windows-client.ps1");
     var packageScript = File.ReadAllText(packageScriptPath);
@@ -470,11 +472,17 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(setupSource.Contains("EnsureNoOtherClientProcesses", StringComparison.Ordinal), "portable client safety check missing");
     True(setupSource.Contains("SetupFailureReporter.Report", StringComparison.Ordinal), "setup failure log missing");
     True(setupSource.Contains("SetupFailureReporter.Trace", StringComparison.Ordinal), "early setup trace missing");
+    True(setupSource.Contains("Omega VPN setup diagnostics OK", StringComparison.Ordinal), "non-installing setup diagnostics mode missing");
     True(setupSource.Contains("process.WaitForExit()", StringComparison.Ordinal), "elevated setup is not awaited");
     True(setupSource.Contains("return process.ExitCode", StringComparison.Ordinal), "elevated setup exit code is not propagated");
     True(setupSource.Contains("shortcut.TargetPath = targetPath", StringComparison.Ordinal), "shortcut target assignment missing");
     True(setupSource.Contains("Environment.SpecialFolder.DesktopDirectory", StringComparison.Ordinal), "desktop shortcut missing");
     True(setupSource.Contains("Environment.SpecialFolder.CommonPrograms", StringComparison.Ordinal), "Start menu shortcut missing");
+
+    var setupManifestPath = Path.Combine(FindRepoRoot(), "omega-client-app", "src", "Omega.Client.Setup", "app.manifest");
+    var setupManifest = File.ReadAllText(setupManifestPath);
+    True(setupManifest.Contains("level=\"asInvoker\"", StringComparison.Ordinal), "setup must enter managed code before requesting UAC");
+    True(!setupManifest.Contains("level=\"requireAdministrator\"", StringComparison.Ordinal), "setup manifest still elevates before diagnostics start");
 }
 
 static string FindRepoRoot()

@@ -249,8 +249,12 @@ function Invoke-Setup {
 
     $setupLog = Join-Path $installerRoot "OmegaVPN-setup.log"
     $hostTraceLog = Join-Path $installerRoot "OmegaVPN-corehost.log"
+    $stdoutLog = Join-Path $installerRoot "OmegaVPN-stdout.log"
+    $stderrLog = Join-Path $installerRoot "OmegaVPN-stderr.log"
     Remove-Item -LiteralPath $setupLog -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $hostTraceLog -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stdoutLog -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrLog -Force -ErrorAction SilentlyContinue
 
     $args = @("--log", $setupLog)
     if ($NoAutostart) {
@@ -268,7 +272,13 @@ function Invoke-Setup {
         $env:COREHOST_TRACE = "1"
         $env:COREHOST_TRACEFILE = $hostTraceLog
         $env:COREHOST_TRACE_VERBOSITY = "4"
-        $process = Start-Process -FilePath $setupExe -ArgumentList (Join-ProcessArguments $args) -Wait -PassThru
+        $process = Start-Process `
+            -FilePath $setupExe `
+            -ArgumentList (Join-ProcessArguments $args) `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog `
+            -Wait `
+            -PassThru
     } finally {
         $env:COREHOST_TRACE = $previousCoreHostTrace
         $env:COREHOST_TRACEFILE = $previousCoreHostTraceFile
@@ -276,7 +286,7 @@ function Invoke-Setup {
     }
     if ($process.ExitCode -ne 0) {
         $diagnostics = @()
-        foreach ($logPath in @($setupLog, $hostTraceLog)) {
+        foreach ($logPath in @($setupLog, $hostTraceLog, $stdoutLog, $stderrLog)) {
             if (Test-Path -LiteralPath $logPath) {
                 $diagnostics += "--- $logPath ---"
                 $diagnostics += (Get-Content -LiteralPath $logPath -Raw)

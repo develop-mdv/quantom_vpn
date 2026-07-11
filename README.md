@@ -145,6 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1
 stack trace выводятся корневым скриптом. Логи `OmegaVPN-setup.log` и
 `OmegaVPN-corehost.log` сохраняются рядом с `Omega.Client.Setup.exe`, поэтому
 они доступны даже при запуске UAC под другой учётной записью администратора.
+Дополнительно сохраняются `OmegaVPN-stdout.log` и `OmegaVPN-stderr.log`.
 
 Полезные варианты:
 

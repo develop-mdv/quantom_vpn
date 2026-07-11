@@ -78,7 +78,17 @@ If setup fails, the bootstrap prints the detailed .NET exception and stack
 trace. `OmegaVPN-setup.log` and the lower-level `OmegaVPN-corehost.log` are
 saved beside `Omega.Client.Setup.exe`. This location also works when UAC uses a
 different administrator account. When setup is launched directly, inspect
-these files after an `exit code 1` failure.
+these files after an `exit code 1` failure. The bootstrap also captures
+`OmegaVPN-stdout.log` and `OmegaVPN-stderr.log`. Setup starts as the current
+user so diagnostics are initialized first, then explicitly requests elevation
+with `runas` before changing the installed application.
+
+To verify that setup can start and write diagnostics without requesting UAC or
+installing anything, run this inside the installer folder:
+
+```powershell
+.\Omega.Client.Setup.exe diagnostics --log .\OmegaVPN-setup.log
+```
 
 ## Build Package Only
 

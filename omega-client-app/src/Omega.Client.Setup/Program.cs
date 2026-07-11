@@ -5,7 +5,11 @@ using Omega.Client.App.Core;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var command = args.Contains("uninstall", StringComparer.OrdinalIgnoreCase) ? "uninstall" : "install";
+var command = args.Contains("diagnostics", StringComparer.OrdinalIgnoreCase)
+    ? "diagnostics"
+    : args.Contains("uninstall", StringComparer.OrdinalIgnoreCase)
+        ? "uninstall"
+        : "install";
 var installDir = ReadOption(args, "--target") ?? Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
     "Omega VPN");
@@ -17,6 +21,12 @@ var isAdministrator = IsAdministrator();
 SetupFailureReporter.Trace(
     setupLogPath,
     $"Setup started. Command={command}; Elevated={isAdministrator}; User={Environment.UserName}; BaseDir={AppContext.BaseDirectory}; InstallDir={installDir}");
+
+if (string.Equals(command, "diagnostics", StringComparison.OrdinalIgnoreCase))
+{
+    Console.WriteLine($"Omega VPN setup diagnostics OK. Elevated={isAdministrator}; BaseDir={AppContext.BaseDirectory}");
+    return;
+}
 
 if (!isAdministrator)
 {
