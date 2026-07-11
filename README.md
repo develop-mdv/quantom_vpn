@@ -142,8 +142,9 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1
 обновления смогут штатно остановить установленный клиент автоматически.
 
 Если setup завершился с `exit code 1`, полный тип исключения, inner exception и
-stack trace выводятся корневым скриптом и сохраняются в
-`%TEMP%\OmegaVPN-setup.log`.
+stack trace выводятся корневым скриптом. Логи `OmegaVPN-setup.log` и
+`OmegaVPN-corehost.log` сохраняются рядом с `Omega.Client.Setup.exe`, поэтому
+они доступны даже при запуске UAC под другой учётной записью администратора.
 
 Полезные варианты:
 

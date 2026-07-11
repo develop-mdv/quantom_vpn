@@ -75,8 +75,10 @@ exit every old or portable Omega VPN instance from the Windows tray before
 running the command.
 
 If setup fails, the bootstrap prints the detailed .NET exception and stack
-trace. The same diagnostic is saved to `%TEMP%\OmegaVPN-setup.log`. When setup
-is launched directly, inspect that file after an `exit code 1` failure.
+trace. `OmegaVPN-setup.log` and the lower-level `OmegaVPN-corehost.log` are
+saved beside `Omega.Client.Setup.exe`. This location also works when UAC uses a
+different administrator account. When setup is launched directly, inspect
+these files after an `exit code 1` failure.
 
 ## Build Package Only
 

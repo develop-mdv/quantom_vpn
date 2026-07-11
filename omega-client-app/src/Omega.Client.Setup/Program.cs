@@ -11,9 +11,14 @@ var installDir = ReadOption(args, "--target") ?? Path.Combine(
     "Omega VPN");
 var autostart = !args.Contains("--no-autostart", StringComparer.OrdinalIgnoreCase);
 var setupLogPath = ReadOption(args, "--log")
-    ?? Path.Combine(Path.GetTempPath(), "OmegaVPN-setup.log");
+    ?? Path.Combine(AppContext.BaseDirectory, "OmegaVPN-setup.log");
+var isAdministrator = IsAdministrator();
 
-if (!IsAdministrator())
+SetupFailureReporter.Trace(
+    setupLogPath,
+    $"Setup started. Command={command}; Elevated={isAdministrator}; User={Environment.UserName}; BaseDir={AppContext.BaseDirectory}; InstallDir={installDir}");
+
+if (!isAdministrator)
 {
     try
     {

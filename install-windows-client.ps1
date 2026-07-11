@@ -247,8 +247,10 @@ function Invoke-Setup {
         throw "Setup executable not found: $setupExe"
     }
 
-    $setupLog = Join-Path ([System.IO.Path]::GetTempPath()) "OmegaVPN-setup.log"
+    $setupLog = Join-Path $installerRoot "OmegaVPN-setup.log"
+    $hostTraceLog = Join-Path $installerRoot "OmegaVPN-corehost.log"
     Remove-Item -LiteralPath $setupLog -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $hostTraceLog -Force -ErrorAction SilentlyContinue
 
     $args = @("--log", $setupLog)
     if ($NoAutostart) {
@@ -259,18 +261,30 @@ function Invoke-Setup {
     }
 
     Write-Step "Launching Omega VPN setup"
-    if ($args.Count -gt 0) {
+    $previousCoreHostTrace = $env:COREHOST_TRACE
+    $previousCoreHostTraceFile = $env:COREHOST_TRACEFILE
+    $previousCoreHostTraceVerbosity = $env:COREHOST_TRACE_VERBOSITY
+    try {
+        $env:COREHOST_TRACE = "1"
+        $env:COREHOST_TRACEFILE = $hostTraceLog
+        $env:COREHOST_TRACE_VERBOSITY = "4"
         $process = Start-Process -FilePath $setupExe -ArgumentList (Join-ProcessArguments $args) -Wait -PassThru
-    } else {
-        $process = Start-Process -FilePath $setupExe -Wait -PassThru
+    } finally {
+        $env:COREHOST_TRACE = $previousCoreHostTrace
+        $env:COREHOST_TRACEFILE = $previousCoreHostTraceFile
+        $env:COREHOST_TRACE_VERBOSITY = $previousCoreHostTraceVerbosity
     }
     if ($process.ExitCode -ne 0) {
-        $details = if (Test-Path -LiteralPath $setupLog) {
-            Get-Content -LiteralPath $setupLog -Raw
-        } else {
-            "Setup did not create a diagnostic log."
+        $diagnostics = @()
+        foreach ($logPath in @($setupLog, $hostTraceLog)) {
+            if (Test-Path -LiteralPath $logPath) {
+                $diagnostics += "--- $logPath ---"
+                $diagnostics += (Get-Content -LiteralPath $logPath -Raw)
+            } else {
+                $diagnostics += "Diagnostic log was not created: $logPath"
+            }
         }
-        throw "Omega VPN setup failed with exit code $($process.ExitCode).`nSetup log: $setupLog`n$details"
+        throw "Omega VPN setup failed with exit code $($process.ExitCode).`n$($diagnostics -join [Environment]::NewLine)"
     }
 }
 

@@ -357,11 +357,13 @@ static void SetupFailureLogIncludesFullTraceback()
     }
 
     using var errorOutput = new StringWriter();
+    SetupFailureReporter.Trace(logPath, "setup trace started", errorOutput);
     SetupFailureReporter.Report(logPath, "test", failure, errorOutput);
     var report = File.ReadAllText(logPath);
     File.Delete(logPath);
 
     True(report.Contains("InvalidOperationException", StringComparison.Ordinal), "outer exception type missing");
+    True(report.Contains("setup trace started", StringComparison.Ordinal), "early setup trace missing");
     True(report.Contains("outer setup failure", StringComparison.Ordinal), "outer exception message missing");
     True(report.Contains("ApplicationException", StringComparison.Ordinal), "inner exception type missing");
     True(report.Contains("inner setup failure", StringComparison.Ordinal), "inner exception message missing");
@@ -452,7 +454,8 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(script.Contains("SkipDependencyInstall", StringComparison.Ordinal), "dependency install opt-out parameter missing");
     True(script.Contains("SkipRustBuild", StringComparison.Ordinal), "rust build opt-out parameter missing");
     True(script.Contains("--log", StringComparison.Ordinal), "setup log argument missing");
-    True(script.Contains("Get-Content -LiteralPath $setupLog -Raw", StringComparison.Ordinal), "setup traceback propagation missing");
+    True(script.Contains("Get-Content -LiteralPath $logPath -Raw", StringComparison.Ordinal), "setup traceback propagation missing");
+    True(script.Contains("COREHOST_TRACE", StringComparison.Ordinal), "native .NET host trace missing");
 
     var packageScriptPath = Path.Combine(FindRepoRoot(), "omega-client-app", "package-windows-client.ps1");
     var packageScript = File.ReadAllText(packageScriptPath);
@@ -466,6 +469,7 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(setupSource.Contains("MigrateLegacyConfig", StringComparison.Ordinal), "legacy config migration missing");
     True(setupSource.Contains("EnsureNoOtherClientProcesses", StringComparison.Ordinal), "portable client safety check missing");
     True(setupSource.Contains("SetupFailureReporter.Report", StringComparison.Ordinal), "setup failure log missing");
+    True(setupSource.Contains("SetupFailureReporter.Trace", StringComparison.Ordinal), "early setup trace missing");
     True(setupSource.Contains("process.WaitForExit()", StringComparison.Ordinal), "elevated setup is not awaited");
     True(setupSource.Contains("return process.ExitCode", StringComparison.Ordinal), "elevated setup exit code is not propagated");
     True(setupSource.Contains("shortcut.TargetPath = targetPath", StringComparison.Ordinal), "shortcut target assignment missing");
