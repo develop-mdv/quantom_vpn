@@ -247,7 +247,10 @@ function Invoke-Setup {
         throw "Setup executable not found: $setupExe"
     }
 
-    $args = @()
+    $setupLog = Join-Path ([System.IO.Path]::GetTempPath()) "OmegaVPN-setup.log"
+    Remove-Item -LiteralPath $setupLog -Force -ErrorAction SilentlyContinue
+
+    $args = @("--log", $setupLog)
     if ($NoAutostart) {
         $args += "--no-autostart"
     }
@@ -262,7 +265,12 @@ function Invoke-Setup {
         $process = Start-Process -FilePath $setupExe -Wait -PassThru
     }
     if ($process.ExitCode -ne 0) {
-        throw "Omega VPN setup failed with exit code $($process.ExitCode)."
+        $details = if (Test-Path -LiteralPath $setupLog) {
+            Get-Content -LiteralPath $setupLog -Raw
+        } else {
+            "Setup did not create a diagnostic log."
+        }
+        throw "Omega VPN setup failed with exit code $($process.ExitCode).`nSetup log: $setupLog`n$details"
     }
 }
 

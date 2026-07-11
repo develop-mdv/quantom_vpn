@@ -5,11 +5,13 @@ using Omega.Client.App.Core;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-var command = args.FirstOrDefault(arg => !arg.StartsWith("--", StringComparison.OrdinalIgnoreCase)) ?? "install";
+var command = args.Contains("uninstall", StringComparer.OrdinalIgnoreCase) ? "uninstall" : "install";
 var installDir = ReadOption(args, "--target") ?? Path.Combine(
     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
     "Omega VPN");
 var autostart = !args.Contains("--no-autostart", StringComparer.OrdinalIgnoreCase);
+var setupLogPath = ReadOption(args, "--log")
+    ?? Path.Combine(Path.GetTempPath(), "OmegaVPN-setup.log");
 
 if (!IsAdministrator())
 {
@@ -19,7 +21,7 @@ if (!IsAdministrator())
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"Omega VPN setup elevation failed: {ex.Message}");
+        SetupFailureReporter.Report(setupLogPath, "elevation", ex);
         Environment.ExitCode = 1;
     }
     return;
@@ -37,7 +39,7 @@ try
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Omega VPN setup failed: {ex.Message}");
+    SetupFailureReporter.Report(setupLogPath, command, ex);
     Environment.ExitCode = 1;
 }
 
@@ -47,9 +49,7 @@ static void Install(string installDir, bool autostart)
     var payloadDir = Path.Combine(baseDir, "payload");
     if (!Directory.Exists(payloadDir))
     {
-        Console.Error.WriteLine($"Payload directory not found: {payloadDir}");
-        Environment.ExitCode = 1;
-        return;
+        throw new DirectoryNotFoundException($"Payload directory not found: {payloadDir}");
     }
 
     var bundledConfig = Directory
@@ -69,9 +69,7 @@ static void Install(string installDir, bool autostart)
     var appPath = Path.Combine(installDir, "Omega.Client.App.exe");
     if (!File.Exists(appPath))
     {
-        Console.Error.WriteLine($"Installed app not found: {appPath}");
-        Environment.ExitCode = 1;
-        return;
+        throw new FileNotFoundException($"Installed app not found: {appPath}", appPath);
     }
 
     CreateShortcuts(appPath, installDir);
@@ -328,8 +326,7 @@ static int RelaunchElevated(string[] args)
     var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
     if (string.IsNullOrWhiteSpace(exePath))
     {
-        Console.Error.WriteLine("Cannot determine setup executable path.");
-        return 1;
+        throw new InvalidOperationException("Cannot determine setup executable path.");
     }
 
     var startInfo = new ProcessStartInfo
@@ -346,8 +343,7 @@ static int RelaunchElevated(string[] args)
     using var process = Process.Start(startInfo);
     if (process is null)
     {
-        Console.Error.WriteLine("Failed to start elevated Omega VPN setup.");
-        return 1;
+        throw new InvalidOperationException("Failed to start elevated Omega VPN setup.");
     }
 
     process.WaitForExit();

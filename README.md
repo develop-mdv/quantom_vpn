@@ -141,6 +141,10 @@ powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1
 старые и portable-копии Omega VPN. После перехода на новую версию последующие
 обновления смогут штатно остановить установленный клиент автоматически.
 
+Если setup завершился с `exit code 1`, полный тип исключения, inner exception и
+stack trace выводятся корневым скриптом и сохраняются в
+`%TEMP%\OmegaVPN-setup.log`.
+
 Полезные варианты:
 
 ```powershell

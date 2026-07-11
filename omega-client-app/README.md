@@ -74,6 +74,10 @@ When updating from a client version that predates automatic update shutdown,
 exit every old or portable Omega VPN instance from the Windows tray before
 running the command.
 
+If setup fails, the bootstrap prints the detailed .NET exception and stack
+trace. The same diagnostic is saved to `%TEMP%\OmegaVPN-setup.log`. When setup
+is launched directly, inspect that file after an `exit code 1` failure.
+
 ## Build Package Only
 
 ```powershell

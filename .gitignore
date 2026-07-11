@@ -13,6 +13,10 @@
 **/bin/
 **/obj/
 
+# Local release bundles and generated release directories
+/[Rr]elease/
+**/[Rr]elease/
+
 # Binaries
 #*.dll
 *.exe

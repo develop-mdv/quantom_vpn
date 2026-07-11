@@ -14,6 +14,7 @@ var tests = new (string Name, Action Body)[]
     ("config store round trips saved profiles", ConfigStoreRoundTripsSavedProfiles),
     ("installed config migrates outside program files", InstalledConfigMigratesOutsideProgramFiles),
     ("second app instance signals the primary instance", SecondAppInstanceSignalsPrimaryInstance),
+    ("setup failure log includes full traceback", SetupFailureLogIncludesFullTraceback),
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
     ("window close hides to tray while runtime is active", WindowCloseHidesToTrayWhileRuntimeIsActive),
     ("connect toggle follows connection phase", ConnectToggleFollowsConnectionPhase),
@@ -335,6 +336,39 @@ static void SecondAppInstanceSignalsPrimaryInstance()
     Equal(ClientInstanceCommand.Activate, receivedCommand);
 }
 
+static void SetupFailureLogIncludesFullTraceback()
+{
+    var logPath = Path.Combine(Path.GetTempPath(), "omega-setup-log-test-" + Guid.NewGuid().ToString("N") + ".log");
+    Exception failure;
+    try
+    {
+        try
+        {
+            throw new ApplicationException("inner setup failure");
+        }
+        catch (Exception inner)
+        {
+            throw new InvalidOperationException("outer setup failure", inner);
+        }
+    }
+    catch (Exception ex)
+    {
+        failure = ex;
+    }
+
+    using var errorOutput = new StringWriter();
+    SetupFailureReporter.Report(logPath, "test", failure, errorOutput);
+    var report = File.ReadAllText(logPath);
+    File.Delete(logPath);
+
+    True(report.Contains("InvalidOperationException", StringComparison.Ordinal), "outer exception type missing");
+    True(report.Contains("outer setup failure", StringComparison.Ordinal), "outer exception message missing");
+    True(report.Contains("ApplicationException", StringComparison.Ordinal), "inner exception type missing");
+    True(report.Contains("inner setup failure", StringComparison.Ordinal), "inner exception message missing");
+    True(report.Contains(nameof(SetupFailureLogIncludesFullTraceback), StringComparison.Ordinal), "stack trace missing");
+    True(errorOutput.ToString().Contains(logPath, StringComparison.Ordinal), "diagnostic log path was not reported");
+}
+
 static void RuntimeLaunchPlanIsHiddenAndEnvDriven()
 {
     var root = Path.Combine(Path.GetTempPath(), "omega-launch-test-" + Guid.NewGuid().ToString("N"));
@@ -417,6 +451,8 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(script.Contains("Omega.Client.Setup.exe", StringComparison.Ordinal), "setup executable launch missing");
     True(script.Contains("SkipDependencyInstall", StringComparison.Ordinal), "dependency install opt-out parameter missing");
     True(script.Contains("SkipRustBuild", StringComparison.Ordinal), "rust build opt-out parameter missing");
+    True(script.Contains("--log", StringComparison.Ordinal), "setup log argument missing");
+    True(script.Contains("Get-Content -LiteralPath $setupLog -Raw", StringComparison.Ordinal), "setup traceback propagation missing");
 
     var packageScriptPath = Path.Combine(FindRepoRoot(), "omega-client-app", "package-windows-client.ps1");
     var packageScript = File.ReadAllText(packageScriptPath);
@@ -429,6 +465,7 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(setupSource.Contains("ReplaceInstallDirectory", StringComparison.Ordinal), "atomic install directory replacement missing");
     True(setupSource.Contains("MigrateLegacyConfig", StringComparison.Ordinal), "legacy config migration missing");
     True(setupSource.Contains("EnsureNoOtherClientProcesses", StringComparison.Ordinal), "portable client safety check missing");
+    True(setupSource.Contains("SetupFailureReporter.Report", StringComparison.Ordinal), "setup failure log missing");
     True(setupSource.Contains("process.WaitForExit()", StringComparison.Ordinal), "elevated setup is not awaited");
     True(setupSource.Contains("return process.ExitCode", StringComparison.Ordinal), "elevated setup exit code is not propagated");
     True(setupSource.Contains("shortcut.TargetPath = targetPath", StringComparison.Ordinal), "shortcut target assignment missing");
