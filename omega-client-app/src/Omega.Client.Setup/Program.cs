@@ -245,75 +245,7 @@ static void MigrateLegacyConfig(string installDir)
 
 static void ReplaceInstallDirectory(string payloadDir, string installDir)
 {
-    installDir = Path.GetFullPath(installDir);
-    var parentDirectory = Directory.GetParent(installDir)?.FullName
-        ?? throw new InvalidOperationException("Installation directory cannot be a drive root.");
-    Directory.CreateDirectory(parentDirectory);
-
-    var directoryName = Path.GetFileName(installDir);
-    var operationId = Guid.NewGuid().ToString("N");
-    var stagingDir = Path.Combine(parentDirectory, $".{directoryName}.staging-{operationId}");
-    var backupDir = Path.Combine(parentDirectory, $".{directoryName}.backup-{operationId}");
-    var previousInstallMoved = false;
-
-    try
-    {
-        Directory.CreateDirectory(stagingDir);
-        CopyDirectory(payloadDir, stagingDir);
-        var stagedApp = Path.Combine(stagingDir, "Omega.Client.App.exe");
-        if (!File.Exists(stagedApp))
-        {
-            throw new InvalidOperationException($"Installer payload is missing {Path.GetFileName(stagedApp)}.");
-        }
-
-        File.WriteAllText(
-            Path.Combine(stagingDir, ClientPaths.InstalledMarkerFileName),
-            DateTimeOffset.UtcNow.ToString("O"));
-
-        if (Directory.Exists(installDir))
-        {
-            Directory.Move(installDir, backupDir);
-            previousInstallMoved = true;
-        }
-
-        try
-        {
-            Directory.Move(stagingDir, installDir);
-        }
-        catch
-        {
-            if (previousInstallMoved && !Directory.Exists(installDir) && Directory.Exists(backupDir))
-            {
-                Directory.Move(backupDir, installDir);
-                previousInstallMoved = false;
-            }
-
-            throw;
-        }
-    }
-    finally
-    {
-        if (Directory.Exists(stagingDir))
-        {
-            Directory.Delete(stagingDir, recursive: true);
-        }
-    }
-
-    if (previousInstallMoved && Directory.Exists(backupDir))
-    {
-        try
-        {
-            Directory.Delete(backupDir, recursive: true);
-        }
-        catch (IOException ex)
-        {
-            Console.WriteLine($"Old installation backup could not be removed: {ex.Message}");
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            Console.WriteLine($"Old installation backup could not be removed: {ex.Message}");
-        }
-    }
+    InstallDirectoryUpdater.Replace(payloadDir, installDir, Console.WriteLine);
 }
 
 static string? ReadOption(string[] args, string name)
@@ -363,22 +295,6 @@ static int RelaunchElevated(string[] args)
 
     process.WaitForExit();
     return process.ExitCode;
-}
-
-static void CopyDirectory(string sourceDir, string targetDir)
-{
-    foreach (var directory in Directory.GetDirectories(sourceDir, "*", SearchOption.AllDirectories))
-    {
-        var target = Path.Combine(targetDir, Path.GetRelativePath(sourceDir, directory));
-        Directory.CreateDirectory(target);
-    }
-
-    foreach (var file in Directory.GetFiles(sourceDir, "*", SearchOption.AllDirectories))
-    {
-        var target = Path.Combine(targetDir, Path.GetRelativePath(sourceDir, file));
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        File.Copy(file, target, overwrite: true);
-    }
 }
 
 static void CreateShortcuts(string appPath, string workingDirectory)

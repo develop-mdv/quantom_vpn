@@ -13,6 +13,7 @@ var tests = new (string Name, Action Body)[]
     ("config store migrates legacy settings into saved profile", ConfigStoreMigratesLegacySettingsIntoSavedProfile),
     ("config store round trips saved profiles", ConfigStoreRoundTripsSavedProfiles),
     ("installed config migrates outside program files", InstalledConfigMigratesOutsideProgramFiles),
+    ("in-place installer fallback replaces old files", InPlaceInstallerFallbackReplacesOldFiles),
     ("second app instance signals the primary instance", SecondAppInstanceSignalsPrimaryInstance),
     ("setup failure log includes full traceback", SetupFailureLogIncludesFullTraceback),
     ("runtime launch plan is hidden and env driven", RuntimeLaunchPlanIsHiddenAndEnvDriven),
@@ -310,6 +311,42 @@ static void InstalledConfigMigratesOutsideProgramFiles()
     Equal("migrated-profile", migrated.SelectedProfileId);
 }
 
+static void InPlaceInstallerFallbackReplacesOldFiles()
+{
+    var testRoot = Path.Combine(Path.GetTempPath(), "omega-install-update-test-" + Guid.NewGuid().ToString("N"));
+    var payloadRoot = Path.Combine(testRoot, "payload");
+    var installRoot = Path.Combine(testRoot, "Program Files", "Omega VPN");
+    Directory.CreateDirectory(payloadRoot);
+    Directory.CreateDirectory(Path.Combine(installRoot, "obsolete"));
+    File.WriteAllText(Path.Combine(payloadRoot, "Omega.Client.App.exe"), "new client");
+    File.WriteAllText(Path.Combine(payloadRoot, "new-runtime.dll"), "new runtime");
+    File.WriteAllText(Path.Combine(installRoot, "Omega.Client.App.exe"), "old client");
+    File.WriteAllText(Path.Combine(installRoot, "obsolete", "stale.dll"), "stale runtime");
+    var messages = new List<string>();
+
+    try
+    {
+        InstallDirectoryUpdater.Replace(
+            payloadRoot,
+            installRoot,
+            messages.Add,
+            preferAtomicSwap: false);
+
+        Equal("new client", File.ReadAllText(Path.Combine(installRoot, "Omega.Client.App.exe")));
+        True(File.Exists(Path.Combine(installRoot, "new-runtime.dll")), "new runtime file missing");
+        True(!Directory.Exists(Path.Combine(installRoot, "obsolete")), "obsolete files were not removed");
+        True(File.Exists(Path.Combine(installRoot, ClientPaths.InstalledMarkerFileName)), "installed marker missing");
+        True(messages.Any(message => message.Contains("in-place update", StringComparison.Ordinal)), "fallback was not reported");
+    }
+    finally
+    {
+        if (Directory.Exists(testRoot))
+        {
+            Directory.Delete(testRoot, recursive: true);
+        }
+    }
+}
+
 static void SecondAppInstanceSignalsPrimaryInstance()
 {
     if (!OperatingSystem.IsWindows())
@@ -468,6 +505,7 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     var setupSourcePath = Path.Combine(FindRepoRoot(), "omega-client-app", "src", "Omega.Client.Setup", "Program.cs");
     var setupSource = File.ReadAllText(setupSourcePath);
     True(setupSource.Contains("ReplaceInstallDirectory", StringComparison.Ordinal), "atomic install directory replacement missing");
+    True(setupSource.Contains("InstallDirectoryUpdater.Replace", StringComparison.Ordinal), "in-place update fallback missing");
     True(setupSource.Contains("MigrateLegacyConfig", StringComparison.Ordinal), "legacy config migration missing");
     True(setupSource.Contains("EnsureNoOtherClientProcesses", StringComparison.Ordinal), "portable client safety check missing");
     True(setupSource.Contains("SetupFailureReporter.Report", StringComparison.Ordinal), "setup failure log missing");

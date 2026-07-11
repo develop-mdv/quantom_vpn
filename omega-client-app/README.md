@@ -139,6 +139,9 @@ Use the installer package for a normal user machine:
 To update, run `Omega.Client.Setup.exe` from the new installer folder. Setup
 asks a running client to disconnect gracefully, stages the new version, swaps
 the program directory, and keeps the profiles in `%LocalAppData%` unchanged.
+If Windows denies renaming the existing `Program Files` directory, setup falls
+back to a temporary backup plus an in-place replacement and restores the old
+files if that replacement fails.
 
 For a new PC, create/register a separate Windows device and use its own
 connection code. Reusing another machine's device token works only as a manual
