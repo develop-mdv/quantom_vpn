@@ -57,7 +57,24 @@ Rust is required only to build `omega-client.exe`. A new user PC does not need
 Rust or the .NET Desktop Runtime when you install from the ready
 `installer` package.
 
-## Build
+## Build and Install or Update
+
+Run this command from the repository root to build the current Windows client
+and immediately install or update it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-windows-client.ps1
+```
+
+The bootstrap checks the required build dependencies, creates a fresh installer
+package, runs setup, preserves saved connection profiles, and refreshes the
+Desktop and Start menu shortcuts to the newly installed client.
+
+When updating from a client version that predates automatic update shutdown,
+exit every old or portable Omega VPN instance from the Windows tray before
+running the command.
+
+## Build Package Only
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client.ps1

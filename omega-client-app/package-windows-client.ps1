@@ -15,14 +15,36 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
     $ArtifactsRoot = Join-Path $RepoRoot $ArtifactsRoot
 }
 $PortableRoot = Join-Path $ArtifactsRoot "portable\OmegaVPN"
+$PortableBuildRoot = Join-Path $ArtifactsRoot (".portable-build-" + [Guid]::NewGuid().ToString("N"))
 $InstallerRoot = Join-Path $ArtifactsRoot "installer"
 $PayloadRoot = Join-Path $InstallerRoot "payload"
 $DotnetHome = Join-Path $RepoRoot ".dotnet-home"
 $UserProfile = Join-Path $DotnetHome "userprofile"
 
+function Remove-BuildDirectory {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+
+    $attempts = 5
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($attempt -eq $attempts) {
+                throw "Unable to clean build directory after $attempts attempts: $Path. Close any app using this folder and retry. $($_.Exception.Message)"
+            }
+
+            Start-Sleep -Milliseconds (250 * $attempt)
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force `
     $ArtifactsRoot, `
-    $PortableRoot, `
     $InstallerRoot, `
     (Join-Path $UserProfile "AppData\Local"), `
     (Join-Path $UserProfile "AppData\Roaming"), `
@@ -48,13 +70,30 @@ if (-not $SkipRustBuild) {
     }
 }
 
-$env:USERPROFILE = $UserProfile
-$env:DOTNET_CLI_HOME = $DotnetHome
-$env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
-$env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
-$env:LOCALAPPDATA = Join-Path $UserProfile "AppData\Local"
-$env:APPDATA = Join-Path $UserProfile "AppData\Roaming"
-$env:NUGET_PACKAGES = Join-Path $RepoRoot ".nuget-packages"
+$EnvironmentVariableNames = @(
+    "USERPROFILE",
+    "DOTNET_CLI_HOME",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
+    "DOTNET_CLI_TELEMETRY_OPTOUT",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "NUGET_PACKAGES"
+)
+$PreviousProcessEnvironment = @{}
+foreach ($name in $EnvironmentVariableNames) {
+    $PreviousProcessEnvironment[$name] = [Environment]::GetEnvironmentVariable(
+        $name,
+        [EnvironmentVariableTarget]::Process)
+}
+
+try {
+    $env:USERPROFILE = $UserProfile
+    $env:DOTNET_CLI_HOME = $DotnetHome
+    $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+    $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
+    $env:LOCALAPPDATA = Join-Path $UserProfile "AppData\Local"
+    $env:APPDATA = Join-Path $UserProfile "AppData\Roaming"
+    $env:NUGET_PACKAGES = Join-Path $RepoRoot ".nuget-packages"
 
 if (-not [string]::IsNullOrWhiteSpace($RustTargetDir)) {
     if (-not [System.IO.Path]::IsPathRooted($RustTargetDir)) {
@@ -75,8 +114,10 @@ if (-not (Test-Path $Wintun)) {
 
 $AppPublish = Join-Path $ArtifactsRoot "publish-app"
 $SetupPublish = Join-Path $ArtifactsRoot "publish-setup"
-Remove-Item -Recurse -Force $AppPublish, $SetupPublish, $PortableRoot, $PayloadRoot -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $PortableRoot, $PayloadRoot | Out-Null
+foreach ($path in @($AppPublish, $SetupPublish, $InstallerRoot)) {
+    Remove-BuildDirectory $path
+}
+New-Item -ItemType Directory -Force $PortableBuildRoot, $InstallerRoot, $PayloadRoot | Out-Null
 
 dotnet publish (Join-Path $AppRoot "src\Omega.Client.App\Omega.Client.App.csproj") `
     -c $Configuration `
@@ -104,9 +145,9 @@ foreach ($publishDir in @($AppPublish, $SetupPublish)) {
     }
 }
 
-Copy-Item -Recurse -Force (Join-Path $AppPublish "*") $PortableRoot
-Copy-Item -Force $RuntimeExe (Join-Path $PortableRoot "omega-client.exe")
-Copy-Item -Force $Wintun (Join-Path $PortableRoot "wintun.dll")
+Copy-Item -Recurse -Force (Join-Path $AppPublish "*") $PortableBuildRoot
+Copy-Item -Force $RuntimeExe (Join-Path $PortableBuildRoot "omega-client.exe")
+Copy-Item -Force $Wintun (Join-Path $PortableBuildRoot "wintun.dll")
 
 @"
 # Omega VPN Portable
@@ -126,14 +167,32 @@ so reinstalling or updating program files does not remove saved connections.
 No separate .NET Desktop Runtime install is required.
 
 If the VPN is active, closing the main window hides Omega VPN to the Windows tray.
-"@ | Set-Content -Encoding UTF8 (Join-Path $PortableRoot "README.txt")
+"@ | Set-Content -Encoding UTF8 (Join-Path $PortableBuildRoot "README.txt")
 
-Copy-Item -Recurse -Force (Join-Path $PortableRoot "*") $PayloadRoot
+Copy-Item -Recurse -Force (Join-Path $PortableBuildRoot "*") $PayloadRoot
 $BundledConfigs = @(Get-ChildItem -Path $PayloadRoot -Recurse -File -Filter "app-config*.json")
 if ($BundledConfigs.Count -gt 0) {
     throw "Unsafe installer payload: user app-config.json must never be bundled."
 }
 Copy-Item -Recurse -Force (Join-Path $SetupPublish "*") $InstallerRoot
 
-Write-Host "Portable: $PortableRoot"
-Write-Host "Installer: $InstallerRoot"
+    $PortableOutput = $PortableRoot
+    try {
+        Remove-BuildDirectory $PortableRoot
+        New-Item -ItemType Directory -Force (Split-Path -Parent $PortableRoot) | Out-Null
+        Move-Item -LiteralPath $PortableBuildRoot -Destination $PortableRoot
+    } catch {
+        $PortableOutput = $PortableBuildRoot
+        Write-Warning "Portable output is in use and was not replaced. The installer is current and safe to use. New portable output: $PortableOutput"
+    }
+
+    Write-Host "Portable: $PortableOutput"
+    Write-Host "Installer: $InstallerRoot"
+} finally {
+    foreach ($name in $EnvironmentVariableNames) {
+        [Environment]::SetEnvironmentVariable(
+            $name,
+            $PreviousProcessEnvironment[$name],
+            [EnvironmentVariableTarget]::Process)
+    }
+}

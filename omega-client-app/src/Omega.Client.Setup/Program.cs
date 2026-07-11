@@ -13,7 +13,15 @@ var autostart = !args.Contains("--no-autostart", StringComparer.OrdinalIgnoreCas
 
 if (!IsAdministrator())
 {
-    RelaunchElevated(args);
+    try
+    {
+        Environment.ExitCode = RelaunchElevated(args);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Omega VPN setup elevation failed: {ex.Message}");
+        Environment.ExitCode = 1;
+    }
     return;
 }
 
@@ -54,6 +62,7 @@ static void Install(string installDir, bool autostart)
 
     Console.WriteLine($"Installing Omega VPN to {installDir}");
     StopInstalledClient(installDir);
+    EnsureNoOtherClientProcesses();
     MigrateLegacyConfig(installDir);
     ReplaceInstallDirectory(payloadDir, installDir);
 
@@ -75,6 +84,7 @@ static void Uninstall(string installDir)
 {
     Console.WriteLine("Uninstalling Omega VPN");
     StopInstalledClient(installDir);
+    EnsureNoOtherClientProcesses();
     MigrateLegacyConfig(installDir);
     ConfigureAutostart("", enabled: false);
     DeleteShortcut(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Omega VPN.lnk");
@@ -131,6 +141,31 @@ static void StopInstalledClient(string installDir)
     finally
     {
         foreach (var process in processes)
+        {
+            process.Dispose();
+        }
+    }
+}
+
+static void EnsureNoOtherClientProcesses()
+{
+    var running = new List<Process>();
+    try
+    {
+        foreach (var processName in new[] { "Omega.Client.App", "omega-client" })
+        {
+            running.AddRange(Process.GetProcessesByName(processName));
+        }
+
+        if (running.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Another Omega VPN or portable client is still running. Exit every Omega VPN instance from the system tray, then run setup again.");
+        }
+    }
+    finally
+    {
+        foreach (var process in running)
         {
             process.Dispose();
         }
@@ -288,14 +323,13 @@ static bool IsAdministrator()
     return principal.IsInRole(WindowsBuiltInRole.Administrator);
 }
 
-static void RelaunchElevated(string[] args)
+static int RelaunchElevated(string[] args)
 {
     var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
     if (string.IsNullOrWhiteSpace(exePath))
     {
         Console.Error.WriteLine("Cannot determine setup executable path.");
-        Environment.ExitCode = 1;
-        return;
+        return 1;
     }
 
     var startInfo = new ProcessStartInfo
@@ -309,7 +343,15 @@ static void RelaunchElevated(string[] args)
         startInfo.ArgumentList.Add(arg);
     }
 
-    Process.Start(startInfo);
+    using var process = Process.Start(startInfo);
+    if (process is null)
+    {
+        Console.Error.WriteLine("Failed to start elevated Omega VPN setup.");
+        return 1;
+    }
+
+    process.WaitForExit();
+    return process.ExitCode;
 }
 
 static void CopyDirectory(string sourceDir, string targetDir)

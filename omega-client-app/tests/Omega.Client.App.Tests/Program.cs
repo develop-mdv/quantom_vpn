@@ -422,11 +422,18 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     var packageScript = File.ReadAllText(packageScriptPath);
     True(!packageScript.Contains("app-config.preserve", StringComparison.OrdinalIgnoreCase), "packager still preserves user config");
     True(packageScript.Contains("must never be bundled", StringComparison.Ordinal), "unsafe payload guard missing");
+    True(packageScript.Contains("PreviousProcessEnvironment", StringComparison.Ordinal), "build environment restoration missing");
 
     var setupSourcePath = Path.Combine(FindRepoRoot(), "omega-client-app", "src", "Omega.Client.Setup", "Program.cs");
     var setupSource = File.ReadAllText(setupSourcePath);
     True(setupSource.Contains("ReplaceInstallDirectory", StringComparison.Ordinal), "atomic install directory replacement missing");
     True(setupSource.Contains("MigrateLegacyConfig", StringComparison.Ordinal), "legacy config migration missing");
+    True(setupSource.Contains("EnsureNoOtherClientProcesses", StringComparison.Ordinal), "portable client safety check missing");
+    True(setupSource.Contains("process.WaitForExit()", StringComparison.Ordinal), "elevated setup is not awaited");
+    True(setupSource.Contains("return process.ExitCode", StringComparison.Ordinal), "elevated setup exit code is not propagated");
+    True(setupSource.Contains("shortcut.TargetPath = targetPath", StringComparison.Ordinal), "shortcut target assignment missing");
+    True(setupSource.Contains("Environment.SpecialFolder.DesktopDirectory", StringComparison.Ordinal), "desktop shortcut missing");
+    True(setupSource.Contains("Environment.SpecialFolder.CommonPrograms", StringComparison.Ordinal), "Start menu shortcut missing");
 }
 
 static string FindRepoRoot()
