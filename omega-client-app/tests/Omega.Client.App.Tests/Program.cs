@@ -495,6 +495,8 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     True(script.Contains("COREHOST_TRACE", StringComparison.Ordinal), "native .NET host trace missing");
     True(script.Contains("RedirectStandardOutput", StringComparison.Ordinal), "setup stdout capture missing");
     True(script.Contains("RedirectStandardError", StringComparison.Ordinal), "setup stderr capture missing");
+    True(script.Contains("Test-ElevationRequiredError", StringComparison.Ordinal), "elevation-required fallback missing");
+    True(script.Contains("-Verb RunAs", StringComparison.Ordinal), "UAC retry missing");
 
     var packageScriptPath = Path.Combine(FindRepoRoot(), "omega-client-app", "package-windows-client.ps1");
     var packageScript = File.ReadAllText(packageScriptPath);

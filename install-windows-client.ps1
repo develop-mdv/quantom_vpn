@@ -91,6 +91,23 @@ function Join-ProcessArguments {
     }) -join " ")
 }
 
+function Test-ElevationRequiredError {
+    param([Exception]$Exception)
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [System.ComponentModel.Win32Exception] -and $current.NativeErrorCode -eq 740) {
+            return $true
+        }
+        if ($current.Message -match '(?i)elevation|required elevation|повышен') {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+
+    return $false
+}
+
 function Test-DotNet9Sdk {
     if (-not (Test-CommandAvailable "dotnet")) {
         return $false
@@ -272,13 +289,27 @@ function Invoke-Setup {
         $env:COREHOST_TRACE = "1"
         $env:COREHOST_TRACEFILE = $hostTraceLog
         $env:COREHOST_TRACE_VERBOSITY = "4"
-        $process = Start-Process `
-            -FilePath $setupExe `
-            -ArgumentList (Join-ProcessArguments $args) `
-            -RedirectStandardOutput $stdoutLog `
-            -RedirectStandardError $stderrLog `
-            -Wait `
-            -PassThru
+        try {
+            $process = Start-Process `
+                -FilePath $setupExe `
+                -ArgumentList (Join-ProcessArguments $args) `
+                -RedirectStandardOutput $stdoutLog `
+                -RedirectStandardError $stderrLog `
+                -Wait `
+                -PassThru
+        } catch {
+            if (-not (Test-ElevationRequiredError $_.Exception)) {
+                throw
+            }
+
+            Write-Host "Setup requires elevation; retrying with a UAC prompt."
+            $process = Start-Process `
+                -FilePath $setupExe `
+                -ArgumentList (Join-ProcessArguments $args) `
+                -Verb RunAs `
+                -Wait `
+                -PassThru
+        }
     } finally {
         $env:COREHOST_TRACE = $previousCoreHostTrace
         $env:COREHOST_TRACEFILE = $previousCoreHostTraceFile

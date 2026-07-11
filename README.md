@@ -149,6 +149,8 @@ stack trace выводятся корневым скриптом. Логи `Omeg
 `OmegaVPN-corehost.log` сохраняются рядом с `Omega.Client.Setup.exe`, поэтому
 они доступны даже при запуске UAC под другой учётной записью администратора.
 Дополнительно сохраняются `OmegaVPN-stdout.log` и `OmegaVPN-stderr.log`.
+PowerShell можно запускать без прав администратора: если Windows возвращает
+`ERROR_ELEVATION_REQUIRED`, bootstrap автоматически повторяет setup через UAC.
 
 Полезные варианты:
 
