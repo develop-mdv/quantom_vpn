@@ -8,6 +8,15 @@ through `OMEGA_CONTROL_PATH`.
 The desktop client uses `OMEGA_IPV6_POLICY=tunnel` by default so dual-stack
 traffic is handled by the VPN when the server runs with IPv6 NAT enabled.
 
+Windows connection setup combines interface discovery and route replacement
+commands to reduce PowerShell launches, and batches stale-state cleanup and
+disconnect cleanup.
+IPv4, DNS and IPv6 health checks run concurrently after routing is configured;
+connection status is published immediately when the checks finish. The GUI
+checks diagnostics every 250 ms while connecting, then returns to its normal
+two-second interval. Disconnect requests are checked every 100 ms, with the
+existing graceful cleanup and forced-stop timeout preserved.
+
 Portable and installer packages are published as self-contained Windows builds,
 so users do not need to install the .NET Desktop Runtime separately.
 

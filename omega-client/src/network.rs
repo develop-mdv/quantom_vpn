@@ -420,8 +420,6 @@ fn configure_windows_routing(
     interface_mtu: u16,
     config: &ClientConfig,
 ) -> anyhow::Result<NetworkState> {
-    use std::time::Duration;
-
     warn_missing_tunnel_ipv6(config, tunnel_ipv6);
     let configure_ipv6 = should_configure_tunnel_ipv6(config, tunnel_ipv6);
 
@@ -432,47 +430,13 @@ fn configure_windows_routing(
         "configuring Windows routing tables"
     );
 
-    let tunnel_ip_s = tunnel_ip.to_string();
-    let mut if_index = String::new();
-    let mut if_alias = String::new();
-
-    for _ in 0..15 {
-        let output_idx = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceIndex",
-                    tunnel_ip_s
-                ),
-            ])
-            .output();
-
-        let output_alias = Command::new("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Get-NetIPAddress -IPAddress '{}' | Select-Object -ExpandProperty InterfaceAlias",
-                    tunnel_ip_s
-                ),
-            ])
-            .output();
-
-        if let (Ok(o_idx), Ok(o_alias)) = (output_idx, output_alias) {
-            let idx_str = String::from_utf8_lossy(&o_idx.stdout).trim().to_string();
-            let alias_str = String::from_utf8_lossy(&o_alias.stdout).trim().to_string();
-
-            if !idx_str.is_empty() && !alias_str.is_empty() {
-                if_index = idx_str;
-                if_alias = alias_str;
-                break;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    if if_index.is_empty() || if_alias.is_empty() {
-        anyhow::bail!("could not find Wintun interface");
-    }
+    // Keep discovery retries in one process: starting PowerShell and loading the
+    // NetTCPIP module for each property/retry dominated connection startup.
+    let interface_json = run_powershell_output(&windows_interface_lookup_script(tunnel_ip))?;
+    let interface: WindowsTunnelInterface = serde_json::from_str(interface_json.trim())
+        .context("could not parse Wintun interface lookup")?;
+    let if_index = interface.interface_index.to_string();
+    let if_alias = interface.interface_alias;
 
     let _ = Command::new("netsh")
         .args([
@@ -583,7 +547,6 @@ fn configure_windows_routing(
                 socket_family(server_addr).default_prefix_len()
             ),
         };
-        delete_windows_route(&server_route);
         add_windows_host_route(
             &server_route,
             &server_lookup.interface,
@@ -604,7 +567,6 @@ fn configure_windows_routing(
                     },
                 ];
                 for route in full_v4 {
-                    delete_windows_route(&route);
                     add_windows_host_route(&route, &if_index, None)?;
                     state.managed_routes.push(route);
                 }
@@ -621,7 +583,6 @@ fn configure_windows_routing(
                         },
                     ];
                     for route in full_v6 {
-                        delete_windows_route(&route);
                         match add_windows_host_route(&route, &if_index, None) {
                             Ok(()) => state.managed_routes.push(route),
                             Err(err) => {
@@ -641,7 +602,6 @@ fn configure_windows_routing(
                         family: RouteFamily::Ipv4,
                         destination_prefix: route.cidr.clone(),
                     };
-                    delete_windows_route(&managed);
                     add_windows_host_route(&managed, &if_index, None)?;
                     state.managed_routes.push(managed);
                 }
@@ -651,7 +611,6 @@ fn configure_windows_routing(
                             family: RouteFamily::Ipv6,
                             destination_prefix: route.cidr.clone(),
                         };
-                        delete_windows_route(&managed);
                         match add_windows_host_route(&managed, &if_index, None) {
                             Ok(()) => state.managed_routes.push(managed),
                             Err(err) => {
@@ -681,31 +640,42 @@ fn configure_windows_routing(
 
 #[cfg(target_os = "windows")]
 fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>) {
+    let _ = run_powershell(&windows_cleanup_script(server_addr, state));
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cleanup_script(server_addr: SocketAddr, state: Option<&NetworkState>) -> String {
+    let mut commands = Vec::new();
     if let Some(state) = state {
         if state.firewall_rules_configured {
-            remove_windows_firewall_rules();
+            commands.push(windows_firewall_cleanup_command());
         }
         if state.reset_dns {
-            let _ = run_powershell(&format!(
-                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses",
+            commands.push(format!(
+                "Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue",
                 powershell_quote(&state.interface_alias)
             ));
         }
-        let _ = run_powershell(&format!(
-            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -AutomaticMetric Enabled",
+        commands.push(format!(
+            "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv4 -AutomaticMetric Enabled -ErrorAction SilentlyContinue",
             powershell_quote(&state.interface_alias)
         ));
         if state.reset_ipv6_metric {
-            let _ = run_powershell(&format!(
-                "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv6 -AutomaticMetric Enabled",
+            commands.push(format!(
+                "Set-NetIPInterface -InterfaceAlias '{}' -AddressFamily IPv6 -AutomaticMetric Enabled -ErrorAction SilentlyContinue",
                 powershell_quote(&state.interface_alias)
             ));
         }
-        restore_windows_ipv6_guard(&state.disabled_ipv6_adapters);
-        for route in &state.managed_routes {
-            delete_windows_route(route);
+        for adapter in &state.disabled_ipv6_adapters {
+            commands.push(format!(
+                "Enable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
+                powershell_quote(adapter)
+            ));
         }
-    } else if matches!(server_addr, SocketAddr::V4(_) | SocketAddr::V6(_)) {
+        for route in &state.managed_routes {
+            commands.push(windows_route_cleanup_command(route));
+        }
+    } else {
         let route = WindowsManagedRoute {
             family: socket_family(server_addr),
             destination_prefix: format!(
@@ -714,16 +684,19 @@ fn cleanup_windows_routing(server_addr: SocketAddr, state: Option<&NetworkState>
                 socket_family(server_addr).default_prefix_len()
             ),
         };
-        delete_windows_route(&route);
+        commands.push(windows_route_cleanup_command(&route));
     }
+
+    windows_best_effort_script(commands)
 }
 
 #[cfg(target_os = "windows")]
 fn cleanup_stale_windows(server_addr: SocketAddr, config: &ClientConfig) {
-    remove_windows_firewall_rules();
-    for route in stale_windows_routes(server_addr, config) {
-        delete_windows_route(&route);
-    }
+    let routes = stale_windows_routes(server_addr, config);
+    let commands = std::iter::once(windows_firewall_cleanup_command())
+        .chain(routes.iter().map(windows_route_cleanup_command))
+        .collect::<Vec<_>>();
+    let _ = run_powershell(&windows_best_effort_script(commands));
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -862,7 +835,8 @@ fn add_windows_host_route(
     next_hop: Option<&str>,
 ) -> anyhow::Result<()> {
     run_powershell(&format!(
-        "New-NetRoute -AddressFamily {} -DestinationPrefix '{}' -InterfaceIndex {} -NextHop '{}' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null",
+        "{}\nNew-NetRoute -AddressFamily {} -DestinationPrefix '{}' -InterfaceIndex {} -NextHop '{}' -RouteMetric 1 -PolicyStore ActiveStore -ErrorAction Stop | Out-Null",
+        windows_route_cleanup_command(route),
         route.family.address_family(),
         route.destination_prefix,
         interface_index,
@@ -870,24 +844,61 @@ fn add_windows_host_route(
     ))
 }
 
-#[cfg(target_os = "windows")]
-fn delete_windows_route(route: &WindowsManagedRoute) {
-    let _ = run_powershell(&format!(
+#[cfg(any(target_os = "windows", test))]
+fn windows_route_cleanup_command(route: &WindowsManagedRoute) -> String {
+    format!(
         "Remove-NetRoute -AddressFamily {} -DestinationPrefix '{}' -Confirm:$false -ErrorAction SilentlyContinue | Out-Null",
         route.family.address_family(),
         route.destination_prefix
-    ));
+    )
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const OMEGA_FIREWALL_GROUP: &str = "Omega VPN";
 
 #[cfg(target_os = "windows")]
 fn remove_windows_firewall_rules() {
-    let _ = run_powershell(&format!(
+    let _ = run_powershell(&windows_firewall_cleanup_command());
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_firewall_cleanup_command() -> String {
+    format!(
         "Remove-NetFirewallRule -DisplayGroup '{}' -ErrorAction SilentlyContinue | Out-Null",
         OMEGA_FIREWALL_GROUP
-    ));
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_best_effort_script(commands: impl IntoIterator<Item = String>) -> String {
+    // A missing adapter or another terminating error must not prevent the rest
+    // of the route/DNS/firewall restoration from running in this same process.
+    commands
+        .into_iter()
+        .map(|command| {
+            format!("try {{ {command} }} catch {{ Write-Warning $_.Exception.Message }}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(serde::Deserialize)]
+struct WindowsTunnelInterface {
+    interface_index: u32,
+    interface_alias: String,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_interface_lookup_script(tunnel_ip: Ipv4Addr) -> String {
+    format!(
+        "$address = $null; for ($attempt = 0; $attempt -lt 15; $attempt++) {{\n\
+         $address = Get-NetIPAddress -IPAddress '{tunnel_ip}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1;\n\
+         if ($address -and $address.InterfaceIndex -and $address.InterfaceAlias) {{ break }};\n\
+         Start-Sleep -Milliseconds 500\n\
+         }}; if (-not $address -or -not $address.InterfaceIndex -or -not $address.InterfaceAlias) {{ throw 'could not find Wintun interface' }};\n\
+         @{{ interface_index = $address.InterfaceIndex; interface_alias = $address.InterfaceAlias }} | ConvertTo-Json -Compress"
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -976,7 +987,7 @@ fn configure_windows_dns_firewall(wintun_alias: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn run_powershell(script: &str) -> anyhow::Result<()> {
     let status = Command::new("powershell")
-        .args(["-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .status()
         .with_context(|| format!("failed to run PowerShell: {script}"))?;
     if status.success() {
@@ -989,7 +1000,7 @@ fn run_powershell(script: &str) -> anyhow::Result<()> {
 #[cfg(target_os = "windows")]
 fn run_powershell_output(script: &str) -> anyhow::Result<String> {
     let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .with_context(|| format!("failed to run PowerShell: {script}"))?;
     if !output.status.success() {
@@ -1001,7 +1012,7 @@ fn run_powershell_output(script: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn powershell_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
@@ -1035,16 +1046,6 @@ fn configure_windows_ipv6_guard(wintun_alias: &str) -> Vec<String> {
     }
 
     adapters
-}
-
-#[cfg(target_os = "windows")]
-fn restore_windows_ipv6_guard(adapters: &[String]) {
-    for adapter in adapters {
-        let _ = run_powershell(&format!(
-            "Enable-NetAdapterBinding -Name '{}' -ComponentID ms_tcpip6 -Confirm:$false | Out-Null",
-            powershell_quote(adapter)
-        ));
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1635,6 +1636,74 @@ mod tests {
             handshake_timeout_ms: 1500,
             handshake_backoff_ms: 500,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn batched_cleanup_continues_after_a_failed_restore() {
+        let state = NetworkState {
+            disabled_ipv6_adapters: vec!["Wi'Fi".to_string()],
+            interface_alias: "Omega'VPN".to_string(),
+            reset_dns: true,
+            firewall_rules_configured: true,
+            reset_ipv6_metric: true,
+            managed_routes: stale_windows_routes(
+                "203.0.113.1:443".parse().unwrap(),
+                &test_config(Ipv6Policy::Tunnel),
+            ),
+        };
+        // Shadow every network cmdlet: this verifies real PowerShell execution
+        // and error isolation without changing the machine's network settings.
+        let mocks = r#"
+$script:calls = [System.Collections.Generic.List[string]]::new()
+function Remove-NetFirewallRule { param($DisplayGroup, $ErrorAction) $script:calls.Add("firewall:$DisplayGroup") }
+function Set-DnsClientServerAddress { param($InterfaceAlias, [switch]$ResetServerAddresses, $ErrorAction) $script:calls.Add("dns:$InterfaceAlias"); throw 'simulated DNS restore failure' }
+function Set-NetIPInterface { param($InterfaceAlias, $AddressFamily, $AutomaticMetric, $ErrorAction) $script:calls.Add("metric:$AddressFamily") }
+function Enable-NetAdapterBinding { param($Name, $ComponentID, $Confirm, $ErrorAction) $script:calls.Add("binding:$Name") }
+function Remove-NetRoute { param($AddressFamily, $DestinationPrefix, $Confirm, $ErrorAction) $script:calls.Add("route:$DestinationPrefix") }
+"#;
+        let script = windows_cleanup_script("203.0.113.1:443".parse().unwrap(), Some(&state));
+        let output = run_powershell_output(&format!(
+            "$WarningPreference = 'SilentlyContinue'; {mocks}\n{script}\nConvertTo-Json -InputObject @($script:calls) -Compress"
+        )).unwrap();
+        let calls: Vec<String> = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                "firewall:Omega VPN",
+                "dns:Omega'VPN",
+                "metric:IPv4",
+                "metric:IPv6",
+                "binding:Wi'Fi",
+                "route:203.0.113.1/32",
+                "route:0.0.0.0/1",
+                "route:128.0.0.0/1",
+                "route:::/1",
+                "route:8000::/1",
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn interface_lookup_retries_and_returns_both_properties() {
+        let mocks = r#"
+$script:attempts = 0
+function Get-NetIPAddress {
+    param($IPAddress, $AddressFamily, $ErrorAction)
+    $script:attempts++
+    if ($script:attempts -eq 3) { [pscustomobject]@{ InterfaceIndex = 17; InterfaceAlias = "Omega'VPN" } }
+}
+function Start-Sleep { param($Milliseconds) }
+"#;
+        let output = run_powershell_output(&format!(
+            "{mocks}\n{}",
+            windows_interface_lookup_script("10.7.0.2".parse().unwrap())
+        ))
+        .unwrap();
+        let interface: WindowsTunnelInterface = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(interface.interface_index, 17);
+        assert_eq!(interface.interface_alias, "Omega'VPN");
     }
 
     #[test]

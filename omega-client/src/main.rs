@@ -538,8 +538,6 @@ async fn run_post_connect_health_checks(
         return;
     }
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
     let targets = dns_servers
         .into_iter()
         .filter_map(|value| value.parse::<std::net::IpAddr>().ok())
@@ -556,51 +554,10 @@ async fn run_post_connect_health_checks(
         return;
     }
 
-    let ipv4_target: SocketAddr = "1.1.1.1:53".parse().unwrap();
-    match udp_dns_probe(ipv4_target).await {
-        Ok(src) => diagnostics.health_check_passed(HealthCheckKind::Ipv4Egress, src.to_string()),
-        Err(err) => {
-            tracing::warn!(error = %err, %ipv4_target, "IPv4 egress health check failed");
-            diagnostics.health_check_failed(HealthCheckKind::Ipv4Egress, err.to_string());
-        }
-    }
-
-    let mut dns_passed = false;
-    for dns_ip in targets {
-        let target = SocketAddr::from((dns_ip, 53));
-        match udp_dns_probe(target).await {
-            Ok(src) => {
-                tracing::info!(%src, dns_server = %target, "UDP DNS diagnostic passed");
-                diagnostics.udp_check_passed(target, src);
-                diagnostics.health_check_passed(HealthCheckKind::Dns, target.to_string());
-                dns_passed = true;
-                break;
-            }
-            Err(err) => tracing::warn!(error = %err, %target, "DNS health check failed"),
-        }
-    }
-    if !dns_passed {
-        diagnostics.udp_check_failed("all UDP DNS checks timed out or returned unexpected replies");
-        diagnostics.health_check_failed(
-            HealthCheckKind::Dns,
-            "all UDP DNS checks timed out or returned unexpected replies",
-        );
-    }
-
-    if ipv6_required {
-        let ipv6_target: SocketAddr = "[2606:4700:4700::1111]:53".parse().unwrap();
-        match udp_dns_probe(ipv6_target).await {
-            Ok(src) => {
-                diagnostics.health_check_passed(HealthCheckKind::Ipv6Egress, src.to_string())
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, %ipv6_target, "IPv6 egress health check failed");
-                diagnostics.health_check_failed(HealthCheckKind::Ipv6Egress, err.to_string());
-            }
-        }
-    } else {
-        diagnostics.health_check_skipped(HealthCheckKind::Ipv6Egress, "IPv6 tunnel not requested");
-    }
+    // These probes use separate sockets and do not depend on each other. Keep
+    // every check and timeout, but avoid adding their wait times together.
+    let dns_passed =
+        probe_connection_health(&targets, ipv6_required, &diagnostics, udp_dns_probe).await;
 
     match dns_leak_guard_policy {
         DnsLeakGuardPolicy::Off => {
@@ -620,6 +577,69 @@ async fn run_post_connect_health_checks(
     }
 
     diagnostics.refresh_connection_health(ipv6_required);
+}
+
+async fn probe_connection_health<F, Fut>(
+    dns_targets: &[std::net::IpAddr],
+    ipv6_required: bool,
+    diagnostics: &ClientDiagnostics,
+    probe: F,
+) -> bool
+where
+    F: Fn(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<SocketAddr>>,
+{
+    let ipv4_check = async {
+        let target = "1.1.1.1:53".parse().unwrap();
+        match probe(target).await {
+            Ok(src) => {
+                diagnostics.health_check_passed(HealthCheckKind::Ipv4Egress, src.to_string())
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, %target, "IPv4 egress health check failed");
+                diagnostics.health_check_failed(HealthCheckKind::Ipv4Egress, err.to_string());
+            }
+        }
+    };
+    let dns_check = async {
+        for &dns_ip in dns_targets {
+            let target = SocketAddr::from((dns_ip, 53));
+            match probe(target).await {
+                Ok(src) => {
+                    tracing::info!(%src, dns_server = %target, "UDP DNS diagnostic passed");
+                    diagnostics.udp_check_passed(target, src);
+                    diagnostics.health_check_passed(HealthCheckKind::Dns, target.to_string());
+                    return true;
+                }
+                Err(err) => tracing::warn!(error = %err, %target, "DNS health check failed"),
+            }
+        }
+        diagnostics.udp_check_failed("all UDP DNS checks timed out or returned unexpected replies");
+        diagnostics.health_check_failed(
+            HealthCheckKind::Dns,
+            "all UDP DNS checks timed out or returned unexpected replies",
+        );
+        false
+    };
+    let ipv6_check = async {
+        if ipv6_required {
+            let target = "[2606:4700:4700::1111]:53".parse().unwrap();
+            match probe(target).await {
+                Ok(src) => {
+                    diagnostics.health_check_passed(HealthCheckKind::Ipv6Egress, src.to_string())
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, %target, "IPv6 egress health check failed");
+                    diagnostics.health_check_failed(HealthCheckKind::Ipv6Egress, err.to_string());
+                }
+            }
+        } else {
+            diagnostics
+                .health_check_skipped(HealthCheckKind::Ipv6Egress, "IPv6 tunnel not requested");
+        }
+    };
+    let (_, dns_passed, _) = tokio::join!(ipv4_check, dns_check, ipv6_check);
+    dns_passed
 }
 
 struct HandshakeResult {
@@ -825,7 +845,10 @@ async fn perform_reality_handshake(
         ));
     }
     if let Some(reject) = HandshakeReject::deserialize(resp_payload) {
-        anyhow::bail!("REALITY/Omega handshake rejected by server: {:?}", reject.reason);
+        anyhow::bail!(
+            "REALITY/Omega handshake rejected by server: {:?}",
+            reject.reason
+        );
     }
     anyhow::bail!("malformed REALITY/Omega handshake response payload")
 }
@@ -1495,7 +1518,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 control_result = control::wait_for_stop(
                     PathBuf::from(control_path),
-                    Duration::from_millis(500),
+                    Duration::from_millis(100),
                 ) => {
                     control_result?;
                     tracing::info!("control stop requested");
@@ -1516,6 +1539,86 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn health_test_diagnostics() -> ClientDiagnostics {
+        ClientDiagnostics::new(
+            std::env::temp_dir().join(format!("omega-health-{}.json", rand::random::<u64>())),
+            &ClientConfig::from_env(),
+            "127.0.0.1:443".parse().unwrap(),
+            "test-device",
+            "windows",
+        )
+    }
+
+    #[tokio::test]
+    async fn connection_health_probes_run_concurrently() {
+        let diagnostics = health_test_diagnostics();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let dns_targets = ["9.9.9.9".parse().unwrap()];
+        let dns_passed = tokio::time::timeout(
+            Duration::from_secs(2),
+            probe_connection_health(&dns_targets, true, &diagnostics, |target| {
+                let barrier = barrier.clone();
+                async move {
+                    // None can complete until all three checks have started.
+                    barrier.wait().await;
+                    Ok(target)
+                }
+            }),
+        )
+        .await
+        .expect("health probes should start together");
+
+        assert!(dns_passed);
+        diagnostics.health_check_passed(HealthCheckKind::DnsLeakGuard, "tunnel DNS responded");
+        diagnostics.refresh_connection_health(true);
+        assert_eq!(diagnostics.status_for_test(), "connected_healthy");
+    }
+
+    #[tokio::test]
+    async fn connection_health_keeps_dns_fallback_and_ipv6_failure() {
+        let diagnostics = health_test_diagnostics();
+        let calls = Mutex::new(Vec::new());
+        let dns_targets = ["9.9.9.9".parse().unwrap(), "8.8.8.8".parse().unwrap()];
+        let dns_passed = probe_connection_health(&dns_targets, true, &diagnostics, |target| {
+            calls.lock().unwrap().push(target);
+            async move {
+                if target.is_ipv6() || target.ip() == "9.9.9.9".parse::<std::net::IpAddr>().unwrap()
+                {
+                    Err(anyhow::anyhow!("probe failed"))
+                } else {
+                    Ok(target)
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            dns_passed,
+            "second configured DNS server must still be checked"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 4);
+        diagnostics.health_check_passed(HealthCheckKind::DnsLeakGuard, "tunnel DNS responded");
+        diagnostics.refresh_connection_health(true);
+        assert_eq!(diagnostics.status_for_test(), "connected_degraded");
+    }
+
+    #[tokio::test]
+    async fn connection_health_skips_ipv6_when_not_required_and_reports_dns_failure() {
+        let diagnostics = health_test_diagnostics();
+        let dns_targets = ["9.9.9.9".parse().unwrap()];
+        let dns_passed = probe_connection_health(&dns_targets, false, &diagnostics, |target| {
+            assert!(target.is_ipv4(), "IPv6 should not be probed");
+            async move { Err(anyhow::anyhow!("probe failed")) }
+        })
+        .await;
+
+        assert!(!dns_passed);
+        diagnostics
+            .health_check_failed(HealthCheckKind::DnsLeakGuard, "tunnel DNS did not respond");
+        diagnostics.refresh_connection_health(false);
+        assert_eq!(diagnostics.status_for_test(), "connected_degraded");
+    }
 
     #[test]
     fn observed_control_seq_does_not_create_false_gap() {

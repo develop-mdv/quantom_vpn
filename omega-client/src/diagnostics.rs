@@ -116,6 +116,7 @@ pub struct ClientDiagnosticsSnapshot {
 pub struct ClientDiagnostics {
     path: PathBuf,
     snapshot: Arc<Mutex<ClientDiagnosticsSnapshot>>,
+    status_changed: Arc<tokio::sync::Notify>,
 }
 
 impl ClientDiagnostics {
@@ -129,6 +130,7 @@ impl ClientDiagnostics {
         let now = now_ms();
         Self {
             path,
+            status_changed: Arc::new(tokio::sync::Notify::new()),
             snapshot: Arc::new(Mutex::new(ClientDiagnosticsSnapshot {
                 status: "starting".to_string(),
                 started_at_ms: now,
@@ -189,6 +191,7 @@ impl ClientDiagnostics {
     pub fn spawn_writer(&self) {
         let path = self.path.clone();
         let snapshot = self.snapshot.clone();
+        let status_changed = self.status_changed.clone();
         tokio::spawn(async move {
             if let Some(parent) = path.parent() {
                 if let Err(err) = tokio::fs::create_dir_all(parent).await {
@@ -199,7 +202,10 @@ impl ClientDiagnostics {
 
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = status_changed.notified() => {}
+                }
                 let payload = {
                     let mut guard = snapshot.lock().unwrap();
                     guard.updated_at_ms = now_ms();
@@ -223,6 +229,12 @@ impl ClientDiagnostics {
         self.with_snapshot(|snapshot| {
             snapshot.status = status.into();
         });
+        self.status_changed.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_for_test(&self) -> String {
+        self.snapshot.lock().unwrap().status.clone()
     }
 
     pub fn write_now(&self) -> anyhow::Result<()> {
@@ -413,6 +425,7 @@ impl ClientDiagnostics {
                 "connected_degraded".to_string()
             };
         });
+        self.status_changed.notify_one();
     }
 
     pub fn update_path_metrics(
@@ -551,6 +564,48 @@ mod tests {
             handshake_timeout_ms: 1500,
             handshake_backoff_ms: 500,
         }
+    }
+
+    #[tokio::test]
+    async fn writer_publishes_connection_health_without_waiting_for_periodic_tick() {
+        let path =
+            std::env::temp_dir().join(format!("omega-diag-notify-{}.json", rand::random::<u64>()));
+        let diagnostics = ClientDiagnostics::new(
+            path.clone(),
+            &test_config(path.clone()),
+            "127.0.0.1:443".parse().unwrap(),
+            "test-device",
+            "windows",
+        );
+        diagnostics.spawn_writer();
+
+        async fn wait_for_status(path: &std::path::Path, status: &str) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Ok(raw) = tokio::fs::read_to_string(path).await {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if json["status"] == status {
+                                break;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("diagnostics status was not published promptly");
+        }
+
+        wait_for_status(&path, "starting").await;
+        diagnostics.health_check_passed(HealthCheckKind::Ipv4Egress, "1.1.1.1:53");
+        diagnostics.health_check_passed(HealthCheckKind::Dns, "1.1.1.1:53");
+        diagnostics.health_check_skipped(HealthCheckKind::Ipv6Egress, "IPv6 tunnel not requested");
+        diagnostics.health_check_passed(HealthCheckKind::DnsLeakGuard, "tunnel DNS responded");
+        diagnostics.refresh_connection_health(false);
+        wait_for_status(&path, "connected_healthy").await;
+        diagnostics.set_status("stopping");
+        wait_for_status(&path, "stopping").await;
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[test]

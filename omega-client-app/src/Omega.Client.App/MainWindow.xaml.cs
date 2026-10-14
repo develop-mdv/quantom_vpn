@@ -134,6 +134,9 @@ public partial class MainWindow : Window
     private void SetPhase(ConnectionPhase newPhase)
     {
         phase = newPhase;
+        diagnosticsTimer.Interval = newPhase == ConnectionPhase.Connecting
+            ? TimeSpan.FromMilliseconds(250)
+            : TimeSpan.FromSeconds(2);
         ConnectButton.IsEnabled = ConnectionPhasePolicy.IsToggleEnabled(newPhase);
         ConnectButton.Content = ConnectionPhasePolicy.ToggleText(newPhase);
         if (trayToggleItem is not null)
