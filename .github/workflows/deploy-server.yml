@@ -67,10 +67,22 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SERVICE_NAME: ${{ secrets.DEPLOY_SERVICE_NAME }}
+          DEPLOY_INSTALL_DIR: ${{ secrets.DEPLOY_INSTALL_DIR }}
+          DEPLOY_KEEP_RELEASES: ${{ secrets.DEPLOY_KEEP_RELEASES }}
         run: |
           HOST="$(printf '%s' "$DEPLOY_HOST" | tr -d '\r\n\t ')"
           PORT="$(printf '%s' "${DEPLOY_PORT:-22}" | tr -d '\r\n\t ')"
           USER="$(printf '%s' "$DEPLOY_USER" | tr -d '\r\n\t ')"
+          REMOTE_BASE="$(printf '%s' "${DEPLOY_PATH:-/tmp/omega-deploy}" | tr -d '\r\n\t ')"
+          INSTALL_DIR="$(printf '%s' "${DEPLOY_INSTALL_DIR:-/opt/omega}" | tr -d '\r\n\t ')"
+          SERVICE="$(printf '%s' "${DEPLOY_SERVICE_NAME:-omega-server}" | tr -d '\r\n\t ')"
+          KEEP_RELEASES="$(printf '%s' "${DEPLOY_KEEP_RELEASES:-5}" | tr -d '\r\n\t ')"
+          REMOTE_BASE="${REMOTE_BASE:-/tmp/omega-deploy}"
+          INSTALL_DIR="${INSTALL_DIR:-/opt/omega}"
+          SERVICE="${SERVICE:-omega-server}"
+          KEEP_RELEASES="${KEEP_RELEASES:-5}"
 
           if [ -z "$HOST" ]; then
             echo "DEPLOY_HOST is empty"
@@ -96,9 +108,22 @@ jobs:
             exit 1
           fi
 
+          if ! [[ "$REMOTE_BASE" =~ ^/[A-Za-z0-9_./-]+$ && "$INSTALL_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
+            echo "Deploy directories must be absolute Linux paths without shell metacharacters."
+            exit 1
+          fi
+          if ! [[ "$SERVICE" =~ ^[A-Za-z0-9_.@-]+$ && "$KEEP_RELEASES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid service name or release retention count."
+            exit 1
+          fi
+
           echo "DEPLOY_HOST_CLEAN=$HOST" >> "$GITHUB_ENV"
           echo "DEPLOY_PORT_CLEAN=$PORT" >> "$GITHUB_ENV"
           echo "DEPLOY_USER_CLEAN=$USER" >> "$GITHUB_ENV"
+          echo "DEPLOY_PATH_CLEAN=$REMOTE_BASE" >> "$GITHUB_ENV"
+          echo "DEPLOY_INSTALL_DIR_CLEAN=$INSTALL_DIR" >> "$GITHUB_ENV"
+          echo "DEPLOY_SERVICE_NAME_CLEAN=$SERVICE" >> "$GITHUB_ENV"
+          echo "DEPLOY_KEEP_RELEASES_CLEAN=$KEEP_RELEASES" >> "$GITHUB_ENV"
 
       - name: Add known hosts
         env:
@@ -148,7 +173,7 @@ jobs:
           HOST="$DEPLOY_HOST_CLEAN"
           PORT="$DEPLOY_PORT_CLEAN"
           USER="$DEPLOY_USER_CLEAN"
-          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_BASE="$DEPLOY_PATH_CLEAN"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
@@ -165,16 +190,16 @@ jobs:
           HOST="$DEPLOY_HOST_CLEAN"
           PORT="$DEPLOY_PORT_CLEAN"
           USER="$DEPLOY_USER_CLEAN"
-          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_BASE="$DEPLOY_PATH_CLEAN"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y openssl python3 curl util-linux && \
              chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
              sudo env \
-               OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
-               OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
-               OMEGA_KEEP_RELEASES='${DEPLOY_KEEP_RELEASES:-5}' \
+               OMEGA_SERVICE_NAME='$DEPLOY_SERVICE_NAME_CLEAN' \
+               OMEGA_INSTALL_DIR='$DEPLOY_INSTALL_DIR_CLEAN' \
+               OMEGA_KEEP_RELEASES='$DEPLOY_KEEP_RELEASES_CLEAN' \
                OMEGA_RELEASE_ID='$GITHUB_SHA' \
                OMEGA_DEPLOY_HEALTHCHECK='0' \
                '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' '$REMOTE_DIR/omega-server.service'"
@@ -198,7 +223,7 @@ jobs:
           HOST="$DEPLOY_HOST_CLEAN"
           PORT="$DEPLOY_PORT_CLEAN"
           USER="$DEPLOY_USER_CLEAN"
-          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_BASE="$DEPLOY_PATH_CLEAN"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
           CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
@@ -249,7 +274,7 @@ jobs:
           HOST="$DEPLOY_HOST_CLEAN"
           PORT="$DEPLOY_PORT_CLEAN"
           USER="$DEPLOY_USER_CLEAN"
-          REMOTE_BASE="${DEPLOY_PATH:-/tmp/omega-deploy}"
+          REMOTE_BASE="$DEPLOY_PATH_CLEAN"
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
           CLIENT_CIDR="$(printf '%s' "${DEPLOY_CLIENT_CIDR:-10.7.0.0/16}" | tr -d '\r\n\t ')"
           CLIENT_CIDR_V6="$(printf '%s' "${DEPLOY_CLIENT_CIDR_V6:-fd70:7::/64}" | tr -d '\r\n\t ')"
@@ -310,7 +335,7 @@ jobs:
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
             "chmod +x '$REMOTE_DIR/diagnose_server.sh' && \
              sudo env \
-               OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
+               OMEGA_SERVICE_NAME='$DEPLOY_SERVICE_NAME_CLEAN' \
                OMEGA_CLIENT_CIDR='$CLIENT_CIDR' \
                OMEGA_CLIENT_CIDR_V6='$CLIENT_CIDR_V6' \
                OMEGA_VPN_PORT='$VPN_PORT' \
