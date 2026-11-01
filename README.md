@@ -2,6 +2,68 @@
 
 `Omega VPN` - Rust workspace с собственным UDP-туннелем, STUN/RTP cover traffic, post-quantum handshake, device-based auth и встроенными runtime/admin surface-ами.
 
+## Скачать клиент
+
+Готовые пакеты доступны в [последнем релизе](https://github.com/develop-mdv/quantom_vpn/releases/latest):
+
+| Платформа | Скачать | Как установить |
+| --- | --- | --- |
+| Windows x64 | [Установщик ZIP](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-windows-x64-setup.zip) | Распакуйте **весь архив** и запустите `Omega.Client.Setup.exe`. Соседние файлы и папка `payload` нужны установщику. |
+| Windows x64 portable | [Portable ZIP](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-windows-x64-portable.zip) | Распакуйте и запустите `Omega.Client.App.exe` от администратора. |
+| Android 6.0+ (ARM64 / x86_64) | [Тестовый APK](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-android-debug.apk) | Скачайте на телефон, разрешите установку из выбранного источника и откройте APK. |
+
+На Windows отдельно ставить Rust или .NET не нужно. После установки вставьте
+код `omega://connect/...`, выданный для вашего устройства в админке сервера.
+Android APK пока debug-сборка с тестовой подписью; при смене подписи обновление
+потребует удаления старой тестовой версии. Клиента для iOS в проекте пока нет.
+
+## Быстрый старт: установка сервера
+
+На Debian 12+ / Ubuntu 22.04+ с systemd и доступным TUN выполните от root
+(`sudo -i`, если вошли обычным пользователем):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)
+```
+
+Чтобы установить конкретную версию, добавьте её тег (например, `v0.1.0`):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh) v0.1.0
+```
+
+Скрипт скачивает готовый Linux-сервер для x86_64 или ARM64 из GitHub Releases,
+проверяет SHA-256, устанавливает зависимости, настраивает NAT и запускает
+службу `omega-server`. Rust и сборка на VPS не нужны.
+При повторном запуске сохраняются `/opt/omega/state` и существующие настройки
+`/etc/default/omega-server`.
+
+По умолчанию VPN использует **443/UDP и 443/TCP**, IPv6 внутри туннеля отключён.
+Разрешите эти порты также в сетевом экране хостинга. Для IPv6 задайте
+`OMEGA_IPV6_MODE=nat66` в `/etc/default/omega-server` и повторите установку
+на VPS с работающим внешним IPv6.
+SSH-порт определяется из текущего подключения; при необходимости укажите его
+явно: `OMEGA_SSH_PORT=2222 bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)`.
+
+Админка новой установки слушает `127.0.0.1:8081`. Откройте SSH-туннель на своём ПК:
+
+```bash
+ssh -N -L 8081:127.0.0.1:8081 root@<server_ip>
+```
+
+Для нестандартного SSH-порта добавьте `-p 2222`.
+Затем откройте `http://127.0.0.1:8081`, создайте пользователя и устройство,
+скопируйте код подключения в клиент. У админки пока нет авторизации, поэтому
+её следует использовать через SSH-туннель. При обновлении существующая
+конфигурация доступа к админке сохраняется.
+
+Состояние и логи:
+
+```bash
+systemctl status omega-server
+journalctl -u omega-server -f
+```
+
 ## Что уже есть в проекте
 
 - `omega-core`: wire protocol, crypto, anti-replay, ARQ, chaos-based packet morphing, FEC primitives.
@@ -37,7 +99,7 @@
 - `DEPLOY.md`
 - `resource_budget.md`
 
-## Быстрый старт
+## Запуск из исходного кода
 
 ### 1. Создать пользователя
 
@@ -89,6 +151,20 @@ powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client
 
 - `omega-client-app/artifacts/windows-client/portable/OmegaVPN` - portable-папка для тестов.
 - `omega-client-app/artifacts/windows-client/installer` - setup package с `Omega.Client.Setup.exe` и `payload/`.
+
+Для ручного прикрепления к релизу упакуйте **всё содержимое** `installer`
+в `OmegaVPN-windows-x64-setup.zip`. Отдельный `Omega.Client.Setup.exe`
+не является автономным установщиком.
+Android APK после `cd omega-android && ./gradlew :app:assembleDebug` находится
+в `omega-android/app/build/outputs/apk/debug/app-debug.apk`.
+Старый `omega-android/omega-vpn-reality-debug.apk` — сохранённая ранее сборка;
+для релиза используйте APK, заново собранный из нужного тега.
+
+Workflow [Release Omega VPN](.github/workflows/release.yml) при отправке тега
+`vX.Y.Z` собирает Windows, Android и серверы Linux, выполняет проверки и
+публикует релиз со всеми пакетами и `SHA256SUMS`. Перед тегом добавьте
+заметки о версии в `docs/releases/vX.Y.Z.md`. Подробности —
+в [инструкции по релизу](docs/RELEASING.md).
 
 GUI требует права администратора, как и `start_client.bat`, потому что Windows-клиент управляет Wintun, routes, DNS и kill switch.
 

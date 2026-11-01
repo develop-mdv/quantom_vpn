@@ -2,6 +2,20 @@
 
 Это руководство описывает процесс установки и настройки сервера Omega VPN на Linux VPS (рекомендуется Ubuntu 22.04+).
 
+## Установка готового релиза одной командой
+
+На Debian 12+ / Ubuntu 22.04+ с systemd, от root:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)
+```
+
+Конкретная версия: добавьте тег после команды, например `v0.1.0`.
+Скрипт скачивает готовый бинарник, проверяет SHA-256, настраивает NAT и systemd.
+VPN использует 443/UDP и 443/TCP; админка доступна через SSH-туннель.
+Полные инструкции, доступ к админке и обновление — в [README](README.md#быстрый-старт-установка-сервера).
+Следующие разделы описывают ручное развёртывание из исходников.
+
 ## Предварительные требования
 - VPS с публичным IP-адресом.
 - Доступ root или sudo.
@@ -28,7 +42,7 @@ echo "net.ipv4.ip_forward=1" >> /etc/sysctl.d/99-omega.conf
 # Мы подготовили автоматический скрипт настройки.
 # Просто запустите его на сервере:
 
-curl -sSL https://raw.githubusercontent.com/your-repo/omega-vpn/main/deploy/setup_nat.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/deploy/setup_nat.sh | sudo bash
 
 # Или, если вы клонировали репозиторий:
 # cd ~/omega-vpn/deploy
@@ -49,8 +63,8 @@ source "$HOME/.cargo/env"
 Клонируйте репозиторий и соберите сервер.
 
 ```bash
-git clone https://github.com/your-repo/omega-vpn.git
-cd omega-vpn
+git clone https://github.com/develop-mdv/quantom_vpn.git
+cd quantom_vpn
 cargo build --release -p omega-server
 ```
 
