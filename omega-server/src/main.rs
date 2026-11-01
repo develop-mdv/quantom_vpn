@@ -262,9 +262,10 @@ async fn run_server() -> anyhow::Result<()> {
         allow_legacy_v1,
         morphing_policy,
     };
-    let reality_controller: reality::SharedController = Arc::new(
-        reality::RealityController::new(PathBuf::from("state"), reality_dp),
-    );
+    let reality_controller: reality::SharedController = Arc::new(reality::RealityController::new(
+        PathBuf::from("state"),
+        reality_dp,
+    ));
     // 1. Try to load the persisted JSON from disk and (if enabled) start the
     //    listener.
     if let Err(err) = reality_controller.bootstrap().await {
@@ -300,6 +301,16 @@ async fn run_server() -> anyhow::Result<()> {
 }
 
 fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("init_web" | "reset_web")
+    ) {
+        println!(
+            "{}",
+            serde_json::to_string(&web_admin::initialize_credentials(args[0] == "reset_web")?)?
+        );
+        return Ok(());
+    }
     let identity_path = IdentityStore::default_path();
     ensure_identity_file(&identity_path)?;
     let store = IdentityStore::load(identity_path)?;
@@ -705,6 +716,8 @@ fn bind_udp_socket(
 
 fn print_admin_usage() {
     println!("omega-server admin commands:");
+    println!("  init_web   (generate admin login/password once; JSON output)");
+    println!("  reset_web  (reset admin login/password; restart the service afterwards)");
     println!("  create_user [--max-devices N] [--max-sessions N]");
     println!("  list_users");
     println!("  block_user --user-id <uuid>");

@@ -16,6 +16,14 @@ KEEP_RELEASES="${OMEGA_KEEP_RELEASES:-5}"
 RELEASE_ID="${OMEGA_RELEASE_ID:-$(date +%Y%m%d%H%M%S)}"
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
 PREVIOUS_UNIT=""
+ENV_PATH="${OMEGA_ENV_FILE:-/etc/default/omega-server}"
+PREVIOUS_ENV=""
+PREVIOUS_AUTH=0
+if [[ -f "$INSTALL_DIR/state/admin-auth.json" && -x "$TARGET_LINK" ]] && \
+   env OMEGA_ADMIN_AUTH_DB="$INSTALL_DIR/state/admin-auth.json" OMEGA_IDENTITY_DB="$INSTALL_DIR/state/identity.json" \
+   "$TARGET_LINK" admin init_web >/dev/null 2>&1; then
+  PREVIOUS_AUTH=1
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIAGNOSE_SCRIPT="${OMEGA_DIAGNOSE_SCRIPT:-$SCRIPT_DIR/diagnose_server.sh}"
 DEPLOY_HEALTHCHECK="${OMEGA_DEPLOY_HEALTHCHECK:-1}"
@@ -23,6 +31,9 @@ DEPLOY_HEALTHCHECK="${OMEGA_DEPLOY_HEALTHCHECK:-1}"
 cleanup() {
   if [[ -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
     rm -f "$PREVIOUS_UNIT"
+  fi
+  if [[ -n "$PREVIOUS_ENV" && -f "$PREVIOUS_ENV" ]]; then
+    rm -f "$PREVIOUS_ENV"
   fi
 }
 trap cleanup EXIT
@@ -54,6 +65,10 @@ fi
 if [[ -f "$UNIT_PATH" ]]; then
   PREVIOUS_UNIT="$(mktemp)"
   cp "$UNIT_PATH" "$PREVIOUS_UNIT"
+fi
+if [[ -f "$ENV_PATH" ]]; then
+  PREVIOUS_ENV="$(mktemp)"
+  cp "$ENV_PATH" "$PREVIOUS_ENV"
 fi
 
 print_diagnostics() {
@@ -105,6 +120,18 @@ run_deploy_healthcheck() {
 rollback() {
   echo "[WARN] Rolling back deployment..."
 
+  if [[ -n "$PREVIOUS_ENV" ]]; then
+    install -m 0600 "$PREVIOUS_ENV" "$ENV_PATH"
+  else
+    rm -f "$ENV_PATH"
+  fi
+  # A pre-authentication binary must never inherit the new public admin bind.
+  if [[ "$PREVIOUS_AUTH" == 0 ]]; then
+    mkdir -p "$(dirname "$ENV_PATH")"
+    printf '\nOMEGA_ADMIN_WEB_DISABLE=1\n' >> "$ENV_PATH"
+    chmod 0600 "$ENV_PATH"
+  fi
+
   if [[ -n "$NEW_UNIT" && -n "$PREVIOUS_UNIT" && -f "$PREVIOUS_UNIT" ]]; then
     echo "[INFO] Restoring previous systemd unit"
     install -m 0644 "$PREVIOUS_UNIT" "$UNIT_PATH"
@@ -123,6 +150,14 @@ rollback() {
     echo "[ERROR] Rollback skipped: previous binary not found"
   fi
 }
+
+if [[ -f "$SCRIPT_DIR/setup_admin.sh" ]]; then
+  if ! bash "$SCRIPT_DIR/setup_admin.sh" "$NEW_RELEASE_BIN"; then
+    echo "[ERROR] Admin HTTPS/bootstrap setup failed"
+    rollback
+    exit 1
+  fi
+fi
 
 ln -sfn "$NEW_RELEASE_BIN" "$TARGET_LINK"
 

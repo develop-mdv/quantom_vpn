@@ -20,7 +20,7 @@ git push origin v0.1.0
 
 ## Пакеты
 
-- `OmegaVPN-windows-x64-setup.zip`: всё содержимое `installer`, включая .NET runtime и `payload/`.
+- `OmegaVPN-windows-x64-setup.exe`: один self-contained EXE со встроенным клиентом, Wintun и .NET runtime.
 - `OmegaVPN-windows-x64-portable.zip`: папка `OmegaVPN` с GUI, Rust runtime и Wintun.
 - `OmegaVPN-android-debug.apk`: тестовая подписанная debug-сборка для ARM64/x86_64.
 - `omega-server-linux-x86_64.tar.gz`, `omega-server-linux-aarch64.tar.gz`: статический musl binary и скрипты настройки systemd/NAT.
@@ -38,12 +38,13 @@ release-подпись с сохраняемым keystore; ключ и паро�
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\omega-client-app\package-windows-client.ps1
-Compress-Archive -Path .\omega-client-app\artifacts\windows-client\installer\* -DestinationPath .\OmegaVPN-windows-x64-setup.zip
+Copy-Item .\omega-client-app\artifacts\windows-client\OmegaVPN-windows-x64-setup.exe .\OmegaVPN-windows-x64-setup.exe
 Compress-Archive -Path .\omega-client-app\artifacts\windows-client\portable\OmegaVPN -DestinationPath .\OmegaVPN-windows-x64-portable.zip
 ```
 
-Пользователю нужно распаковать весь setup ZIP и запустить `Omega.Client.Setup.exe`.
-Нельзя прикреплять только EXE: он использует соседние DLL и `payload/`.
+Пользователь скачивает и запускает один `OmegaVPN-windows-x64-setup.exe`.
+Workflow проверяет EXE в режиме `diagnostics`, который также проверяет встроенный архив.
+Архив встраивается в setup после сборки клиента; .NET упаковывает setup в single-file EXE.
 Пакет не должен содержать профили, `app-config*.json`, токены устройств или логи.
 
 ## Ручная сборка Android
@@ -59,3 +60,11 @@ cd omega-android
 На Windows используйте `gradlew.bat`. Устанавливаемый файл:
 `omega-android/app/build/outputs/apk/debug/app-debug.apk`.
 Gradle сам собирает Rust JNI bridge и включает обе архитектуры в APK.
+
+## Обновление существующего релиза
+
+Для обновления файлов существующего `v0.1.0` запустите workflow вручную с
+`tag=v0.1.0` и `source_ref=<коммит или main>`. Все пакеты собираются из одного
+вычисленного коммита, который указывается в описании релиза. Опубликованный тег
+не перемещается; автоматически создаваемый GitHub архив исходников соответствует
+исходному тегу, а актуальные исходники доступны по ссылке на коммит.

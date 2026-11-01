@@ -10,6 +10,10 @@ on:
         description: Existing version tag to build and publish (for example v0.1.0)
         required: true
         type: string
+      source_ref:
+        description: Source commit/branch for updating existing release assets; leave blank to use the tag
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -23,10 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.source_ref || inputs.tag || github.ref }}
       - id: version
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -34,9 +39,10 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid version tag"; exit 1; }
           test -f "docs/releases/$TAG.md"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Test server installer
         run: |
-          bash -n install.sh deploy/tests/install_test.sh
+          for script in install.sh deploy/tests/*.sh; do bash -n "$script"; done
           bash deploy/tests/install_test.sh
 
   server:
@@ -55,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.commit }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -74,6 +80,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: OMEGA_IDENTITY_DB="$RUNNER_TEMP/release-identity.json" "target/$TARGET/release/omega-server" admin list_users
+      - name: Test HTTPS admin installation
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash deploy/tests/admin_install_test.sh "target/$TARGET/release/omega-server"
       - name: Package server
         env:
           ARCH: ${{ matrix.arch }}
@@ -81,9 +91,9 @@ jobs:
         run: |
           mkdir -p dist bundle
           cp "target/$TARGET/release/omega-server" bundle/
-          cp deploy/{setup_nat.sh,update_server.sh,diagnose_server.sh,omega-server.service} bundle/
+          cp deploy/{setup_nat.sh,update_server.sh,diagnose_server.sh,setup_admin.sh,renew_admin_tls.sh,omega-server.service,omega-admin-tls-renew.service,omega-admin-tls-renew.timer} bundle/
           # Avoid CRLF in release scripts even when built from a Windows checkout.
-          sed -i 's/\r$//' bundle/*.sh bundle/*.service
+          sed -i 's/\r$//' bundle/*.sh bundle/*.service bundle/*.timer
           chmod +x bundle/omega-server bundle/*.sh
           tar -czf "dist/omega-server-linux-$ARCH.tar.gz" -C bundle .
       - uses: actions/upload-artifact@v4
@@ -98,7 +108,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.commit }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-dotnet@v4
@@ -111,8 +121,10 @@ jobs:
         run: |
           ./omega-client-app/package-windows-client.ps1
           New-Item -ItemType Directory -Path dist | Out-Null
-          Compress-Archive -Path omega-client-app/artifacts/windows-client/installer/* -DestinationPath dist/OmegaVPN-windows-x64-setup.zip
+          Copy-Item omega-client-app/artifacts/windows-client/OmegaVPN-windows-x64-setup.exe dist/
           Compress-Archive -Path omega-client-app/artifacts/windows-client/portable/OmegaVPN -DestinationPath dist/OmegaVPN-windows-x64-portable.zip
+          & ./dist/OmegaVPN-windows-x64-setup.exe diagnostics --log "$env:RUNNER_TEMP/setup-diagnostics.log"
+          if ($LASTEXITCODE -ne 0) { throw "Standalone installer diagnostics failed" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -125,7 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.commit }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,x86_64-linux-android
@@ -160,22 +172,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.tag }}
+          ref: ${{ needs.version.outputs.commit }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.zip *.apk *.tar.gz > SHA256SUMS
+        run: sha256sum *.exe *.zip *.apk *.tar.gz > SHA256SUMS
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
+          SOURCE_COMMIT: ${{ needs.version.outputs.commit }}
         run: |
           # Upload into a draft so a partially uploaded release cannot become latest.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --draft --title "Omega VPN $TAG" --notes-file "docs/releases/$TAG.md"
           fi
-          gh release upload "$TAG" dist/* --clobber
-          gh release edit "$TAG" --draft=false --latest
+          gh release upload "$TAG" dist/*.exe dist/*.zip dist/*.apk dist/*.tar.gz --clobber
+          gh release upload "$TAG" dist/SHA256SUMS --clobber
+          cp "docs/releases/$TAG.md" "$RUNNER_TEMP/release-notes.md"
+          printf '\nПакеты обновлены из [коммита %s](https://github.com/%s/commit/%s).\n' "$SOURCE_COMMIT" "$GITHUB_REPOSITORY" "$SOURCE_COMMIT" >> "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --draft=false --latest
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qx 'OmegaVPN-windows-x64-setup.zip'; then
+            gh release delete-asset "$TAG" OmegaVPN-windows-x64-setup.zip --yes
+          fi

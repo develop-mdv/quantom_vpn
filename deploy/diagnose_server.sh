@@ -20,7 +20,7 @@ Environment:
   OMEGA_VPN_IPV6_MODE          expected IPv6 mode: disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port that must remain reachable (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expect public admin web UI (default: 0)
-  OMEGA_ADMIN_WEB_PORT         admin web UI TCP port (default: 8081)
+  OMEGA_ADMIN_WEB_PORT         admin web UI TCP port (default: 8443)
   OMEGA_METRICS_PUBLIC         1/0, expect public Prometheus metrics (default: 0)
   OMEGA_METRICS_PORT           Prometheus metrics TCP port (default: 9090)
   OMEGA_SERVICE_NAME           systemd service name (default: omega-server)
@@ -44,7 +44,7 @@ TCP_PORT="${OMEGA_TCP_PORT:-$VPN_PORT}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-${OMEGA_IPV6_MODE:-disabled}}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
 ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-0}"
-ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8081}"
+ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8443}"
 METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-0}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 SERVICE_NAME="${OMEGA_SERVICE_NAME:-omega-server}"

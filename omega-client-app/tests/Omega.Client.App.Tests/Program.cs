@@ -21,6 +21,8 @@ var tests = new (string Name, Action Body)[]
     ("connect toggle follows connection phase", ConnectToggleFollowsConnectionPhase),
     ("autostart task builds scheduler arguments", AutostartTaskBuildsSchedulerArguments),
     ("windows bootstrap installer documents required commands", WindowsBootstrapInstallerDocumentsRequiredCommands),
+    ("embedded installer payload extracts without external files", EmbeddedInstallerPayloadExtracts),
+    ("embedded installer rejects unsafe archives", EmbeddedInstallerPayloadRejectsUnsafeArchives),
 };
 
 var failed = 0;
@@ -523,6 +525,55 @@ static void WindowsBootstrapInstallerDocumentsRequiredCommands()
     var setupManifest = File.ReadAllText(setupManifestPath);
     True(setupManifest.Contains("level=\"asInvoker\"", StringComparison.Ordinal), "setup must enter managed code before requesting UAC");
     True(!setupManifest.Contains("level=\"requireAdministrator\"", StringComparison.Ordinal), "setup manifest still elevates before diagnostics start");
+}
+
+static MemoryStream CreateInstallerArchive(string? extraEntry = null)
+{
+    var stream = new MemoryStream();
+    using (var archive = new System.IO.Compression.ZipArchive(stream, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true))
+    {
+        foreach (var name in new[] { "Omega.Client.App.exe", "omega-client.exe", "wintun.dll", "hostfxr.dll", "coreclr.dll" }.Concat(extraEntry is null ? Array.Empty<string>() : new[] { extraEntry }))
+        {
+            using var writer = new StreamWriter(archive.CreateEntry(name).Open());
+            writer.Write("test payload");
+        }
+    }
+    stream.Position = 0;
+    return stream;
+}
+
+static void EmbeddedInstallerPayloadExtracts()
+{
+    using var stream = CreateInstallerArchive();
+    Equal(5, InstallerPayloadArchive.Validate(stream));
+    stream.Position = 0;
+    var destination = Path.Combine(Path.GetTempPath(), "omega-payload-test-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        InstallerPayloadArchive.Extract(stream, destination);
+        Equal("test payload", File.ReadAllText(Path.Combine(destination, "omega-client.exe")));
+        Equal(5, Directory.GetFiles(destination).Length);
+    }
+    finally { if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true); }
+}
+
+static void EmbeddedInstallerPayloadRejectsUnsafeArchives()
+{
+    foreach (var invalid in new[] { "../escape.exe", "C:/escape.exe", "state/identity.json", "app-config.json", "OMEGA-CLIENT.EXE" })
+    {
+        using var stream = CreateInstallerArchive(invalid);
+        var rejected = false;
+        try { InstallerPayloadArchive.Validate(stream); }
+        catch (InvalidDataException) { rejected = true; }
+        True(rejected, "unsafe embedded archive accepted: " + invalid);
+    }
+    using var empty = new MemoryStream();
+    using (var archive = new System.IO.Compression.ZipArchive(empty, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true)) { }
+    empty.Position = 0;
+    var missingRejected = false;
+    try { InstallerPayloadArchive.Validate(empty); }
+    catch (InvalidDataException) { missingRejected = true; }
+    True(missingRejected, "missing client files accepted");
 }
 
 static string FindRepoRoot()

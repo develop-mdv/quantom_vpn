@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client
 Результат:
 
 - `omega-client-app/artifacts/windows-client/portable/OmegaVPN`
-- `omega-client-app/artifacts/windows-client/installer`
+- `omega-client-app/artifacts/windows-client/OmegaVPN-windows-x64-setup.exe`
 
 Portable-папку удобно использовать для тестов: запустить `Omega.Client.App.exe`
 от имени администратора, вставить код подключения и нажать `Подключить`.
@@ -90,9 +90,9 @@ Portable-папку удобно использовать для тестов: �
 GUI-клиент по умолчанию запускает runtime с `OMEGA_IPV6_POLICY=tunnel`, поэтому
 IPv6-трафик идет через туннель при серверном `OMEGA_IPV6_MODE=nat66`.
 
-Installer package содержит `Omega.Client.Setup.exe` и `payload/`. Setup копирует
-payload в `%ProgramFiles%\Omega VPN`, создает ярлыки и scheduled task для
-elevated autostart.
+Установщик распространяется одним EXE со встроенными клиентом, Wintun и .NET.
+Setup распаковывает содержимое во временный каталог, устанавливает в
+`%ProgramFiles%\Omega VPN`, создаёт ярлыки и scheduled task для elevated autostart.
 
 ## Windows-клиент через `.env`
 
@@ -136,12 +136,16 @@ http://127.0.0.1:8081/
 В production unit из `deploy/omega-server.service` built-in admin публикуется на:
 
 ```text
-http://<SERVER_IP>:8081/
+https://<SERVER_IP>:8443/
 ```
 
-Важно: встроенная админка сейчас говорит обычным HTTP, не HTTPS. Открывайте
-адрес явно как `http://<SERVER_IP>:8081/`. Если открыть `https://<SERVER_IP>:8081/`,
-сервер запишет в лог `malformed HTTP request`, а браузер не покажет UI.
+Сначала выполните `install.sh`, чтобы создать учётные данные и HTTPS-сертификат.
+Установщик выведет ссылку, логин и пароль; при повторном запуске пароль сохраняется.
+Сертификат для IP нужно подтвердить в браузере, сверив SHA-256 fingerprint с консолью.
+Все страницы и API требуют входа. В блоке «Доступ к админке» можно сменить логин
+и пароль; это завершит все сессии. Для сброса от root:
+`cd /opt/omega && ./omega-server admin reset_web && systemctl restart omega-server`.
+Для запуска из исходников на localhost сначала выполните `cargo run -p omega-server -- admin init_web`.
 
 Для корректных `omega://connect/...` кодов в UI задайте публичный адрес сервера:
 
@@ -329,9 +333,11 @@ OMEGA_TOKEN_PEPPER=<long-random-secret>
 # Что админка подставляет в omega://connect коды.
 OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
 
-# Built-in admin сейчас plain HTTP.
+# Built-in admin HTTPS; initialize through install.sh.
 OMEGA_ADMIN_WEB_PUBLIC=1
-OMEGA_ADMIN_WEB_PORT=8081
+OMEGA_ADMIN_WEB_PORT=8443
+OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/cert.der
+OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/key.der
 
 # Если у VPS нет IPv6 egress, оставьте IPv4-only.
 OMEGA_IPV6_MODE=disabled

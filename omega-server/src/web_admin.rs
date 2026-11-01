@@ -1,9 +1,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+
+mod auth;
+
+pub(crate) fn initialize_credentials(reset: bool) -> anyhow::Result<serde_json::Value> {
+    auth::initialize(&auth::credentials_path(), reset)
+}
 
 use crate::identity::{
     parse_platform, IdentityStore, DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_MAX_DEVICES,
@@ -14,12 +22,40 @@ use crate::session::{flow_id_from_hex, SessionManager};
 
 const MAX_REQUEST_SIZE: usize = 64 * 1024;
 
+fn validate_transport(bind: std::net::SocketAddr, tls: bool) -> anyhow::Result<()> {
+    anyhow::ensure!(tls || bind.ip().is_loopback(), "Public admin access requires HTTPS. Configure OMEGA_ADMIN_TLS_CERT and OMEGA_ADMIN_TLS_KEY.");
+    Ok(())
+}
+
 pub async fn run(
     bind_addr: String,
     identity_store: Arc<IdentityStore>,
     session_manager: Arc<SessionManager>,
     reality: RealityController,
 ) -> anyhow::Result<()> {
+    let tls = match (
+        std::env::var("OMEGA_ADMIN_TLS_CERT"),
+        std::env::var("OMEGA_ADMIN_TLS_KEY"),
+    ) {
+        (Ok(cert), Ok(key)) => {
+            let cert = rustls::pki_types::CertificateDer::from(std::fs::read(cert)?);
+            let key = rustls::pki_types::PrivateKeyDer::try_from(std::fs::read(key)?)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()?
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)?;
+            Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+        }
+        (Err(_), Err(_)) => None,
+        _ => anyhow::bail!("Set both OMEGA_ADMIN_TLS_CERT and OMEGA_ADMIN_TLS_KEY (DER files)"),
+    };
+    let bind: std::net::SocketAddr = bind_addr.parse()?;
+    validate_transport(bind, tls.is_some())?;
+    let auth = Arc::new(auth::Auth::load(auth::credentials_path(), tls.is_some())?);
+    let permits = Arc::new(Semaphore::new(64));
     let listener = TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("failed to bind web admin on {}", bind_addr))?;
@@ -27,13 +63,26 @@ pub async fn run(
     tracing::info!(%bind_addr, "web admin started");
 
     loop {
+        let permit = permits.clone().acquire_owned().await?;
         let (stream, peer) = listener.accept().await?;
         let identity = identity_store.clone();
         let sessions = session_manager.clone();
         let reality = reality.clone();
+        let auth = auth.clone();
+        let tls = tls.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, identity, sessions, reality).await {
+            let _permit = permit;
+            let result = tokio::time::timeout(Duration::from_secs(15), async {
+                if let Some(tls) = tls {
+                    let stream = tls.accept(stream).await?;
+                    handle_connection(stream, identity, sessions, reality, auth, peer.ip()).await
+                } else {
+                    handle_connection(stream, identity, sessions, reality, auth, peer.ip()).await
+                }
+            })
+            .await;
+            if let Ok(Err(err)) = result {
                 tracing::warn!(%peer, error = %err, "web admin request failed");
             }
         });
@@ -45,15 +94,26 @@ struct HttpRequest {
     path: String,
     query: HashMap<String, String>,
     body: String,
+    headers: HashMap<String, String>,
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
+async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     identity_store: Arc<IdentityStore>,
     session_manager: Arc<SessionManager>,
     reality: RealityController,
+    auth: Arc<auth::Auth>,
+    peer: std::net::IpAddr,
 ) -> anyhow::Result<()> {
     let request = read_request(&mut stream).await?;
+    let session = match auth.access(&request, peer).await? {
+        auth::Access::Reply(response) => {
+            stream.write_all(&auth::secure_response(response)).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+        auth::Access::Granted(session) => session,
+    };
 
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/") => {
@@ -68,7 +128,11 @@ async fn handle_connection(
                 request.query.get("msg").cloned(),
                 request.query.get("code").cloned(),
             );
-            html_response(200, "OK", html)
+            html_response(
+                200,
+                "OK",
+                auth::protect_forms(html, &session.csrf, &auth.username()),
+            )
         }
         ("GET", "/api/reality/status") => {
             let status = reality.status().await;
@@ -233,12 +297,12 @@ async fn handle_connection(
         _ => text_response(404, "Not Found", "Not Found"),
     };
 
-    stream.write_all(&response).await?;
-    stream.flush().await?;
+    stream.write_all(&auth::secure_response(response)).await?;
+    stream.shutdown().await?;
     Ok(())
 }
 
-async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
+async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> anyhow::Result<HttpRequest> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 2048];
 
@@ -260,7 +324,11 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
             header_end = find_header_end(&buf);
             if let Some(end) = header_end {
                 let header_bytes = &buf[..end];
-                content_len = parse_content_length(header_bytes);
+                content_len = parse_content_length(header_bytes)?;
+                anyhow::ensure!(
+                    content_len <= MAX_REQUEST_SIZE.saturating_sub(end + 4),
+                    "request too large"
+                );
             }
         }
 
@@ -281,6 +349,21 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
 
     let method = parts.next().unwrap_or("GET").to_string();
     let target = parts.next().unwrap_or("/");
+    anyhow::ensure!(
+        matches!(method.as_str(), "GET" | "POST") && target.starts_with('/'),
+        "unsupported HTTP request"
+    );
+    let mut headers = HashMap::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').context("invalid HTTP header")?;
+        let name = name.trim().to_ascii_lowercase();
+        anyhow::ensure!(!headers.contains_key(&name), "duplicate HTTP header");
+        headers.insert(name, value.trim().to_string());
+    }
+    anyhow::ensure!(
+        !headers.contains_key("transfer-encoding"),
+        "Transfer-Encoding is unsupported"
+    );
     let (path, query) = if let Some((p, q)) = target.split_once('?') {
         (p.to_string(), parse_form(q))
     } else {
@@ -288,7 +371,8 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
     };
 
     let body_start = end + 4;
-    let body_end = (body_start + content_len).min(buf.len());
+    let body_end = body_start + content_len;
+    anyhow::ensure!(body_end <= buf.len(), "incomplete request body");
     let body = String::from_utf8_lossy(&buf[body_start..body_end]).to_string();
 
     Ok(HttpRequest {
@@ -296,6 +380,7 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<HttpRequest> {
         path,
         query,
         body,
+        headers,
     })
 }
 
@@ -553,19 +638,28 @@ fn render_reality_card(
     out.push_str("<div class=\"card\" style=\"margin-bottom:16px\">");
     out.push_str("<h2>REALITY — обход белых списков (TLS-маскировка)</h2>");
     out.push_str("<p style=\"color:#475569;margin-top:0\">");
-    out.push_str("Включите, если в стране/сети работают только TLS-соединения к доверенным сайтам. ");
+    out.push_str(
+        "Включите, если в стране/сети работают только TLS-соединения к доверенным сайтам. ",
+    );
     out.push_str("Сервер будет выглядеть как обычный <code>SNI</code>-сайт (например <code>gosuslugi.ru</code>), внутри идёт ваш VPN.");
     out.push_str("</p>");
 
     // Status badge
     let badge_color = if status.running { "#16a34a" } else { "#64748b" };
-    let badge_text = if status.running { "Работает" } else { "Выключено" };
+    let badge_text = if status.running {
+        "Работает"
+    } else {
+        "Выключено"
+    };
     out.push_str(&format!(
         "<p><b>Статус:</b> <span style=\"background:{};color:#fff;padding:2px 10px;border-radius:10px;font-size:12px\">{}</span>",
         badge_color, badge_text
     ));
     if let Some(uptime) = status.uptime_seconds {
-        out.push_str(&format!(" <span style=\"color:#475569\">uptime: {} сек</span>", uptime));
+        out.push_str(&format!(
+            " <span style=\"color:#475569\">uptime: {} сек</span>",
+            uptime
+        ));
     }
     out.push_str("</p>");
 
@@ -607,7 +701,10 @@ fn render_reality_card(
     out.push_str("</small>");
 
     out.push_str("<label>Слушать на адресе (host:port)</label>");
-    out.push_str(&format!("<input name=\"bind\" value=\"{}\">", escape_html(&s.bind)));
+    out.push_str(&format!(
+        "<input name=\"bind\" value=\"{}\">",
+        escape_html(&s.bind)
+    ));
 
     out.push_str("<label>Маскировка под сайт (host:port)</label>");
     let dest = format!("{}:{}", s.dest_host, s.dest_port);
@@ -636,7 +733,11 @@ fn render_reality_card(
         out.push_str(&format!(
             "<option value=\"{}\"{}>{}</option>",
             opt,
-            if s.fingerprint_profile == *opt { " selected" } else { "" },
+            if s.fingerprint_profile == *opt {
+                " selected"
+            } else {
+                ""
+            },
             opt
         ));
     }
@@ -775,18 +876,19 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
-fn parse_content_length(header: &[u8]) -> usize {
+fn parse_content_length(header: &[u8]) -> anyhow::Result<usize> {
     let text = String::from_utf8_lossy(header);
     for line in text.lines() {
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("content-length") {
-                if let Ok(len) = value.trim().parse::<usize>() {
-                    return len;
-                }
+                return value
+                    .trim()
+                    .parse::<usize>()
+                    .context("invalid Content-Length");
             }
         }
     }
-    0
+    Ok(0)
 }
 
 pub(crate) fn client_server_hint() -> String {
@@ -906,6 +1008,7 @@ fn json_response(status: u16, reason: &str, body: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use tokio::io::AsyncWriteExt;
 
     use crate::identity::{ensure_identity_file, now_ts, IdentityStore};
     use crate::session::SessionManager;
@@ -983,6 +1086,29 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn public_admin_requires_tls() {
+        assert!(super::validate_transport("0.0.0.0:8443".parse().unwrap(), false).is_err());
+        assert!(super::validate_transport("[::]:8443".parse().unwrap(), false).is_err());
+        assert!(super::validate_transport("[::]:8443".parse().unwrap(), true).is_ok());
+        assert!(super::validate_transport("127.0.0.1:8081".parse().unwrap(), false).is_ok());
+    }
+
+    #[tokio::test]
+    async fn http_parser_rejects_incomplete_ambiguous_and_oversized_requests() {
+        for input in [
+            "POST /login HTTP/1.1\r\nContent-Length: 12\r\n\r\nshort",
+            "POST /login HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n",
+            "POST /login HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n",
+            "POST /login HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            let (mut client, mut server) = tokio::io::duplex(4096);
+            client.write_all(input.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+            assert!(super::read_request(&mut server).await.is_err());
+        }
     }
 
     fn base64_url_decode(input: &str) -> Vec<u8> {

@@ -8,7 +8,7 @@
 
 | Платформа | Скачать | Как установить |
 | --- | --- | --- |
-| Windows x64 | [Установщик ZIP](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-windows-x64-setup.zip) | Распакуйте **весь архив** и запустите `Omega.Client.Setup.exe`. Соседние файлы и папка `payload` нужны установщику. |
+| Windows x64 | [Установщик EXE](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-windows-x64-setup.exe) | Скачайте один файл и запустите. Всё необходимое уже внутри; setup запросит права администратора. |
 | Windows x64 portable | [Portable ZIP](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-windows-x64-portable.zip) | Распакуйте и запустите `Omega.Client.App.exe` от администратора. |
 | Android 6.0+ (ARM64 / x86_64) | [Тестовый APK](https://github.com/develop-mdv/quantom_vpn/releases/latest/download/OmegaVPN-android-debug.apk) | Скачайте на телефон, разрешите установку из выбранного источника и откройте APK. |
 
@@ -45,38 +45,62 @@ bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main
 SSH-порт определяется из текущего подключения; при необходимости укажите его
 явно: `OMEGA_SSH_PORT=2222 bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)`.
 
-После установки укажите публичный адрес VPS для генерации кодов подключения.
-Добавьте в `/etc/default/omega-server` строку ниже, заменив `203.0.113.1`
-на IP или домен своего сервера, затем перезапустите службу:
+После первой установки консоль покажет:
 
-```ini
-OMEGA_CLIENT_SERVER=203.0.113.1:443
+```text
+Admin URL: https://<IP_СЕРВЕРА>:8443
+Login: <сгенерированный логин>
+Password: <сгенерированный пароль>
 ```
 
+Откройте ссылку с ПК или телефона и войдите. Разрешите **8443/TCP** также в
+сетевом экране хостинга. Для IP создаётся собственный HTTPS-сертификат:
+при первом открытии браузер попросит подтвердить его. SHA-256 fingerprint
+сертификата выводится в консоль, чтобы его можно было сверить в браузере.
+
+В блоке **«Доступ к админке → Изменить логин или пароль»** можно изменить данные
+входа, указав текущий пароль. После изменения все сессии завершаются.
+Пароль хранится только как солёный PBKDF2-SHA256 хеш; исходный пароль выводится
+один раз при создании. Повторная установка сохраняет ваши данные входа.
+При автодеплое первоначальные данные сохраняются в защищённом файле
+`/opt/omega/state/admin-bootstrap.json` (доступен только root), без вывода пароля
+в GitHub Actions. Установщик покажет их и удалит файл; смена пароля тоже удаляет его.
+
+IP определяется из настроенного адреса клиента, SSH-подключения или внешнего
+сервиса определения IP. При необходимости укажите его явно:
+
 ```bash
+OMEGA_PUBLIC_HOST=203.0.113.1 bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)
+```
+
+Замените `203.0.113.1` на IP VPS. Порт админки можно задать через
+`OMEGA_ADMIN_HTTPS_PORT=8443`. Адрес для кодов подключения
+`OMEGA_CLIENT_SERVER` настраивается автоматически, если ещё не был задан.
+Создайте пользователя и устройство в админке, затем скопируйте код в клиент.
+
+Если забыли пароль, выполните от root на сервере:
+
+```bash
+cd /opt/omega
+./omega-server admin reset_web
 systemctl restart omega-server
 ```
 
-Если строка уже существует, измените её. Без этой настройки коды подключения
-будут содержать placeholder `<SERVER_IP>`.
+Команда покажет новые логин и пароль. В обновлённой версии публичная админка работает
+только через HTTPS; все страницы и API требуют входа, действия защищены CSRF-токеном.
 
-Админка новой установки слушает `127.0.0.1:8081`. Откройте SSH-туннель на своём ПК:
-
-```bash
-ssh -N -L 8081:127.0.0.1:8081 root@<server_ip>
-```
-
-Для нестандартного SSH-порта добавьте `-p 2222`.
-Затем откройте `http://127.0.0.1:8081`, создайте пользователя и устройство,
-скопируйте код подключения в клиент. У админки пока нет авторизации, поэтому
-её следует использовать через SSH-туннель. При обновлении существующая
-конфигурация доступа к админке сохраняется.
+Сертификат проверяется ежедневно таймером `omega-admin-tls-renew.timer` и перед
+каждым стартом сервера. Когда до истечения остаётся меньше 30 дней, он заменяется
+на новый и служба перезапускается. Таймер с `Persistent=true` проверяет сертификат
+после простоя. Всё устанавливается и при `install.sh`, и при серверном деплое.
+После замены собственного сертификата браузер может запросить подтверждение снова.
 
 Состояние и логи:
 
 ```bash
 systemctl status omega-server
 journalctl -u omega-server -f
+systemctl list-timers omega-admin-tls-renew.timer
 ```
 
 ## Что уже есть в проекте
@@ -138,6 +162,7 @@ cargo run -p omega-server -- admin register_device \
 ### 3. Запустить сервер
 
 ```bash
+cargo run -p omega-server -- admin init_web
 cargo run -p omega-server
 ```
 
@@ -165,11 +190,12 @@ powershell -ExecutionPolicy Bypass -File omega-client-app/package-windows-client
 Артефакты:
 
 - `omega-client-app/artifacts/windows-client/portable/OmegaVPN` - portable-папка для тестов.
-- `omega-client-app/artifacts/windows-client/installer` - setup package с `Omega.Client.Setup.exe` и `payload/`.
+- `omega-client-app/artifacts/windows-client/OmegaVPN-windows-x64-setup.exe` - автономный установщик одним файлом.
+- `omega-client-app/artifacts/windows-client/installer/Omega.Client.Setup.exe` - тот же установщик для локального bootstrap-скрипта.
 
-Для ручного прикрепления к релизу упакуйте **всё содержимое** `installer`
-в `OmegaVPN-windows-x64-setup.zip`. Отдельный `Omega.Client.Setup.exe`
-не является автономным установщиком.
+Для прикрепления к релизу используйте `OmegaVPN-windows-x64-setup.exe`:
+клиент, Wintun и .NET runtime встроены в него. При установке содержимое
+распаковывается во временный каталог, после установки временные файлы удаляются.
 Android APK после `cd omega-android && ./gradlew :app:assembleDebug` находится
 в `omega-android/app/build/outputs/apk/debug/app-debug.apk`.
 Старый `omega-android/omega-vpn-reality-debug.apk` — сохранённая ранее сборка;

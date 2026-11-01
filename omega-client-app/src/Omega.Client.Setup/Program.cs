@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Principal;
 using System.Text;
+using System.Reflection;
 using Omega.Client.App.Core;
 
 Console.OutputEncoding = Encoding.UTF8;
@@ -24,6 +25,9 @@ SetupFailureReporter.Trace(
 
 if (string.Equals(command, "diagnostics", StringComparison.OrdinalIgnoreCase))
 {
+    using var payload = OpenPayload();
+    var fileCount = InstallerPayloadArchive.Validate(payload);
+    Console.WriteLine($"Embedded installer payload OK: {fileCount} entries.");
     Console.WriteLine($"Omega VPN setup diagnostics OK. Elevated={isAdministrator}; BaseDir={AppContext.BaseDirectory}");
     return;
 }
@@ -60,12 +64,8 @@ catch (Exception ex)
 
 static void Install(string installDir, bool autostart)
 {
-    var baseDir = AppContext.BaseDirectory;
-    var payloadDir = Path.Combine(baseDir, "payload");
-    if (!Directory.Exists(payloadDir))
-    {
-        throw new DirectoryNotFoundException($"Payload directory not found: {payloadDir}");
-    }
+    using var extracted = ExtractPayload();
+    var payloadDir = extracted.Path;
 
     var bundledConfig = Directory
         .EnumerateFiles(payloadDir, "app-config*.json", SearchOption.AllDirectories)
@@ -91,6 +91,35 @@ static void Install(string installDir, bool autostart)
     ConfigureAutostart(appPath, enabled: autostart);
 
     Console.WriteLine("Omega VPN installed.");
+}
+
+static Stream OpenPayload() => Assembly.GetExecutingAssembly()
+    .GetManifestResourceStream("Omega.Client.Setup.payload.zip")
+    ?? throw new InvalidDataException("Embedded installer payload is missing. Rebuild with package-windows-client.ps1.");
+
+static TemporaryPayload ExtractPayload()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "OmegaVPN-setup-" + Guid.NewGuid().ToString("N"));
+    var security = new System.Security.AccessControl.DirectorySecurity();
+    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+    foreach (var sid in new[] { WellKnownSidType.BuiltinAdministratorsSid, WellKnownSidType.LocalSystemSid })
+        security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+            new SecurityIdentifier(sid, null), System.Security.AccessControl.FileSystemRights.FullControl,
+            System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+            System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+    System.IO.FileSystemAclExtensions.Create(new DirectoryInfo(directory), security);
+    var payload = new TemporaryPayload(directory);
+    try
+    {
+        using var stream = OpenPayload();
+        InstallerPayloadArchive.Extract(stream, directory);
+        return payload;
+    }
+    catch
+    {
+        payload.Dispose();
+        throw;
+    }
 }
 
 static void Uninstall(string installDir)

@@ -17,12 +17,20 @@ if ([string]::IsNullOrWhiteSpace($ArtifactsRoot)) {
 $PortableRoot = Join-Path $ArtifactsRoot "portable\OmegaVPN"
 $PortableBuildRoot = Join-Path $ArtifactsRoot (".portable-build-" + [Guid]::NewGuid().ToString("N"))
 $InstallerRoot = Join-Path $ArtifactsRoot "installer"
-$PayloadRoot = Join-Path $InstallerRoot "payload"
+$PayloadRoot = Join-Path $ArtifactsRoot "payload-build"
+$PayloadArchive = Join-Path $ArtifactsRoot "payload.zip"
+$StandaloneSetup = Join-Path $ArtifactsRoot "OmegaVPN-windows-x64-setup.exe"
 $DotnetHome = Join-Path $RepoRoot ".dotnet-home"
 $UserProfile = Join-Path $DotnetHome "userprofile"
 
 function Remove-BuildDirectory {
     param([string]$Path)
+
+    $resolvedBuildPath = [IO.Path]::GetFullPath($Path)
+    $resolvedArtifactsRoot = [IO.Path]::GetFullPath($ArtifactsRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedBuildPath.StartsWith($resolvedArtifactsRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Build cleanup target is outside the artifacts directory: $resolvedBuildPath"
+    }
 
     if (-not (Test-Path -LiteralPath $Path)) {
         return
@@ -114,7 +122,7 @@ if (-not (Test-Path $Wintun)) {
 
 $AppPublish = Join-Path $ArtifactsRoot "publish-app"
 $SetupPublish = Join-Path $ArtifactsRoot "publish-setup"
-foreach ($path in @($AppPublish, $SetupPublish, $InstallerRoot)) {
+foreach ($path in @($AppPublish, $SetupPublish, $InstallerRoot, $PayloadRoot)) {
     Remove-BuildDirectory $path
 }
 New-Item -ItemType Directory -Force $PortableBuildRoot, $InstallerRoot, $PayloadRoot | Out-Null
@@ -128,16 +136,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "dotnet publish Omega.Client.App failed with exit code $LASTEXITCODE"
 }
 
-dotnet publish (Join-Path $AppRoot "src\Omega.Client.Setup\Omega.Client.Setup.csproj") `
-    -c $Configuration `
-    -r win-x64 `
-    --self-contained true `
-    -o $SetupPublish
-if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish Omega.Client.Setup failed with exit code $LASTEXITCODE"
-}
-
-foreach ($publishDir in @($AppPublish, $SetupPublish)) {
+foreach ($publishDir in @($AppPublish)) {
     foreach ($runtimeFile in @("hostfxr.dll", "hostpolicy.dll", "coreclr.dll")) {
         if (-not (Test-Path (Join-Path $publishDir $runtimeFile))) {
             throw "Self-contained publish is missing $runtimeFile in $publishDir"
@@ -174,7 +173,23 @@ $BundledConfigs = @(Get-ChildItem -Path $PayloadRoot -Recurse -File -Filter "app
 if ($BundledConfigs.Count -gt 0) {
     throw "Unsafe installer payload: user app-config.json must never be bundled."
 }
-Copy-Item -Recurse -Force (Join-Path $SetupPublish "*") $InstallerRoot
+if (Test-Path -LiteralPath $PayloadArchive) { Remove-Item -LiteralPath $PayloadArchive -Force }
+Compress-Archive -Path (Join-Path $PayloadRoot "*") -DestinationPath $PayloadArchive
+
+dotnet publish (Join-Path $AppRoot "src\Omega.Client.Setup\Omega.Client.Setup.csproj") `
+    -c $Configuration `
+    -r win-x64 `
+    --self-contained true `
+    "-p:OmegaPayloadArchive=$PayloadArchive" `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -o $SetupPublish
+if ($LASTEXITCODE -ne 0) {
+    throw "dotnet publish Omega.Client.Setup failed with exit code $LASTEXITCODE"
+}
+$PublishedSetup = Join-Path $SetupPublish "Omega.Client.Setup.exe"
+Copy-Item -LiteralPath $PublishedSetup -Destination (Join-Path $InstallerRoot "Omega.Client.Setup.exe") -Force
+Copy-Item -LiteralPath $PublishedSetup -Destination $StandaloneSetup -Force
 
     $PortableOutput = $PortableRoot
     try {
@@ -188,6 +203,7 @@ Copy-Item -Recurse -Force (Join-Path $SetupPublish "*") $InstallerRoot
 
     Write-Host "Portable: $PortableOutput"
     Write-Host "Installer: $InstallerRoot"
+    Write-Host "Single-file installer: $StandaloneSetup"
 } finally {
     foreach ($name in $EnvironmentVariableNames) {
         [Environment]::SetEnvironmentVariable(

@@ -14,6 +14,10 @@ on:
       - "deploy/update_server.sh"
       - "deploy/diagnose_server.sh"
       - "deploy/omega-server.service"
+      - "deploy/setup_admin.sh"
+      - "deploy/renew_admin_tls.sh"
+      - "deploy/omega-admin-tls-renew.service"
+      - "deploy/omega-admin-tls-renew.timer"
       - ".github/workflows/deploy-server.yml"
   workflow_dispatch:
 
@@ -23,7 +27,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -46,6 +50,7 @@ jobs:
           cp deploy/update_server.sh dist/update_server.sh
           cp deploy/diagnose_server.sh dist/diagnose_server.sh
           cp deploy/omega-server.service dist/omega-server.service
+          cp deploy/setup_admin.sh deploy/renew_admin_tls.sh deploy/omega-admin-tls-renew.service deploy/omega-admin-tls-renew.timer dist/
           chmod +x dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh
 
       - name: Setup SSH key
@@ -147,7 +152,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" "mkdir -p '$REMOTE_DIR'"
-          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh dist/omega-server.service "$USER@$HOST:$REMOTE_DIR/"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -P "$PORT" dist/* "$USER@$HOST:$REMOTE_DIR/"
 
       - name: Deploy on server
         env:
@@ -164,7 +169,8 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
-            "chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
+            "sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y openssl python3 curl util-linux && \
+             chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
              sudo env \
                OMEGA_SERVICE_NAME='${DEPLOY_SERVICE_NAME:-omega-server}' \
                OMEGA_INSTALL_DIR='${DEPLOY_INSTALL_DIR:-/opt/omega}' \
@@ -202,7 +208,7 @@ jobs:
           TCP_PORT="$(printf '%s' "${DEPLOY_TCP_PORT_VALUE:-$VPN_PORT}" | tr -d '\r\n\t ')"
           VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
-          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
+          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8443}" | tr -d '\r\n\t ')"
           METRICS_PUBLIC="$(printf '%s' "${DEPLOY_METRICS_PUBLIC_VALUE:-0}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
@@ -253,7 +259,7 @@ jobs:
           TCP_PORT="$(printf '%s' "${DEPLOY_TCP_PORT_VALUE:-$VPN_PORT}" | tr -d '\r\n\t ')"
           VPN_IPV6_MODE="$(printf '%s' "${DEPLOY_VPN_IPV6_MODE_VALUE:-nat66}" | tr -d '\r\n\t ' | tr '[:upper:]' '[:lower:]')"
           ADMIN_WEB_PUBLIC="$(printf '%s' "${DEPLOY_ADMIN_WEB_PUBLIC_VALUE:-1}" | tr -d '\r\n\t ')"
-          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8081}" | tr -d '\r\n\t ')"
+          ADMIN_WEB_PORT="$(printf '%s' "${DEPLOY_ADMIN_WEB_PORT_VALUE:-8443}" | tr -d '\r\n\t ')"
           METRICS_PUBLIC="$(printf '%s' "${DEPLOY_METRICS_PUBLIC_VALUE:-0}" | tr -d '\r\n\t ')"
           METRICS_PORT="$(printf '%s' "${DEPLOY_METRICS_PORT_VALUE:-9090}" | tr -d '\r\n\t ')"
 
@@ -290,7 +296,7 @@ jobs:
           fi
 
           if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
+            ADMIN_WEB_PORT="8443"
           fi
 
           if [ -z "$METRICS_PUBLIC" ]; then

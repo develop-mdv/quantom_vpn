@@ -57,7 +57,7 @@ on:
       admin_web_port:
         description: Built-in admin web TCP port.
         required: true
-        default: "8081"
+        default: "8443"
         type: string
       metrics_public:
         description: Expose Prometheus metrics publicly.
@@ -238,7 +238,7 @@ jobs:
           fi
 
           if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
+            ADMIN_WEB_PORT="8443"
           fi
 
           if [ -z "$ADMIN_WEB_PUBLIC" ]; then
@@ -362,7 +362,7 @@ jobs:
           fi
 
           if [ -z "$ADMIN_WEB_PORT" ]; then
-            ADMIN_WEB_PORT="8081"
+            ADMIN_WEB_PORT="8443"
           fi
 
           if [ -z "$METRICS_PUBLIC" ]; then

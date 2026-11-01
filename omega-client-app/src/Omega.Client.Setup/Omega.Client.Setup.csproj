@@ -1,13 +1,21 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <Version>0.1.0</Version>
     <TargetFramework>net9.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationIcon>..\Omega.Client.App\Assets\omega-vpn.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Omega.Client.App.Core\Omega.Client.App.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(OmegaPayloadArchive)' != ''">
+    <EmbeddedResource Include="$(OmegaPayloadArchive)" LogicalName="Omega.Client.Setup.payload.zip" />
   </ItemGroup>
 </Project>

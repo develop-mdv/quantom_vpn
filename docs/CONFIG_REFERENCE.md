@@ -89,6 +89,11 @@
 | `OMEGA_ADMIN_WEB_PUBLIC` | `false` | Если `OMEGA_ADMIN_WEB_BIND` не задан явно, переводит built-in admin на публичный bind с портом из `OMEGA_ADMIN_WEB_PORT` или default `8081`. |
 | `OMEGA_ADMIN_WEB_PORT` | `8081` | Порт для implicit public admin bind. |
 | `OMEGA_ADMIN_WEB_DISABLE` | `false` | Полностью отключает web admin. |
+| `OMEGA_ADMIN_AUTH_DB` | рядом с identity DB, `admin-auth.json` | Логин, соль и PBKDF2-SHA256 хеш пароля администратора. Инициализация: `admin init_web`; сброс: `admin reset_web` и restart. |
+| `OMEGA_ADMIN_TLS_CERT` | не задан | DER-сертификат для встроенного HTTPS. Обязателен вместе с ключом для публичного bind. |
+| `OMEGA_ADMIN_TLS_KEY` | не задан | DER private key для HTTPS. Файл должен быть доступен только владельцу службы. |
+| `OMEGA_PUBLIC_HOST` | auto | IP VPS для `install.sh`: сертификат, ссылка админки, начальный адрес клиента. |
+| `OMEGA_ADMIN_HTTPS_PORT` | `8443` | Публичный HTTPS-порт админки при установке. |
 | `OMEGA_CLIENT_SERVER` | не задан | Только UI hint: какой `OMEGA_SERVER` показывать в web admin для клиента. |
 
 ### State и identity
@@ -150,7 +155,7 @@
 - Для split tunnel недостаточно только `OMEGA_TUNNEL_MODE=split`; нужны валидные `OMEGA_SPLIT_ROUTES`, `OMEGA_SPLIT_ROUTES_V6` или обе переменные сразу.
 - Для полноценного inner IPv6 нужно согласованно включать `OMEGA_IPV6_MODE=nat66` на сервере и `OMEGA_IPV6_POLICY=tunnel` на клиенте. Перед этим проверьте, что VPS имеет IPv6 egress: `ip -6 route get 2606:4700:4700::1111`. Если маршрута нет, оставьте `OMEGA_IPV6_MODE=disabled`.
 - Для TCP fallback нужно включить серверный listener (`OMEGA_TCP_ENABLE=1`, `OMEGA_TCP_BIND=[::]:443`), открыть порт через `setup_nat.sh`, а на клиенте выбрать `OMEGA_TRANSPORT=tcp` или `auto`. Если TCP `443` уже занят nginx/xray/другим сервисом, не включайте Omega TCP fallback на этом же endpoint.
-- Built-in web admin сейчас plain HTTP. Для публичного варианта используйте `http://<SERVER_IP>:8081/`, не `https://`.
+- Встроенная публичная админка требует HTTPS и вход. `install.sh` создаёт сертификат для IP и публикует `https://<SERVER_IP>:8443/`. Без TLS разрешён только localhost для разработки. Все сессии завершаются при смене учётных данных или рестарте.
 - `OMEGA_PROFILE=gaming` теперь по умолчанию выбирает `OMEGA_MORPHING=off`, чтобы не тратить throughput на padding и лишнюю избыточность.
 - Если `OMEGA_MORPHING=off`, latency и throughput обычно становятся лучше, но traffic cover будет слабее.
 - `OMEGA_ALLOW_LEGACY_V1` не стоит считать полноценной backward compatibility feature.

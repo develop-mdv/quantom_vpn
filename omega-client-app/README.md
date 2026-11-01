@@ -121,22 +121,21 @@ If `dotnet` is still not recognized after installation, check that
 ## Outputs
 
 - `omega-client-app/artifacts/windows-client/portable/OmegaVPN`
-- `omega-client-app/artifacts/windows-client/installer`
+- `omega-client-app/artifacts/windows-client/OmegaVPN-windows-x64-setup.exe`
+- `omega-client-app/artifacts/windows-client/installer/Omega.Client.Setup.exe` (the same standalone installer for the bootstrap script)
 
-The portable folder is for testing. The installer folder contains
-`Omega.Client.Setup.exe` and `payload/`; run the setup executable as
-administrator to install into `%ProgramFiles%\Omega VPN`.
+The portable folder is for testing. Download and run the single installer EXE.
+It contains the client payload, Wintun and the .NET runtime, requests UAC,
+extracts into a temporary directory, installs into `%ProgramFiles%\Omega VPN`,
+then removes its temporary payload. No adjacent DLLs or payload folder are needed.
 
 ## Install on a New Windows PC
 
 Use the installer package for a normal user machine:
 
-1. Build or download the `omega-client-app/artifacts/windows-client/installer`
-   folder.
-2. Copy the whole `installer` folder to the new PC. Keep
-   `Omega.Client.Setup.exe` and `payload/` next to each other; the setup
-   executable copies files from `payload/`.
-3. Run `Omega.Client.Setup.exe`. It asks for administrator approval when
+1. Build or download `OmegaVPN-windows-x64-setup.exe`.
+2. Copy that single EXE to the new PC.
+3. Run it. It asks for administrator approval when
    needed, installs Omega VPN into `%ProgramFiles%\Omega VPN`, creates Desktop
    and Start menu shortcuts, and enables elevated autostart through Windows
    Task Scheduler.
@@ -145,7 +144,7 @@ Use the installer package for a normal user machine:
    `omega://connect/...` link or pasted `OMEGA_*` environment text. After it is
    saved, the profile is available from the profile list.
 
-To update, run `Omega.Client.Setup.exe` from the new installer folder. Setup
+To update, run the new installer EXE. Setup
 asks a running client to disconnect gracefully, stages the new version, swaps
 the program directory, and keeps the profiles in `%LocalAppData%` unchanged.
 If Windows denies renaming the existing `Program Files` directory, setup falls

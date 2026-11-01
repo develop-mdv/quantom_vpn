@@ -20,7 +20,7 @@ Environment:
   OMEGA_VPN_IPV6_MODE          disabled or nat66 (default: disabled)
   OMEGA_SSH_PORT               SSH port to preserve (default: 22)
   OMEGA_ADMIN_WEB_PUBLIC       1/0, expose built-in admin UI publicly (default: 0)
-  OMEGA_ADMIN_WEB_PORT         built-in admin UI TCP port (default: 8081)
+  OMEGA_ADMIN_WEB_PORT         built-in admin UI TCP port (default: 8443)
   OMEGA_METRICS_PUBLIC         1/0, expose Prometheus metrics publicly (default: 0)
   OMEGA_METRICS_PORT           Prometheus metrics TCP port (default: 9090)
   OMEGA_RMEM_MAX               net.core.rmem_max value (default: 8388608)
@@ -55,7 +55,7 @@ TCP_PORT="${OMEGA_TCP_PORT:-$VPN_PORT}"
 VPN_IPV6_MODE="${OMEGA_VPN_IPV6_MODE:-${OMEGA_IPV6_MODE:-disabled}}"
 SSH_PORT="${OMEGA_SSH_PORT:-22}"
 ADMIN_WEB_PUBLIC="${OMEGA_ADMIN_WEB_PUBLIC:-0}"
-ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8081}"
+ADMIN_WEB_PORT="${OMEGA_ADMIN_WEB_PORT:-8443}"
 METRICS_PUBLIC="${OMEGA_METRICS_PUBLIC:-0}"
 METRICS_PORT="${OMEGA_METRICS_PORT:-9090}"
 RMEM_MAX="${OMEGA_RMEM_MAX:-8388608}"

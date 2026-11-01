@@ -12,7 +12,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main
 
 Конкретная версия: добавьте тег после команды, например `v0.1.0`.
 Скрипт скачивает готовый бинарник, проверяет SHA-256, настраивает NAT и systemd.
-VPN использует 443/UDP и 443/TCP; админка доступна через SSH-туннель.
+VPN использует 443/UDP и 443/TCP; админка доступна по HTTPS на 8443/TCP.
+При первой установке выводятся ссылка, случайный логин и пароль.
+Браузер попросит подтвердить автоматически созданный сертификат для IP.
 Полные инструкции, доступ к админке и обновление — в [README](README.md#быстрый-старт-установка-сервера).
 Следующие разделы описывают ручное развёртывание из исходников.
 
@@ -175,7 +177,9 @@ OMEGA_DEVICE_NAME="laptop" \
 
 Переменные окружения:
 - `OMEGA_ADMIN_WEB_BIND` (по умолчанию `127.0.0.1:8081`)
-- `OMEGA_ADMIN_WEB_PUBLIC=1` и `OMEGA_ADMIN_WEB_PORT=8081`, если админку нужно открыть наружу
+- `OMEGA_ADMIN_WEB_PUBLIC=1` и `OMEGA_ADMIN_WEB_PORT=8443` для публичной HTTPS-админки
+- `OMEGA_ADMIN_TLS_CERT` и `OMEGA_ADMIN_TLS_KEY` — DER-сертификат и ключ, создаваемые `install.sh`
+- `OMEGA_ADMIN_AUTH_DB` — файл с логином и хешем пароля администратора
 - `OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443`, чтобы UI генерировал правильные `omega://connect/...` коды
 - `OMEGA_ADMIN_WEB_DISABLE=1` для полного отключения
 
@@ -185,15 +189,16 @@ OMEGA_DEVICE_NAME="laptop" \
 OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 /opt/omega/omega-server
 ```
 
-Встроенная админка сейчас работает по plain HTTP, не HTTPS. Если она опубликована
-наружу, открывайте ее явно как:
+Для публичного доступа выполните `install.sh`: он создаст сертификат и учётные
+данные и покажет их в консоли. Адрес после установки:
 
 ```text
-http://<SERVER_IP>:8081/
+https://<SERVER_IP>:8443/
 ```
 
-Если открыть `https://<SERVER_IP>:8081/`, сервер получит TLS ClientHello вместо
-HTTP-запроса и запишет `malformed HTTP request`.
+Для IP браузер попросит подтвердить сертификат; сверяйте его fingerprint с консолью.
+Все страницы и API требуют входа. Логин и пароль меняются в блоке «Доступ к админке».
+Для ручного запуска на localhost сначала выполните `omega-server admin init_web`.
 
 Для production override-ов используйте `/etc/default/omega-server`, а не правку
 unit-файла:
@@ -203,9 +208,11 @@ unit-файла:
 OMEGA_TOKEN_PEPPER=<long-random-secret>
 OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
 
-# Public plain-HTTP admin.
+# Public HTTPS admin (run install.sh to generate these files).
 OMEGA_ADMIN_WEB_PUBLIC=1
-OMEGA_ADMIN_WEB_PORT=8081
+OMEGA_ADMIN_WEB_PORT=8443
+OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/cert.der
+OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/key.der
 
 # Если у VPS нет IPv6 egress, не включайте nat66.
 OMEGA_IPV6_MODE=disabled
@@ -221,14 +228,14 @@ sudo OMEGA_VPN_PORT=443 \
   OMEGA_TCP_ENABLE=0 \
   OMEGA_VPN_IPV6_MODE=disabled \
   OMEGA_ADMIN_WEB_PUBLIC=1 \
-  OMEGA_ADMIN_WEB_PORT=8081 \
+  OMEGA_ADMIN_WEB_PORT=8443 \
   bash deploy/setup_nat.sh
 
 sudo OMEGA_VPN_PORT=443 \
   OMEGA_TCP_ENABLE=0 \
   OMEGA_VPN_IPV6_MODE=disabled \
   OMEGA_ADMIN_WEB_PUBLIC=1 \
-  OMEGA_ADMIN_WEB_PORT=8081 \
+  OMEGA_ADMIN_WEB_PORT=8443 \
   bash deploy/diagnose_server.sh
 ```
 
@@ -244,9 +251,8 @@ ip -6 route get 2606:4700:4700::1111
 если TCP `443` уже занимает, например, `xray`, включать Omega TCP fallback на
 `[::]:443` нельзя.
 
-Если админка содержит реальные пользовательские токены, безопаснее держать bind
-только на localhost и публиковать доступ через защищенный reverse proxy
-(mTLS/VPN/SSH tunnel) или хотя бы ограничить `8081` по IP в firewall/security group.
+Публичный HTTP bind без TLS запрещён. При обновлении с 0.1.0 запустите новый
+`install.sh`, чтобы включить HTTPS и получить данные входа; VPN-профили сохраняются.
 ## Автодеплой при push (GitHub Actions)
 
 В репозитории добавлен workflow: `.github/workflows/deploy-server.yml`.

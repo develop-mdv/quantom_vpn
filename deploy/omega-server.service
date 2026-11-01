@@ -9,6 +9,7 @@ User=root
 # Adjust path as necessary
 WorkingDirectory=/opt/omega
 ExecStart=/opt/omega/omega-server
+ExecStartPre=/opt/omega/renew_admin_tls.sh --before-start
 Environment=RUST_LOG=info
 Environment=OMEGA_BIND=[::]:443
 Environment=OMEGA_TCP_ENABLE=1
@@ -17,7 +18,10 @@ Environment=OMEGA_PROFILE=gaming
 Environment=OMEGA_TUN_MTU=1380
 Environment=OMEGA_IPV6_MODE=nat66
 Environment=OMEGA_ADMIN_WEB_PUBLIC=1
-Environment=OMEGA_ADMIN_WEB_PORT=8081
+Environment=OMEGA_ADMIN_WEB_PORT=8443
+Environment=OMEGA_ADMIN_AUTH_DB=/opt/omega/state/admin-auth.json
+Environment=OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/cert.der
+Environment=OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/key.der
 Environment=OMEGA_UDP_RCVBUF=8388608
 Environment=OMEGA_UDP_SNDBUF=8388608
 Environment=OMEGA_IDENTITY_DB=/opt/omega/state/identity.json
@@ -26,7 +30,8 @@ Environment=OMEGA_RUNTIME_SNAPSHOT=/opt/omega/state/runtime.json
 Environment=OMEGA_ADMIN_COMMANDS=/opt/omega/state/admin_commands.ndjson
 
 # REALITY masquerade is configured at runtime through the admin web UI
-# (http://<server>:8081). The server reads state/reality_config.json and
+# (https://<server>:8443). Run install.sh once to initialize credentials/TLS.
+# The server reads state/reality_config.json and
 # state/reality_x25519.key on every change. Legacy `OMEGA_REALITY_*` env
 # vars are still honoured for first-boot bootstrap when the JSON file does
 # not yet exist; after that point the admin UI is the source of truth.

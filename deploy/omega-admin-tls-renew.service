@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Omega VPN admin HTTPS certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/default/omega-server
+ExecStart=/opt/omega/renew_admin_tls.sh
