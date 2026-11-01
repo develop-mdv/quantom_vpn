@@ -16,6 +16,7 @@ on:
       - "deploy/omega-server.service"
       - "deploy/setup_admin.sh"
       - "deploy/renew_admin_tls.sh"
+      - "deploy/check_admin_https.py"
       - "deploy/omega-admin-tls-renew.service"
       - "deploy/omega-admin-tls-renew.timer"
       - ".github/workflows/deploy-server.yml"
@@ -51,6 +52,7 @@ jobs:
           cp deploy/diagnose_server.sh dist/diagnose_server.sh
           cp deploy/omega-server.service dist/omega-server.service
           cp deploy/setup_admin.sh deploy/renew_admin_tls.sh deploy/omega-admin-tls-renew.service deploy/omega-admin-tls-renew.timer dist/
+          cp deploy/check_admin_https.py dist/
           chmod +x dist/omega-server dist/setup_nat.sh dist/update_server.sh dist/diagnose_server.sh
 
       - name: Setup SSH key
@@ -349,3 +351,6 @@ jobs:
                OMEGA_METRICS_PUBLIC='$METRICS_PUBLIC' \
                OMEGA_METRICS_PORT='$METRICS_PORT' \
                '$REMOTE_DIR/diagnose_server.sh'"
+
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
+            "sudo python3 '$REMOTE_DIR/check_admin_https.py'"
