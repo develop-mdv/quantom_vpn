@@ -45,6 +45,21 @@ bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main
 SSH-порт определяется из текущего подключения; при необходимости укажите его
 явно: `OMEGA_SSH_PORT=2222 bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main/install.sh)`.
 
+После установки укажите публичный адрес VPS для генерации кодов подключения.
+Добавьте в `/etc/default/omega-server` строку ниже, заменив `203.0.113.1`
+на IP или домен своего сервера, затем перезапустите службу:
+
+```ini
+OMEGA_CLIENT_SERVER=203.0.113.1:443
+```
+
+```bash
+systemctl restart omega-server
+```
+
+Если строка уже существует, измените её. Без этой настройки коды подключения
+будут содержать placeholder `<SERVER_IP>`.
+
 Админка новой установки слушает `127.0.0.1:8081`. Откройте SSH-туннель на своём ПК:
 
 ```bash
