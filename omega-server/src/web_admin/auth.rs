@@ -361,11 +361,14 @@ impl Auth {
         let session = self.session(request);
         let form = parse_form(&request.body);
         let value = |key: &str| form.get(key).cloned().unwrap_or_default();
+        if request.path == "/favicon.ico" && request.method == "GET" {
+            return Ok(Access::Reply(text_response(204, "No Content", "")));
+        }
         if request.path == "/login" && request.method == "GET" {
             if session.is_some() {
                 return Ok(Access::Reply(redirect_response("/")));
             }
-            let token = random_token();
+            let token = login_nonce(cookie(request, self.login_cookie()));
             let message = if request.query.contains_key("updated") {
                 "Данные входа изменены. Войдите снова."
             } else if request.query.contains_key("error") {
@@ -382,11 +385,17 @@ impl Auth {
                 cookie(request, self.login_cookie()).unwrap_or(""),
                 &value("csrf"),
             ) {
-                return Ok(Access::Reply(text_response(
+                let token = login_nonce(cookie(request, self.login_cookie()));
+                let mut response = html_response(
                     403,
                     "Forbidden",
-                    "Обновите страницу входа.",
-                )));
+                    login_page(
+                        &token,
+                        "Страница входа обновлена. Введите логин и пароль ещё раз.",
+                    ),
+                );
+                self.set_cookie(&mut response, self.login_cookie(), &token, 600);
+                return Ok(Access::Reply(response));
             }
             if !self.allow_attempt(peer) {
                 let mut response = text_response(
@@ -473,6 +482,18 @@ impl Auth {
         }
         Ok(Access::Granted(session))
     }
+}
+
+fn login_nonce(existing: Option<&str>) -> String {
+    existing
+        .filter(|token| {
+            token.len() == 43
+                && URL_SAFE_NO_PAD
+                    .decode(token)
+                    .is_ok_and(|bytes| bytes.len() == 32)
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(random_token)
 }
 
 fn login_page(csrf: &str, message: &str) -> String {
@@ -629,6 +650,41 @@ mod tests {
                 &format!("__Host-omega_session={token}")
             ))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn favicon_and_second_tab_do_not_invalidate_login_form() {
+        let (_dir, auth, username, password) = fixture();
+        let page = reply(&auth, request("GET", "/login", "", "")).await;
+        let nonce = page
+            .split("__Host-omega_login=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let cookies = format!("__Host-omega_login={nonce}");
+        let icon = reply(&auth, request("GET", "/favicon.ico", "", &cookies)).await;
+        assert!(icon.starts_with("HTTP/1.1 204"));
+        assert!(!icon.contains("Set-Cookie:"));
+        let second_tab = reply(&auth, request("GET", "/login", "", &cookies)).await;
+        assert!(second_tab.contains(&format!("name=\"csrf\" value=\"{nonce}\"")));
+        let response = reply(
+            &auth,
+            request(
+                "POST",
+                "/login",
+                &format!("csrf={nonce}&username={username}&password={password}"),
+                &cookies,
+            ),
+        )
+        .await;
+        assert!(response.contains("Location: /\r\n"));
+        assert!(response.contains("__Host-omega_session="));
+        let expired = reply(&auth, request("POST", "/login", "csrf=expired", "")).await;
+        assert!(expired.starts_with("HTTP/1.1 403"));
+        assert!(expired.contains("<form method=\"post\" action=\"/login\">"));
+        assert!(expired.contains("Set-Cookie: __Host-omega_login="));
     }
 
     #[tokio::test]
