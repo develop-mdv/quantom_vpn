@@ -14,7 +14,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/develop-mdv/quantom_vpn/main
 Скрипт скачивает готовый бинарник, проверяет SHA-256, настраивает NAT и systemd.
 VPN использует 443/UDP и 443/TCP; админка доступна по HTTPS на 8443/TCP.
 При первой установке выводятся ссылка, случайный логин и пароль.
-Браузер попросит подтвердить автоматически созданный сертификат для IP.
+Установщик получает доверенный сертификат Let’s Encrypt для IP и включает продление каждые четыре часа. Для HTTP-01 должен быть доступен 80/TCP.
 Полные инструкции, доступ к админке и обновление — в [README](README.md#быстрый-старт-установка-сервера).
 Следующие разделы описывают ручное развёртывание из исходников.
 
@@ -178,7 +178,7 @@ OMEGA_DEVICE_NAME="laptop" \
 Переменные окружения:
 - `OMEGA_ADMIN_WEB_BIND` (по умолчанию `127.0.0.1:8081`)
 - `OMEGA_ADMIN_WEB_PUBLIC=1` и `OMEGA_ADMIN_WEB_PORT=8443` для публичной HTTPS-админки
-- `OMEGA_ADMIN_TLS_CERT` и `OMEGA_ADMIN_TLS_KEY` — DER-сертификат и ключ, создаваемые `install.sh`
+- `OMEGA_ADMIN_TLS_CERT` и `OMEGA_ADMIN_TLS_KEY` — полная PEM-цепочка и ключ Let’s Encrypt, устанавливаемые `install.sh`
 - `OMEGA_ADMIN_AUTH_DB` — файл с логином и хешем пароля администратора
 - `OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443`, чтобы UI генерировал правильные `omega://connect/...` коды
 - `OMEGA_ADMIN_WEB_DISABLE=1` для полного отключения
@@ -196,7 +196,7 @@ OMEGA_ADMIN_WEB_BIND=127.0.0.1:8081 /opt/omega/omega-server
 https://<SERVER_IP>:8443/
 ```
 
-Для IP браузер попросит подтвердить сертификат; сверяйте его fingerprint с консолью.
+Для IP используется доверенный сертификат Let’s Encrypt. Оставьте 80/TCP открытым для автоматического продления; самоподписанный режим доступен только явно для тестов.
 Все страницы и API требуют входа. Логин и пароль меняются в блоке «Доступ к админке».
 Для ручного запуска на localhost сначала выполните `omega-server admin init_web`.
 
@@ -211,8 +211,8 @@ OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
 # Public HTTPS admin (run install.sh to generate these files).
 OMEGA_ADMIN_WEB_PUBLIC=1
 OMEGA_ADMIN_WEB_PORT=8443
-OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/cert.der
-OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/key.der
+OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/fullchain.pem
+OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/privkey.pem
 
 # Если у VPS нет IPv6 egress, не включайте nat66.
 OMEGA_IPV6_MODE=disabled

@@ -84,6 +84,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: bash deploy/tests/admin_install_test.sh "target/$TARGET/release/omega-server"
+      - name: Test trusted IP certificate automation
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash deploy/tests/letsencrypt_install_test.sh "target/$TARGET/release/omega-server"
       - name: Package server
         env:
           ARCH: ${{ matrix.arch }}

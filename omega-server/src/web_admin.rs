@@ -8,9 +8,17 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 mod auth;
+mod tls;
 
 pub(crate) fn initialize_credentials(reset: bool) -> anyhow::Result<serde_json::Value> {
     auth::initialize(&auth::credentials_path(), reset)
+}
+
+pub(crate) fn check_tls() -> anyhow::Result<serde_json::Value> {
+    let cert = std::env::var("OMEGA_ADMIN_TLS_CERT").context("Set OMEGA_ADMIN_TLS_CERT")?;
+    let key = std::env::var("OMEGA_ADMIN_TLS_KEY").context("Set OMEGA_ADMIN_TLS_KEY")?;
+    let (_, count) = tls::load(std::path::Path::new(&cert), std::path::Path::new(&key))?;
+    Ok(serde_json::json!({"ok": true, "certificate_chain_length": count}))
 }
 
 use crate::identity::{
@@ -33,24 +41,15 @@ pub async fn run(
     session_manager: Arc<SessionManager>,
     reality: RealityController,
 ) -> anyhow::Result<()> {
-    let tls = match (
+    let mut tls = match (
         std::env::var("OMEGA_ADMIN_TLS_CERT"),
         std::env::var("OMEGA_ADMIN_TLS_KEY"),
     ) {
-        (Ok(cert), Ok(key)) => {
-            let cert = rustls::pki_types::CertificateDer::from(std::fs::read(cert)?);
-            let key = rustls::pki_types::PrivateKeyDer::try_from(std::fs::read(key)?)
-                .map_err(|error| anyhow::anyhow!(error))?;
-            let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(vec![cert], key)?;
-            Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
-        }
+        (Ok(cert), Ok(key)) => Some(tls::Reloader::new(cert.into(), key.into())?),
         (Err(_), Err(_)) => None,
-        _ => anyhow::bail!("Set both OMEGA_ADMIN_TLS_CERT and OMEGA_ADMIN_TLS_KEY (DER files)"),
+        _ => anyhow::bail!(
+            "Set both OMEGA_ADMIN_TLS_CERT and OMEGA_ADMIN_TLS_KEY (PEM or DER files)"
+        ),
     };
     let bind: std::net::SocketAddr = bind_addr.parse()?;
     validate_transport(bind, tls.is_some())?;
@@ -65,11 +64,20 @@ pub async fn run(
     loop {
         let permit = permits.clone().acquire_owned().await?;
         let (stream, peer) = listener.accept().await?;
+        if let Some(tls) = tls.as_mut() {
+            match tls.refresh() {
+                Ok(true) => tracing::info!("admin TLS certificate reloaded"),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "admin TLS reload failed; retaining last valid certificate")
+                }
+            }
+        }
         let identity = identity_store.clone();
         let sessions = session_manager.clone();
         let reality = reality.clone();
         let auth = auth.clone();
-        let tls = tls.clone();
+        let tls = tls.as_ref().map(tls::Reloader::acceptor);
 
         tokio::spawn(async move {
             let _permit = permit;

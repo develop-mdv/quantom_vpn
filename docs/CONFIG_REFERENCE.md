@@ -90,8 +90,13 @@
 | `OMEGA_ADMIN_WEB_PORT` | `8081` | Порт для implicit public admin bind. |
 | `OMEGA_ADMIN_WEB_DISABLE` | `false` | Полностью отключает web admin. |
 | `OMEGA_ADMIN_AUTH_DB` | рядом с identity DB, `admin-auth.json` | Логин, соль и PBKDF2-SHA256 хеш пароля администратора. Инициализация: `admin init_web`; сброс: `admin reset_web` и restart. |
-| `OMEGA_ADMIN_TLS_CERT` | не задан | DER-сертификат для встроенного HTTPS. Обязателен вместе с ключом для публичного bind. |
-| `OMEGA_ADMIN_TLS_KEY` | не задан | DER private key для HTTPS. Файл должен быть доступен только владельцу службы. |
+| `OMEGA_ADMIN_TLS_CERT` | не задан | Полная цепочка PEM или DER-сертификат для встроенного HTTPS. При установке: `state/admin-tls/fullchain.pem`. |
+| `OMEGA_ADMIN_TLS_KEY` | не задан | PEM/DER private key для HTTPS. При установке: `state/admin-tls/privkey.pem`, права 600. |
+| `OMEGA_ADMIN_TLS_MODE` | `letsencrypt` | Получение доверенного IP-сертификата. `self-signed` — явный режим для изолированных тестов. |
+| `OMEGA_ADMIN_TLS_HOT_RELOAD` | `1` при установке | Обновление сертификата без перезапуска VPN. |
+| `OMEGA_CERTBOT_HOME` | `/opt/omega/certbot` | Изолированное окружение Certbot 5.4+. |
+| `OMEGA_ACME_STATE_DIR` | `state/acme` | Аккаунт ACME, сертификаты и логи Certbot. |
+| `OMEGA_ACME_WEBROOT` | не задан | Webroot существующего HTTP-сервера для HTTP-01; иначе Certbot использует свободный TCP 80. |
 | `OMEGA_PUBLIC_HOST` | auto | IP VPS для `install.sh`: сертификат, ссылка админки, начальный адрес клиента. |
 | `OMEGA_ADMIN_HTTPS_PORT` | `8443` | Публичный HTTPS-порт админки при установке. |
 | `OMEGA_CLIENT_SERVER` | не задан | Только UI hint: какой `OMEGA_SERVER` показывать в web admin для клиента. |

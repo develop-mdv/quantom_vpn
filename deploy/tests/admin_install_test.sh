@@ -8,7 +8,7 @@ BINARY="$(realpath "${1:?Pass the built omega-server binary}")"
 TEST_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 touch "$TEST_DIR/server.env"
-export OMEGA_PUBLIC_HOST=203.0.113.10 OMEGA_VPN_PORT=443 OMEGA_TCP_PORT=443
+export OMEGA_PUBLIC_HOST=203.0.113.10 OMEGA_VPN_PORT=443 OMEGA_TCP_PORT=443 OMEGA_ADMIN_TLS_MODE=self-signed
 configure_admin "$TEST_DIR/server.env" "$TEST_DIR/state" "$BINARY" "$TEST_DIR/credentials.json"
 python3 - "$TEST_DIR" <<'PY'
 import json, pathlib, sys

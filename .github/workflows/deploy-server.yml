@@ -194,7 +194,7 @@ jobs:
           REMOTE_DIR="$REMOTE_BASE/$GITHUB_SHA"
 
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -p "$PORT" "$USER@$HOST" \
-            "sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y openssl python3 curl util-linux && \
+            "sudo apt-get update && sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates openssl python3 python3-venv curl util-linux && \
              chmod +x '$REMOTE_DIR/update_server.sh' '$REMOTE_DIR/omega-server' && \
              sudo env \
                OMEGA_SERVICE_NAME='$DEPLOY_SERVICE_NAME_CLEAN' \

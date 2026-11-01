@@ -301,6 +301,10 @@ async fn run_server() -> anyhow::Result<()> {
 }
 
 fn run_admin(args: Vec<String>) -> anyhow::Result<()> {
+    if args.first().is_some_and(|arg| arg == "check_web_tls") {
+        println!("{}", serde_json::to_string(&web_admin::check_tls()?)?);
+        return Ok(());
+    }
     if matches!(
         args.first().map(String::as_str),
         Some("init_web" | "reset_web")
@@ -718,6 +722,7 @@ fn print_admin_usage() {
     println!("omega-server admin commands:");
     println!("  init_web   (generate admin login/password once; JSON output)");
     println!("  reset_web  (reset admin login/password; restart the service afterwards)");
+    println!("  check_web_tls (validate the configured certificate chain and private key)");
     println!("  create_user [--max-devices N] [--max-sessions N]");
     println!("  list_users");
     println!("  block_user --user-id <uuid>");

@@ -170,6 +170,7 @@ render_nft_config() {
     local vpn_input_rule
     local tcp_input_rule=""
     local admin_rule=""
+    local acme_rule=""
     local metrics_rule=""
     local trace_rule=""
     local ipv6_mss_rule=""
@@ -182,6 +183,9 @@ render_nft_config() {
     fi
     if is_enabled "$ADMIN_WEB_PUBLIC"; then
         admin_rule="tcp dport ${ADMIN_WEB_PORT} counter accept"
+        if [[ "${OMEGA_ADMIN_TLS_MODE:-letsencrypt}" == letsencrypt ]]; then
+            acme_rule="tcp dport 80 counter accept"
+        fi
     fi
     if is_enabled "$METRICS_PUBLIC"; then
         metrics_rule="tcp dport ${METRICS_PORT} counter accept"
@@ -218,6 +222,7 @@ table inet ${NFT_INET_TABLE} {
         ${vpn_input_rule}
         ${tcp_input_rule}
         ${admin_rule}
+        ${acme_rule}
         ${metrics_rule}
     }
 

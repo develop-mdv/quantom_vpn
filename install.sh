@@ -17,6 +17,8 @@ Optional environment:
   OMEGA_VPN_IPV6_MODE        disabled (default) or nat66
   OMEGA_PUBLIC_HOST          Public server IP (otherwise detected)
   OMEGA_ADMIN_HTTPS_PORT     Public HTTPS admin port (default: 8443)
+  OMEGA_ADMIN_TLS_MODE       letsencrypt (default) or self-signed for offline testing
+  OMEGA_ACME_WEBROOT         Existing webserver webroot if TCP 80 is already occupied
 
 Installs to /opt/omega, preserves /opt/omega/state and existing settings in
 /etc/default/omega-server. Prints the HTTPS URL and generated admin credentials.
@@ -76,7 +78,7 @@ esac
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl tar coreutils iproute2 nftables kmod openssl python3 util-linux
+apt-get install -y ca-certificates curl tar coreutils iproute2 nftables kmod openssl python3 python3-venv util-linux
 
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf -- "$TEMP_DIR"' EXIT
@@ -112,12 +114,16 @@ write_default_config /etc/default/omega-server
 # must use the same format if they are also used for network setup below.
 requested_public_host="${OMEGA_PUBLIC_HOST:-}"
 requested_admin_port="${OMEGA_ADMIN_HTTPS_PORT:-}"
+requested_tls_mode="${OMEGA_ADMIN_TLS_MODE:-}"
+requested_webroot="${OMEGA_ACME_WEBROOT:-}"
 set -a
 # shellcheck source=/dev/null
 source /etc/default/omega-server
 set +a
 if [[ -n "$requested_public_host" ]]; then export OMEGA_PUBLIC_HOST="$requested_public_host"; fi
 if [[ -n "$requested_admin_port" ]]; then export OMEGA_ADMIN_HTTPS_PORT="$requested_admin_port"; fi
+if [[ -n "$requested_tls_mode" ]]; then export OMEGA_ADMIN_TLS_MODE="$requested_tls_mode"; fi
+if [[ -n "$requested_webroot" ]]; then export OMEGA_ACME_WEBROOT="$requested_webroot"; fi
 export OMEGA_VPN_IPV6_MODE="${OMEGA_IPV6_MODE:-disabled}"
 SSH_CONNECTION_VALUE="${SSH_CONNECTION:-}"
 export OMEGA_SSH_PORT="${OMEGA_SSH_PORT:-${SSH_CONNECTION_VALUE##* }}"
@@ -140,7 +146,11 @@ bash "$TEMP_DIR/setup_nat.sh"
 bash "$TEMP_DIR/update_server.sh" "$TEMP_DIR/omega-server" "$TEMP_DIR/omega-server.service"
 systemctl enable omega-server
 install -m 0755 "$TEMP_DIR/diagnose_server.sh" /opt/omega/diagnose_server.sh
-openssl x509 -inform DER -in /opt/omega/state/admin-tls/cert.der -out "$TEMP_DIR/admin-cert.pem"
+if [[ "$OMEGA_ADMIN_TLS_MODE" == "self-signed" ]]; then
+    openssl x509 -inform DER -in "$ADMIN_CERT_FILE" -out "$TEMP_DIR/admin-cert.pem"
+else
+    cp "$ADMIN_CERT_FILE" "$TEMP_DIR/admin-cert.pem"
+fi
 curl --fail --silent --show-error --noproxy '*' --retry 5 --retry-connrefused --retry-delay 1 \
     --connect-timeout 3 --max-time 15 --cacert "$TEMP_DIR/admin-cert.pem" \
     --connect-to "${ADMIN_URL#https://}:127.0.0.1:$OMEGA_ADMIN_WEB_PORT" \
@@ -163,8 +173,14 @@ else:
 PY
 rm -f -- /opt/omega/state/admin-bootstrap.json
 echo "Certificate SHA-256 fingerprint:"
-openssl x509 -inform DER -in /opt/omega/state/admin-tls/cert.der -noout -fingerprint -sha256
-echo "The certificate is self-signed. Confirm it in your browser on first visit."
+if [[ "$OMEGA_ADMIN_TLS_MODE" == "self-signed" ]]; then
+    openssl x509 -inform DER -in "$ADMIN_CERT_FILE" -noout -fingerprint -sha256
+    echo "Self-signed test certificate: confirm it in the browser on first visit."
+else
+    openssl x509 -in "$ADMIN_CERT_FILE" -noout -issuer -enddate -fingerprint -sha256
+    echo "Trusted Let's Encrypt certificate installed. Automatic renewal runs every four hours."
+    echo "Keep TCP 80 reachable for HTTP-01 renewals."
+fi
 echo "Allow TCP $OMEGA_ADMIN_WEB_PORT in the VPS provider firewall."
 echo "Reset access if needed: cd /opt/omega && ./omega-server admin reset_web && systemctl restart omega-server"
 }

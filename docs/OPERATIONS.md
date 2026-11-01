@@ -141,7 +141,7 @@ https://<SERVER_IP>:8443/
 
 Сначала выполните `install.sh`, чтобы создать учётные данные и HTTPS-сертификат.
 Установщик выведет ссылку, логин и пароль; при повторном запуске пароль сохраняется.
-Сертификат для IP нужно подтвердить в браузере, сверив SHA-256 fingerprint с консолью.
+Для IP устанавливается доверенная полная цепочка Let’s Encrypt. Продление проверяется каждые четыре часа; новый сертификат загружается без перезапуска VPN. Для HTTP-01 оставьте 80/TCP доступным.
 Все страницы и API требуют входа. В блоке «Доступ к админке» можно сменить логин
 и пароль; это завершит все сессии. Для сброса от root:
 `cd /opt/omega && ./omega-server admin reset_web && systemctl restart omega-server`.
@@ -336,8 +336,8 @@ OMEGA_CLIENT_SERVER=<SERVER_IP_OR_DOMAIN>:443
 # Built-in admin HTTPS; initialize through install.sh.
 OMEGA_ADMIN_WEB_PUBLIC=1
 OMEGA_ADMIN_WEB_PORT=8443
-OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/cert.der
-OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/key.der
+OMEGA_ADMIN_TLS_CERT=/opt/omega/state/admin-tls/fullchain.pem
+OMEGA_ADMIN_TLS_KEY=/opt/omega/state/admin-tls/privkey.pem
 
 # Если у VPS нет IPv6 egress, оставьте IPv4-only.
 OMEGA_IPV6_MODE=disabled
